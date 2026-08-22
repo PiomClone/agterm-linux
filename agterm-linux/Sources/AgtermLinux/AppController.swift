@@ -973,7 +973,7 @@ final class AppController {
         toolbarview.agterm-sidebar-column > .top-bar,
         toolbarview.agterm-sidebar-column > .bottom-bar { background-color: \(sidebarBg); color: \(fg); }
         paned.agterm-sidebar-split > separator {
-            min-width: 1px; padding: 0 4px; background-color: alpha(\(fg), 0.18); background-clip: content-box; box-shadow: none;
+            min-width: 1px; padding: 0; background-color: transparent; box-shadow: none;
         }
         """
         if Self.sidebarThemeProvider == nil {
