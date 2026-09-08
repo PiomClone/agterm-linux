@@ -70,11 +70,23 @@ let onEmptyWindowKeyPressed: @MainActor @convention(c)
     }
 }
 
+/// A restore that drops a dangling selected id leaves `activeSession == nil` over live sessions, so
+/// `onEmptyWindowKeyPressed` can start a cycle with no surface focused and no surface release to end it.
+let onEmptyWindowKeyReleased: @MainActor @convention(c)
+    (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> Void = { controller, keyval, keycode, _, _ in
+        guard ModifierKeyMods.modifierBit(forKeyval: keyval) == ModifierKeyMods.controlBit else { return }
+        MainActor.assumeIsolated {
+            controllerForEventController(controller)?.scheduleSessionSwitchCommit(releasing: keycode)
+        }
+}
+
 @MainActor
 func installEmptyWindowKeyController(on window: OpaquePointer?) {
     let keys = gtk_event_controller_key_new()
     connect(keys, "key-pressed", unsafeBitCast(onEmptyWindowKeyPressed as @convention(c)
         (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> gboolean, to: GCallback.self))
+    connect(keys, "key-released", unsafeBitCast(onEmptyWindowKeyReleased as @convention(c)
+        (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> Void, to: GCallback.self))
     gtk_widget_add_controller(W(window), keys)
 }
 
@@ -120,7 +132,9 @@ let onDeckOverlayChildPosition: @MainActor @convention(c)
             let headerHeight = controller.contentHeader.map { gtk_widget_get_visible(W($0)) != 0 ? gtk_widget_get_height(W($0)) : 0 } ?? 0
             let card = LinuxQuickCardPolicy.cardAllocation(overlayWidth: gtk_widget_get_width(W(overlay)),
                                                            overlayHeight: gtk_widget_get_height(W(overlay)),
-                                                           headerHeight: headerHeight)
+                                                           headerHeight: headerHeight,
+                                                           sizePercent: linuxSettingsStore().load()
+                                                               .quickTerminalSizePercent)
             // Assigned WHOLE: GTK passes an uninitialized stack rectangle, so a field-by-field fill that
             // ever misses one yields garbage rather than a default.
             allocation.pointee = GdkRectangle(x: card.x, y: card.y, width: card.width, height: card.height)

@@ -2,8 +2,9 @@
 
 How the GTK sidebar's rows and column negotiate width.
 Nothing auto-loads this document — read it before editing `AppController.swift` (`makeNameWidget`),
-`AppControllerSidebar.swift` (`makeRow`), `LinuxStatusGlyph.swift` (`makeStatusGlyph`), or the sidebar
-scenarios in `agterm-linux/tests/atspi_smoke.py`.
+`AppControllerSidebar.swift` (`makeRow`), `LinuxStatusGlyph.swift` (`makeStatusGlyph`),
+`LinuxThemePolicy.swift` (`windowThemeCSS`), or the sidebar scenarios in
+`agterm-linux/tests/atspi_smoke.py`.
 
 ## Label sizing
 
@@ -157,14 +158,25 @@ scenarios in `agterm-linux/tests/atspi_smoke.py`.
   owns BOTH selection surfaces.
   Paint: `syncSidebarSelection` mirrors the model into the `agterm-selected` CSS class, the ONLY
   selection visual (libadwaita suppresses `:selected` under `navigation-sidebar` anyway).
+  The tint rule follows the exact row-content path from
+  `.agterm-sidebar row.agterm-selected` to its direct `label` and `image` children
+  (`ThemeColorResolver.windowThemeCSS`, whose CSS comment owns why; string-pinned in
+  `GhosttyConfigThemeTests`). Only the row carries the class and paints the rounded background;
+  tagging the content box too would cover that radius with a square fill. `makeRow` must keep every
+  row label and symbolic icon a DIRECT child of the content box — a wrapper drops the tint silently.
+  The `image` half is what keeps the leading
+  terminal icon and the flagged star visible when a theme's selection background equals its
+  foreground; the status glyph and badge keep their pango markup colors.
+  The sibling rules stay descendant matches and keep cascading into row popovers —
+  `.agterm-sidebar label`/`button` deliberately, since `popover_fg_color` is the same value, and
+  `LinuxSidebarPolicy.sidebarCSS`'s font size incidentally.
   Accessibility: the same call publishes `GTK_ACCESSIBLE_STATE_SELECTED` on the ROW accessible
   (`publishRowAccessibleSelected`) — with native selection off, GTK publishes no selection state of
   its own, so screen readers only see what is set here.
   Because `GtkListBoxRow` resets that published state while GTK roots a rebuilt hierarchy,
   `rebuildSidebar` re-runs `syncSidebarSelectionStyles` on the next main-loop turn through
   `SelectionRepublishCoordinator` (re-armed by every rebuild, disarmed in `windowWillClose`).
-- The state goes on the row accessible ONLY, never the row's child (the CSS class touches both,
-  but the child is presentation).
+- The state and CSS class go on the row ONLY, never its presentation-only child.
   The GValue must be built as `G_TYPE_INT` + `g_value_set_int`, never boolean: SELECTED is an
   undefined-able state, so GTK's GValue collector reads it with `g_value_get_int`, and a boolean
   GValue trips a GLib-GObject-CRITICAL and silently drops the update (observed on GTK 4.22).

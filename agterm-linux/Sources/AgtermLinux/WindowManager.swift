@@ -101,7 +101,7 @@ extension WindowLibrary {
 @MainActor func flushOnQuit() {
     guard let library = gLibrary else { return }
     for controller in gWindows.values { controller.commitBackgroundOpacity() }
-    if linuxSettingsStore().load().restoreRunningCommand ?? false {
+    if linuxSettingsStore().load().effectiveRestoreMode == .rerun {
         for ctl in gWindows.values { ctl.captureForegroundCommands() }
     }
     // capture each open window's on-screen size so it restores at the same size on reopen.

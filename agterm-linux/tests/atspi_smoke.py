@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """AT-SPI smoke coverage for the real GTK frontend, always under isolated state and HOME."""
 
+import contextlib
 import json
 import os
 import re
@@ -217,6 +218,42 @@ def type_x11_text(value, process_id, window_title=None):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+@contextlib.contextmanager
+def ctrl_held(process_id, hold="ctrl"):
+    """Hold `hold` (Ctrl by default) across several taps, yielding a `tap(key)` that keeps modifiers.
+
+    `press_x11_key` cannot express this at all: `--clearmodifiers` lifts every held modifier around the
+    tap, and the Ctrl-Tab switcher commits on the Ctrl RELEASE, so a cleared hold would commit on every
+    tap and never cycle. The `keyup` is in `finally` because a failed assertion inside the block would
+    otherwise leave Ctrl down for the rest of the run, turning every later keystroke into a chord — and it
+    does not `check`, so it cannot mask that assertion; a release that itself failed raises once the body
+    completes, since every later scenario would otherwise misfire with no attributable cause.
+    Nesting a second hold is how the two-Ctrl commit case is driven.
+    """
+    focus_window(process_id)
+    time.sleep(0.5)
+
+    def xdotool(*args, check=True):
+        return subprocess.run(
+            ["xdotool", *args],
+            check=check,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def tap(key):
+        xdotool("key", key)
+        time.sleep(0.4)
+
+    xdotool("keydown", hold)
+    try:
+        yield tap
+    finally:
+        released = xdotool("keyup", hold, check=False)
+        time.sleep(0.4)
+    assert released.returncode == 0, f"xdotool could not release {hold}; it is still held"
 
 
 def press_ctrl_comma(process_id, window_title=None):
@@ -465,8 +502,25 @@ def mouse_click(node_provider, process_id, window_title=None, button="right", co
         ["xdotool", "getactivewindow", "getwindowgeometry", "--shell"], text=True
     )
     origin = dict(line.split("=", 1) for line in geometry.splitlines() if "=" in line)
-    x = int(origin["X"]) + local.x + max(1, int(local.width * x_fraction))
-    y = int(origin["Y"]) + local.y + max(1, local.height // 2) + dy
+    # GTK BUTTON accessibles use the content-frame origin while
+    # `xdotool getwindowgeometry` starts at the outer X11 client-side shadow. The
+    # frame's own negative local origin exposes that inset (observed as -16,-16 under
+    # Adwaita/Openbox). Rows and labels already report outer-window coordinates, so
+    # compensating those would over-shift drag slots and inline-rename targets.
+    frame_x = 0
+    frame_y = 0
+    if node.get_role() == Atspi.Role.PUSH_BUTTON:
+        ancestor = node
+        try:
+            while ancestor and ancestor.get_role_name() != "frame":
+                ancestor = ancestor.get_parent()
+            if ancestor:
+                frame_bounds = ancestor.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+                frame_x, frame_y = frame_bounds.x, frame_bounds.y
+        except Exception:
+            pass
+    x = int(origin["X"]) + local.x - frame_x + max(1, int(local.width * x_fraction))
+    y = int(origin["Y"]) + local.y - frame_y + max(1, local.height // 2) + dy
     number = 3 if button == "right" else 1
     time.sleep(0.2)
     click = ["click"]
@@ -718,9 +772,8 @@ def sidebar_session_row_label(app, name):
 def sidebar_session_row(app, name):
     """The sidebar `list item` ROW carrying the named session label.
 
-    The accessible SELECTED state is published on the ROW accessible only (the CSS paint also
-    touches the row's child; the a11y state deliberately does not), so selection assertions
-    need the row while pointer aims keep targeting the label.
+    The accessible SELECTED state and rounded CSS class are published on the ROW only, so
+    selection assertions need the row while pointer aims keep targeting the label.
     """
     for row in collect(app, role="list item"):
         if named(row, name, role="label"):
@@ -838,10 +891,11 @@ def app_stderr_sink():
     return sink
 
 
-def launch(env):
+def launch(env, arguments=None):
     sink = app_stderr_sink()
     try:
-        process = subprocess.Popen([BIN], env=env, stdout=subprocess.DEVNULL, stderr=sink)
+        process = subprocess.Popen(
+            [BIN, *(arguments or [])], env=env, stdout=subprocess.DEVNULL, stderr=sink)
     finally:
         if sink is not subprocess.DEVNULL:
             sink.close()
@@ -923,6 +977,26 @@ def activate_reveal_action(env, identity):
         stderr=subprocess.DEVNULL,
         env=env,
     )
+
+
+def switcher_overlay_names(app):
+    """Session names the Ctrl-Tab overlay card lists, top to bottom, or [] when no card is up.
+
+    The card carries no accessible name of its own (GTK 4.22 does not expose an accessible LABEL as the
+    AT-SPI name of a scroll pane — measured, it stays empty), so it is identified by shape: a scrolled
+    window of bare labels and nothing else. The sidebar is the only other scroller listing session names,
+    and it always holds the rows' list items and its workspace "+" buttons alongside them. A second match
+    is a fault, not a candidate to pick from: the abort and teardown legs assert the EMPTY answer, which a
+    helper that quietly stopped matching would satisfy for the wrong reason.
+    """
+    cards = [
+        scroller for scroller in collect(app, role="scroll pane")
+        if descendants(scroller, role="label")
+        and not descendants(scroller, role="list item")
+        and not descendants(scroller, role="button")
+    ]
+    assert len(cards) <= 1, f"{len(cards)} widgets match the switcher card"
+    return [label.get_name() or "" for label in collect(cards[0], role="label")] if cards else []
 
 
 def palette_row_labels(palette):
@@ -1188,6 +1262,79 @@ def verify_normal_toolbar(env, state, home):
             "Ctrl+, did not preserve the single Preferences dialog",
         )
         print("OK: menu-free toolbar and Ctrl+, Preferences shortcut")
+    except AssertionError:
+        describe_tree(app)
+        raise
+    finally:
+        stop(process)
+
+
+def verify_window_key_dispatch(env):
+    """Mapped window actions drive the current GTK window's existing dialogs."""
+    config = os.path.join(env["AGTERM_STATE_DIR"], "config")
+    os.makedirs(config)
+    with open(os.path.join(config, "keymap.conf"), "w", encoding="utf-8") as target:
+        target.write(
+            "map ctrl+alt+r rename_window\n"
+            "map ctrl+alt+x delete_window\n"
+        )
+
+    process, app = launch(env)
+    try:
+        initial_id = next(item["id"] for item in window_list(env) if item["open"])
+        control_json(env, "session", "rename", "key-window-session",
+                     "--window", initial_id, "--json")
+        survivor_id = control_json(
+            env, "window", "new", "key-window-survivor", "--json"
+        )["result"]["id"]
+        select_window(env, initial_id)
+
+        press_x11_key("ctrl+alt+r", process.pid, window_title="key-window-session")
+        window = wait_for(
+            lambda: named(app, "key-window-session", role="frame"),
+            "key dispatch window disappeared",
+        )
+        wait_for(
+            lambda: named(window, "Rename Window"),
+            "mapped rename_window did not open the rename dialog",
+        )
+        rename_entry = wait_for(
+            lambda: editable_descendant(window),
+            "window rename dialog has no editable entry",
+        )
+        assert rename_entry.get_editable_text_iface().set_text_contents("key-window-renamed")
+        rename_action = wait_for(
+            lambda: named(window, "Rename", role="button"),
+            "window rename dialog has no Rename action",
+        )
+        # This scenario pins mapped key dispatch and its existing-dialog callbacks. Activate
+        # the modal action directly: alert-local pointer coordinates are compositor-specific
+        # and are covered by the dedicated pointer/focus scenarios instead.
+        activate(rename_action)
+        wait_for(
+            lambda: next(
+                (item for item in window_list(env) if item["id"] == initial_id), {}
+            ).get("name") == "key-window-renamed",
+            "mapped rename_window did not rename its window",
+        )
+
+        press_x11_key("ctrl+alt+x", process.pid, window_title="key-window-session")
+        wait_for(
+            lambda: named(window, "Delete Window?"),
+            "mapped delete_window did not open the delete confirmation",
+        )
+        delete_action = wait_for(
+            lambda: named(window, "Delete", role="button"),
+            "window delete dialog has no Delete action",
+        )
+        activate(delete_action)
+        wait_for(
+            lambda: all(item["id"] != initial_id for item in window_list(env)),
+            "mapped delete_window did not delete its window",
+        )
+        assert any(item["id"] == survivor_id for item in window_list(env))
+        assert process.poll() is None, "mapped delete_window terminated the application"
+        print("OK: mapped rename_window and delete_window drive current-window dialogs")
     except AssertionError:
         describe_tree(app)
         raise
@@ -1714,6 +1861,192 @@ def verify_split_exit_sidebar(env):
         stop(process)
 
 
+def verify_split_primary_exit(env):
+    """Exiting the PRIMARY pane's shell must promote the split survivor without freeing its widgets.
+
+    A GTK4 container holds the sole reference to a sunk child, so clearing both paned slots before
+    re-adding the survivor finalizes it and relinks freed memory into the live tree; the next layout
+    pass then calls through a NULLed class pointer. Readiness and pane identity are marker writes, not
+    OSC titles: the pane shell is `$SHELL`, whose prompt rewrites the title on every line.
+    """
+    process, app = launch(env)
+    try:
+        primary_window = wait_for(
+            lambda: next(iter(window_list(env)), None),
+            "primary window did not register",
+        )
+        window_id = primary_window["id"]
+        session_id = window_tree(env, window_id)["workspaces"][0]["sessions"][0]["id"]
+
+        def session_state():
+            return window_tree(env, window_id)["workspaces"][0]["sessions"][0]
+
+        def pane_reports(pane, marker_path, expression, expected=None):
+            # Typing before a login shell reaches its prompt loses the line for good and `wait_for`
+            # cannot resend, so retype the idempotent marker write; the leading newline discards whatever
+            # half-line a lost attempt left behind. `AGTERM_PANE`/`AGTERM_PANE_ID` are baked at spawn,
+            # which is what makes the value identify the PROCESS rather than the slot it now occupies.
+            command = f'\nprintf %s "{expression}" > {shlex.quote(marker_path)}\n'
+
+            def reported():
+                try:
+                    with open(marker_path, encoding="utf-8") as marker:
+                        value = marker.read()
+                except OSError:
+                    return None
+                return value if expected is None or value == expected else None
+
+            # The budget matches `wait_for`'s own 12 s default, spent as 12 attempts one second apart.
+            retype_attempts, retype_interval = 12, 1.0
+            for _ in range(retype_attempts):
+                control_json(
+                    env, "session", "type", command, "--target", session_id,
+                    "--pane", pane, "--window", window_id, "--json",
+                )
+                value = wait_for(reported, "", timeout=retype_interval, required=False)
+                if value:
+                    return value
+                # A death here would otherwise surface as a CalledProcessError naming agtermctl.
+                assert process.poll() is None, (
+                    f"the app died while writing the {pane}-pane marker (rc={process.returncode})"
+                )
+            return None
+
+        def exit_primary_pane():
+            # Focus the pane about to exit, as a user typing `exit` there does. GTK holds a SECOND
+            # reference on a container's focus child, so a survivor that still owns the keyboard survives
+            # the unparent by accident and the promotion reads as healthy. Use the MODEL role: after the
+            # first promotion, physical left is the newly split pane in the freed start slot.
+            control_json(
+                env, "session", "focus", "primary", "--target", session_id,
+                "--window", window_id, "--json",
+            )
+            wait_for(
+                lambda: session_state().get("splitFocused") is False,
+                "the primary pane never took keyboard focus",
+            )
+            # Sent ONCE: after promotion `--pane left` resolves to the survivor, so a retry kills it.
+            control_json(
+                env, "session", "type", "exit\n", "--target", session_id,
+                "--pane", "left", "--window", window_id, "--json",
+            )
+            # Before any further control call: a dead app would otherwise surface as a CalledProcessError
+            # naming agtermctl instead of the crash this scenario exists to attribute.
+            poll(lambda: process.poll() is not None, NEGATIVE_SETTLE_SECONDS)
+            assert process.poll() is None, f"primary-pane exit killed the app (rc={process.returncode})"
+            wait_for(
+                lambda: not session_state().get("hasSplit"),
+                "primary-pane exit did not collapse the split",
+            )
+
+        state = env["AGTERM_STATE_DIR"]
+        assert pane_reports("left", os.path.join(state, "primary-exit-left"), "$AGTERM_PANE", "left"), (
+            "the primary pane shell never answered input"
+        )
+        control_json(
+            env, "session", "split", "on", "--target", session_id,
+            "--window", window_id, "--json",
+        )
+        wait_for(lambda: session_state().get("hasSplit"), "session split did not become active")
+        split_id = pane_reports("right", os.path.join(state, "primary-exit-right"), "$AGTERM_PANE_ID")
+        assert split_id, "the split pane shell never answered input"
+
+        offset = os.path.getsize(env["AGTERM_UI_APP_STDERR"])
+        exit_primary_pane()
+        assert pane_reports(
+            "left", os.path.join(state, "primary-exit-promoted"), "$AGTERM_PANE", "right"
+        ), "the promoted pane is not the original split shell answering input"
+
+        # The survivor now holds the paned's END slot, which only a promotion produces. Re-splitting into
+        # the freed slot, driving both panes there, and promoting a SECOND time is the only coverage of
+        # that inverted state.
+        control_json(
+            env, "session", "split", "on", "--target", session_id,
+            "--window", window_id, "--json",
+        )
+        wait_for(lambda: session_state().get("hasSplit"), "the promoted pane did not re-split")
+        assert pane_reports("left", os.path.join(state, "resplit-left"), "$AGTERM_PANE_ID", split_id), (
+            "the promoted pane stopped answering input after the re-split"
+        )
+        resplit_id = pane_reports("right", os.path.join(state, "resplit-right"), "$AGTERM_PANE_ID")
+        assert resplit_id, "the re-split pane shell never answered input"
+
+        def assert_focus(pane, split_focused, message):
+            control_json(
+                env, "session", "focus", pane, "--target", session_id,
+                "--window", window_id, "--json",
+            )
+            wait_for(
+                lambda: session_state().get("splitFocused") is split_focused,
+                message,
+            )
+
+        def resize(option, amount, expected, message):
+            control_json(
+                env, "session", "resize", option, str(amount), "--target", session_id,
+                "--window", window_id, "--json",
+            )
+            wait_for(
+                lambda: abs((session_state().get("splitRatio") or 0) - expected) < 0.001,
+                message,
+            )
+
+        # The promoted primary is fixed in the END slot and the new split is in the START slot. Physical
+        # selectors must therefore resolve opposite the model roles rather than retaining their historical
+        # aliases. Exercise both focus and relative resizing before and after transposing the GtkPaned.
+        assert_focus("left", True, "physical left did not focus the start-slot split pane")
+        assert_focus("right", False, "physical right did not focus the end-slot primary pane")
+        assert_focus("split", True, "the split role did not focus its start-slot pane")
+        assert_focus("primary", False, "the primary role did not focus its end-slot pane")
+        resize("--split-ratio", 0.5, 0.5, "the inverted split did not reset to an even primary share")
+        resize("--grow-left", 0.1, 0.4, "growing physical left did not grow the start-slot split")
+        resize("--grow-right", 0.1, 0.5, "growing physical right did not grow the end-slot primary")
+        resize("--grow-primary", 0.1, 0.6, "growing primary did not follow its end-slot role")
+        resize("--grow-split", 0.1, 0.5, "growing split did not follow its start-slot role")
+
+        control_json(
+            env, "session", "split", "on", "--axis", "horizontal", "--target", session_id,
+            "--window", window_id, "--json",
+        )
+        wait_for(
+            lambda: session_state().get("splitAxis") == "horizontal",
+            "the inverted split did not transpose to top/bottom",
+        )
+        resize(
+            "--split-ratio", 0.5, 0.5,
+            "the transposed inverted split did not settle at an even primary share",
+        )
+        assert_focus("top", True, "physical top did not focus the start-slot split pane")
+        assert_focus("bottom", False, "physical bottom did not focus the end-slot primary pane")
+        resize("--grow-top", 0.1, 0.4, "growing physical top did not grow the start-slot split")
+        resize("--grow-bottom", 0.1, 0.5, "growing physical bottom did not grow the end-slot primary")
+
+        # `splitRatio` is the PRIMARY's share on both sides of the conversion the inverted slots need, so
+        # a half-applied conversion mirrors the value on the way back.
+        resize(
+            "--split-ratio", 0.25, 0.25,
+            "the primary's split ratio did not read back in the inverted slot state",
+        )
+        exit_primary_pane()
+        assert pane_reports(
+            "left", os.path.join(state, "second-promoted"), "$AGTERM_PANE_ID", resplit_id
+        ), "the second promotion did not leave the re-split shell answering as the primary"
+
+        with open(env["AGTERM_UI_APP_STDERR"], encoding="utf-8", errors="replace") as source:
+            source.seek(offset)
+            faults = [
+                line.strip() for line in source
+                if "assertion 'GTK_IS_" in line or "GLArea re-realized" in line
+            ]
+        assert not faults, f"primary-pane promotion damaged the pane tree: {faults[0]}"
+        print("OK: primary-pane exit promotes the live split survivor")
+    except AssertionError:
+        describe_tree(app)
+        raise
+    finally:
+        stop(process)
+
+
 def verify_window_callback_ownership(env):
     process, app = launch(env)
     try:
@@ -1836,6 +2169,25 @@ def verify_window_callback_ownership(env):
             lambda: not preferences_window(app),
             "background Preferences dialog did not close through its owning window",
         )
+
+        # Closing a window keeps its persisted library entry. The Linux palette must expose that entry
+        # explicitly as "Open Window", and activating it must lazily reload and present the same id.
+        persisted_id = control_json(
+            env, "window", "new", "persisted-reopen", "--json"
+        )["result"]["id"]
+        control_json(env, "window", "close", persisted_id, "--json")
+        wait_for(
+            lambda: not next(item for item in window_list(env) if item["id"] == persisted_id)["open"],
+            "persisted test window did not close",
+        )
+        run_palette_action(
+            app, process.pid, "primary-session", "Open Window: persisted-reopen"
+        )
+        wait_for(
+            lambda: next(item for item in window_list(env) if item["id"] == persisted_id)["open"],
+            "Open Window palette action did not reopen the persisted window",
+        )
+        control_json(env, "window", "close", persisted_id, "--json")
 
         # Repeatedly close secondary windows with a fresh split restore and palette/window callbacks in
         # flight. The application and the surviving primary controller must remain usable.
@@ -2965,7 +3317,10 @@ def verify_sidebar_multiselect_collapse(env):
                  "the created sessions did not settle into their creation order")
         wait_for(lambda: sidebar_session_row_label(app, "pick-one"),
                  "the pick-one sidebar row is missing")
-        row_dy = calibrate_row_click(app, process.pid, "pick-one")
+        # Calibrate on a different row from the anchor. Re-clicking pick-one immediately after
+        # calibration is classified as a double-click and correctly opens inline rename, which
+        # would turn this multi-selection test into an accidental rename test.
+        row_dy = calibrate_row_click(app, process.pid, "pick-two")
 
         def build_block(last, members):
             """Anchor on pick-one, then shift-click `last` to extend the block on PRESS.
@@ -4021,7 +4376,235 @@ def verify_session_pickers(env, state):
             ),
             "Attention popover did not expose a session row",
         )
-        print("OK: recent-session and attention popovers expose actionable rows")
+
+        def recent_row_titles():
+            """Session names the open picker lists; its rows pair a name with `workspace · detail`.
+
+            The popover is parented to the Recent Sessions button, so while it is up GTK folds the rows'
+            labels into that anchor's own subtree — and its name with them. A row is therefore the
+            matching button that holds no further button; without that test the anchor doubles every row.
+            """
+            titles = []
+            for button in collect(app, role="button"):
+                if descendants(button, role="button"):
+                    continue
+                labels = [item.get_name() or "" for item in collect(button, role="label")]
+                if any("workspace 1 ·" in label for label in labels):
+                    titles.append(labels[0])
+            return titles
+
+        # Flagged mode is where the popover's `navigableRecentSessions` scope becomes visible.
+        control_json(env, "session", "rename", "picker-current", "--target", original_id, "--json")
+        control_json(env, "session", "flag", "on", "--target", original_id, "--json")
+        flagged_id = control_json(
+            env, "session", "new", "--name", "picker-flagged", "--json"
+        )["result"]["id"]
+        control_json(env, "session", "flag", "on", "--target", flagged_id, "--json")
+        control_json(env, "sidebar", "mode", "flagged", "--json")
+        control_json(env, "session", "select", "--target", original_id, "--json")
+        wait_for(
+            lambda: control_json(env, "tree", "--json")["result"]["tree"].get("sidebarMode") == "flagged",
+            "the sidebar did not switch to flagged mode",
+        )
+        activate(wait_for(
+            lambda: actionable(app, "Recent Sessions (Ctrl+Tab)"),
+            "Recent Sessions button is missing or not actionable in flagged mode",
+        ))
+        wait_for(
+            lambda: recent_row_titles() == ["picker-flagged"],
+            "the flagged popover did not list exactly the flagged, non-current session",
+        )
+
+        def recent_button_insensitive():
+            button = named(app, "Recent Sessions (Ctrl+Tab)", role="button")
+            return button is not None and not button.get_state_set().contains(Atspi.StateType.SENSITIVE)
+
+        control_json(env, "session", "flag", "off", "--target", flagged_id, "--json")
+        wait_for(
+            recent_button_insensitive,
+            "the Recent Sessions button stayed enabled with no navigable recent session",
+        )
+        print("OK: recent-session and attention popovers expose actionable rows, "
+              "and the recent popover follows the navigable scope")
+    except AssertionError:
+        describe_tree(app)
+        raise
+    finally:
+        stop(process)
+
+
+def verify_session_switch_commit(env):
+    """Ctrl-Tab cycles WITHOUT selecting; the Ctrl release commits exactly once (macOS parity).
+
+    `SessionSwitcherModel` unit tests pin the commit DECISION, but the AppController wiring — no
+    selection while Ctrl is held, one on release, none after an Esc abort, a blur or a dashboard open —
+    has no host-free seam, so this scenario is its only guard. The MRU order it pins is what makes a
+    second Ctrl-Tab toggle back: selecting per step instead would leave `[C,B,A]` and walk the list away
+    from the previous session.
+    """
+    process, app = launch(env)
+    try:
+        window_id = window_list(env)[0]["id"]
+
+        def selected(target_window=window_id):
+            for workspace in window_tree(env, target_window)["workspaces"]:
+                for session in workspace["sessions"]:
+                    if session["active"]:
+                        return session["name"]
+            return None
+
+        first_id = control_json(env, "tree", "--json")["result"]["tree"]["workspaces"][0]["sessions"][0]["id"]
+        control_json(env, "session", "rename", "switch-a", "--target", first_id, "--json")
+        second_id = control_json(env, "session", "new", "--name", "switch-b", "--json")["result"]["id"]
+        third_id = control_json(env, "session", "new", "--name", "switch-c", "--json")["result"]["id"]
+        # Selecting in this order leaves the MRU `[c, b, a]`, so `a` is two cycle steps away from `c`.
+        for target in (first_id, second_id, third_id):
+            control_json(env, "session", "select", "--target", target, "--json")
+        assert selected() == "switch-c", f"the setup left {selected()!r} selected"
+
+        # The hold outlasts the auto-follow idle tick; it is safe only because this scenario writes no
+        # settings.json, so `LinuxAutoFollowCoordinator.timeout` is nil and no reconcile blurs the surface.
+        with ctrl_held(process.pid) as tap:
+            tap("Tab")
+            if not poll(lambda: switcher_overlay_names(app) == ["switch-c", "switch-b", "switch-a"], 12):
+                raise AssertionError(f"the Ctrl-Tab overlay did not list the MRU: {switcher_overlay_names(app)}")
+            tap("Tab")
+            time.sleep(NEGATIVE_SETTLE_SECONDS)
+            assert selected() == "switch-c", "a Ctrl-Tab press selected a session before the Ctrl release"
+        wait_for(
+            lambda: selected() == "switch-a",
+            "the Ctrl release did not commit the highlighted session",
+        )
+        wait_for(lambda: not switcher_overlay_names(app), "the switcher overlay outlived the commit")
+
+        # The commit pushed recency exactly once, leaving `[a, c, b]`.
+        for expected in ("switch-c", "switch-a"):
+            with ctrl_held(process.pid) as tap:
+                tap("Tab")
+            if not poll(lambda: selected() == expected, 12):
+                raise AssertionError(f"a single Ctrl-Tab did not toggle to {expected}, it stayed on {selected()}")
+
+        with ctrl_held(process.pid) as tap:
+            tap("Tab")
+            wait_for(
+                lambda: switcher_overlay_names(app),
+                "the Ctrl-Tab overlay never appeared for the Esc leg",
+            )
+            tap("Escape")
+            wait_for(lambda: not switcher_overlay_names(app), "Esc left the switcher overlay up")
+            assert selected() == "switch-a", "Esc committed a selection"
+        time.sleep(NEGATIVE_SETTLE_SECONDS)
+        assert selected() == "switch-a", "the Ctrl release after an Esc abort still selected a session"
+
+        # Reverse walks the same hold forward twice and back once, so the commit lands on the MIDDLE
+        # candidate of `[a, c, b]`; a forward-only shift+Tab would wrap onto the current session instead.
+        with ctrl_held(process.pid) as tap:
+            tap("Tab")
+            tap("Tab")
+            tap("shift+Tab")
+        if not poll(lambda: selected() == "switch-c", 12):
+            raise AssertionError(f"Ctrl+Shift+Tab did not step back to switch-c, it left {selected()}")
+
+        # A focus move to another surface must abandon the cycle: nothing would deliver its Ctrl release
+        # to the surface that started it, and the frozen candidate list would commit on the NEXT release.
+        with ctrl_held(process.pid) as tap:
+            tap("Tab")
+            wait_for(lambda: switcher_overlay_names(app), "the Ctrl-Tab overlay never appeared for the blur leg")
+            control_json(env, "session", "split", "on", "--target", third_id, "--json")
+            wait_for(lambda: not switcher_overlay_names(app),
+                     "focus moving to the split pane left the switcher overlay up")
+        # Ctrl+C runs the same commit path with no cycle in flight, so one settle covers both releases.
+        press_x11_key("ctrl+c", process.pid)
+        time.sleep(NEGATIVE_SETTLE_SECONDS)
+        assert selected() == "switch-c", "a Ctrl release with no cycle in flight selected a session"
+        control_json(env, "session", "split", "off", "--target", third_id, "--json")
+
+        # Opening the dashboard discards the cycle rather than committing it — it takes the keyboard.
+        with ctrl_held(process.pid) as tap:
+            tap("Tab")
+            wait_for(lambda: switcher_overlay_names(app),
+                     "the Ctrl-Tab overlay never appeared for the dashboard leg")
+            control_json(env, "dashboard", "--mru", "--window", window_id, "--json")
+            wait_for(lambda: not switcher_overlay_names(app), "opening the dashboard left the switcher overlay up")
+        time.sleep(NEGATIVE_SETTLE_SECONDS)
+        assert selected() == "switch-c", "the dashboard-cancelled cycle still committed on the Ctrl release"
+        control_json(env, "dashboard", "--close", "--window", window_id, "--json")
+
+        # With BOTH Ctrl keys down the commit waits for the modifier to clear, not for the first key up:
+        # macOS reads `.control` off the post-change flags, while a GDK release reports the state before it.
+        # Control_R has to be the OUTER hold — `xdotool keyup Control_R` lifts Control_L with it, so the
+        # reverse nesting releases both at once and can never observe the case.
+        held = selected()
+        with ctrl_held(process.pid, hold="Control_R") as tap:
+            tap("Tab")
+            names = wait_for(lambda: switcher_overlay_names(app) or None,
+                             "the Ctrl-Tab overlay never appeared for the two-Ctrl leg")
+            with ctrl_held(process.pid) as tap_both:
+                tap_both("Tab")
+            time.sleep(NEGATIVE_SETTLE_SECONDS)
+            assert selected() == held, "releasing one of two held Ctrl keys committed the cycle early"
+            assert switcher_overlay_names(app) == names, "releasing one of two held Ctrl keys ended the cycle"
+        wait_for(lambda: selected() == names[2],
+                 "the release of the last held Ctrl key did not commit the two-step cycle")
+
+        # Seed BOTH physical Ctrl keys in another window, then focus a fresh controller before Tab.
+        # Its HeldControlKeys set has seen neither press, so only the keyboard device's current state can
+        # distinguish the first release from the last. No synthetic re-press reaches the new window.
+        preheld_window = control_json(
+            env, "window", "new", "preheld-controls", "--json"
+        )["result"]["id"]
+        preheld_first = window_tree(env, preheld_window)["workspaces"][0]["sessions"][0]["id"]
+        control_json(
+            env, "session", "rename", "preheld-a", "--target", preheld_first,
+            "--window", preheld_window, "--json",
+        )
+        preheld_second = control_json(
+            env, "session", "new", "--name", "preheld-b", "--window", preheld_window, "--json"
+        )["result"]["id"]
+        preheld_third = control_json(
+            env, "session", "new", "--name", "preheld-c", "--window", preheld_window, "--json"
+        )["result"]["id"]
+        for target in (preheld_first, preheld_second, preheld_third):
+            control_json(
+                env, "session", "select", "--target", target,
+                "--window", preheld_window, "--json",
+            )
+        select_window(env, window_id)
+
+        def xdotool(*args, check=True):
+            return subprocess.run(
+                ["xdotool", *args], check=check,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        xdotool("keydown", "Control_R")
+        xdotool("keydown", "Control_L")
+        try:
+            select_window(env, preheld_window)
+            xdotool("key", "Tab")
+            names = wait_for(
+                lambda: switcher_overlay_names(app) or None,
+                "the pre-held Ctrl-Tab overlay never appeared",
+            )
+            xdotool("keyup", "Control_L")
+            time.sleep(NEGATIVE_SETTLE_SECONDS)
+            assert selected(preheld_window) == "preheld-c", (
+                "the first unobserved Ctrl release committed while Control_R remained held"
+            )
+            assert switcher_overlay_names(app) == names, (
+                "the first unobserved Ctrl release ended the cycle while Control_R remained held"
+            )
+            xdotool("keyup", "Control_R")
+            wait_for(
+                lambda: selected(preheld_window) == "preheld-b",
+                "the last pre-held Ctrl release did not commit the cycle",
+            )
+        finally:
+            # A failed assertion must not poison the remainder of the suite or the user's keyboard.
+            xdotool("keyup", "Control_L", "Control_R", check=False)
+
+        print("OK: Ctrl-Tab cycles without selecting, commits once the last Ctrl comes up, reverses, "
+              "survives pre-held Ctrl keys, and Esc / a blur / the dashboard abort")
     except AssertionError:
         describe_tree(app)
         raise
@@ -4917,6 +5500,47 @@ def verify_chrome_focus_popovers(env):
         stop(ctx.process)
 
 
+def verify_recent_clear(env):
+    """The Linux palette and control socket clear the same app-wide recent-closed store."""
+    process, app = launch(env)
+    try:
+        created = control_json(env, "session", "new", "--json")["result"]["id"]
+        control_json(env, "session", "close", "--target", created, "--json")
+
+        palette, search = open_palette(app, process.pid)
+        assert search.get_editable_text_iface().set_text_contents("Clear Recent Items")
+        wait_for(
+            lambda: ["Clear Recent Items"] in palette_row_labels(palette),
+            "Clear Recent Items did not appear after closing a session",
+        )
+        press_return(process.pid, window_title="Command Palette")
+        wait_for(
+            lambda: not named(app, "Command Palette", role="frame"),
+            "the palette did not close after clearing recent items",
+        )
+
+        palette, search = open_palette(app, process.pid)
+        assert search.get_editable_text_iface().set_text_contents("Clear Recent Items")
+        time.sleep(NEGATIVE_SETTLE_SECONDS)
+        assert ["Clear Recent Items"] not in palette_row_labels(palette), (
+            "Clear Recent Items remained visible after it cleared the history"
+        )
+        press_escape(process.pid, window_title="Command Palette")
+
+        created = control_json(env, "session", "new", "--json")["result"]["id"]
+        control_json(env, "session", "close", "--target", created, "--json")
+        response = control_json(env, "recent", "clear", "--json")
+        assert response["result"]["affected"] == 1, (
+            "recent clear did not report the one item it removed"
+        )
+        print("OK: palette and control clear recently closed items")
+    except AssertionError:
+        describe_tree(app)
+        raise
+    finally:
+        stop(process)
+
+
 def verify_auto_follow(env, state):
     auto_state = state + "-auto-follow"
     os.makedirs(auto_state)
@@ -4979,8 +5603,10 @@ def main():
         failures = []
         for child_scenario in (
             "normal", "upstream-controls", "dashboard-modal", "context-menu",
-            "split-exit", "window-ownership", "preferences-pages",
-            "notification-reveal", "notification-focus", "session-pickers", "child-gdk-env",
+            "window-key-dispatch",
+            "split-exit", "split-primary-exit", "window-ownership", "preferences-pages",
+            "notification-reveal", "notification-focus", "session-pickers",
+            "session-switch-commit", "child-gdk-env",
             "child-gdk-env-inverted",
             "custom-command-failures", "surface-lifetimes", "surface-failures",
             "background-overlay-grid",
@@ -4990,7 +5616,7 @@ def main():
             "sidebar-click-rename", "sidebar-session-drag", "sidebar-workspace-drag",
             "sidebar-multiselect",
             "chrome-focus-buttons", "chrome-focus-sidebar", "chrome-focus-popovers",
-            "auto-follow", "hidden-toolbar",
+            "recent-clear", "auto-follow", "hidden-toolbar", "desktop-actions",
         ):
             child_env = dict(os.environ, AGTERM_ATSPI_SCENARIO=child_scenario)
             result = subprocess.run([sys.executable, __file__], env=child_env)
@@ -5042,10 +5668,15 @@ def main():
     if scenario in ("preferences-pages", "auto-follow"):
         # Page inspection and auto-follow need an already-mapped modal while another process owns focus.
         env["AGTERM_ATSPI_OPEN_PREFERENCES"] = "general"
+    if scenario == "split-primary-exit":
+        # Poison freed memory so a use-after-free on a promoted pane cannot read as still-valid.
+        env["MALLOC_PERTURB_"] = "170"
     try:
         Atspi.init()
         if scenario == "normal":
             verify_normal_toolbar(env, state, home)
+        elif scenario == "window-key-dispatch":
+            verify_window_key_dispatch(env)
         elif scenario == "upstream-controls":
             verify_upstream_control_parity(env)
         elif scenario == "dashboard-modal":
@@ -5054,6 +5685,8 @@ def main():
             verify_context_menu(env)
         elif scenario == "split-exit":
             verify_split_exit_sidebar(env)
+        elif scenario == "split-primary-exit":
+            verify_split_primary_exit(env)
         elif scenario == "window-ownership":
             verify_window_callback_ownership(env)
         elif scenario == "notification-reveal":
@@ -5102,10 +5735,17 @@ def main():
             verify_chrome_focus_popovers(env)
         elif scenario == "auto-follow":
             verify_auto_follow(env, state)
+        elif scenario == "recent-clear":
+            verify_recent_clear(env)
         elif scenario == "session-pickers":
             verify_session_pickers(env, state)
+        elif scenario == "session-switch-commit":
+            verify_session_switch_commit(env)
         elif scenario == "hidden-toolbar":
             verify_hidden_toolbar(env, state)
+        elif scenario == "desktop-actions":
+            from atspi_desktop_actions import verify_desktop_actions
+            verify_desktop_actions(env)
         else:
             raise ValueError(f"unknown AT-SPI scenario: {scenario}")
         print(f"PASS: {scenario}")

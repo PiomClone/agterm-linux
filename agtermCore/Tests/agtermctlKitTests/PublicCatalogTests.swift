@@ -6,6 +6,8 @@ struct PublicCatalogTests {
     @Test func libraryConsumerCanAppendAHostCommand() throws {
         #expect(try PublicCatalogRoot.parseAsRoot(["host-extension"]) is PublicHostExtension)
         #expect(throws: (any Error).self) { try Agtermctl.parseAsRoot(["host-extension"]) }
+        #expect(AgtermctlCommandCatalog.subcommands.count + 1
+            == PublicCatalogRoot.configuration.subcommands.count)
     }
 }
 

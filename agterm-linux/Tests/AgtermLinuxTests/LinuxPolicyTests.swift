@@ -54,6 +54,14 @@ struct LinuxPolicyTests {
         #expect(" \n".linuxTrimmedOrNil == nil)
     }
 
+    @Test("Linux session home honors an isolated launch environment")
+    func defaultSessionHome() {
+        #expect(ConfigPaths.defaultNewSessionCwd(environment: ["HOME": "/tmp/agterm-home"])
+            == "/tmp/agterm-home")
+        #expect(ConfigPaths.defaultNewSessionCwd(environment: ["HOME": ""])
+            == FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
     @Test("Linux bundled libghostty defaults mirror upstream macOS adapted to Linux conventions")
     func bundledLibghosttyDefaults() {
         let defaults = GhosttyDefaults.baseConfLines
@@ -145,13 +153,86 @@ struct LinuxPolicyTests {
         let second = UUID()
         let third = UUID()
         var switcher = SessionSwitcherModel()
-        #expect(switcher.begin([first]) == nil)
-        #expect(switcher.begin([first, second, third]) == second)
-        #expect(switcher.advance(reverse: true) == first)
-        #expect(switcher.advance(reverse: true) == third)
-        #expect(switcher.advance() == first)
+        switcher.begin([first])
+        #expect(!switcher.isActive)
+        switcher.begin([first, second, third])
+        #expect(switcher.current == second)
+        switcher.advance(reverse: true)
+        #expect(switcher.current == first)
+        switcher.advance(reverse: true)
+        #expect(switcher.current == third)
+        switcher.advance()
+        #expect(switcher.current == first)
         switcher.end()
         #expect(!switcher.isActive)
+    }
+
+    @Test("Ctrl release commits the highlighted candidate, or nothing")
+    func sessionSwitcherCommitTarget() {
+        let first = UUID()
+        let second = UUID()
+        let third = UUID()
+        let live: Set<UUID> = [first, second, third]
+        var switcher = SessionSwitcherModel()
+        #expect(switcher.commitTarget(liveIDs: live) == nil)
+        switcher.begin([first])
+        #expect(switcher.commitTarget(liveIDs: live) == nil)
+
+        switcher.begin([first, second, third])
+        #expect(switcher.commitTarget(liveIDs: live) == second)
+        switcher.advance()
+        #expect(switcher.commitTarget(liveIDs: live) == third)
+        #expect(switcher.commitTarget(liveIDs: live.subtracting([third])) == nil)
+        switcher.advance(reverse: true)
+        #expect(switcher.commitTarget(liveIDs: live) == second)
+
+        switcher.end()
+        switcher.end()
+        #expect(!switcher.isActive)
+        #expect(switcher.commitTarget(liveIDs: live) == nil)
+    }
+
+    @Test("the commit waits for the last held Ctrl key")
+    func heldControlKeys() {
+        let left: UInt32 = 37
+        let right: UInt32 = 105
+        let tab: UInt32 = 23
+        let control = ModifierKeyMods.controlBit
+        var held = HeldControlKeys()
+
+        held.pressed(keyval: 0xFFE3, keycode: left, state: 0)
+        held.pressed(keyval: 0xFFE4, keycode: right, state: control)
+        held.pressed(keyval: 0xFF09, keycode: tab, state: control)
+        var commits = held.released(keycode: right, controlStillHeld: true)
+        #expect(!commits)
+        commits = held.released(keycode: left, controlStillHeld: false)
+        #expect(commits)
+
+        // A key up lost to a blur strands `left`; the next press without Ctrl resyncs it away.
+        held.pressed(keyval: 0xFFE3, keycode: left, state: 0)
+        held.pressed(keyval: 0xFF09, keycode: tab, state: 0)
+        held.pressed(keyval: 0xFFE4, keycode: right, state: 0)
+        commits = held.released(keycode: right, controlStillHeld: false)
+        #expect(commits)
+
+        // Both Ctrl keys predate this controller's focus, so its fallback set never saw either press.
+        // GTK's live device state must still keep the first release from committing.
+        var preHeld = HeldControlKeys()
+        preHeld.pressed(keyval: 0xFF09, keycode: tab, state: control)
+        commits = preHeld.released(keycode: left, controlStillHeld: true)
+        #expect(!commits)
+        commits = preHeld.released(keycode: right, controlStillHeld: false)
+        #expect(commits)
+    }
+
+    @Test("the switcher cycles at most ten candidates")
+    func sessionSwitcherCandidateCap() {
+        let ids = (0..<12).map { _ in UUID() }
+        var recency = RecencyStack<UUID>()
+        for id in ids { recency.push(id) }
+        var switcher = SessionSwitcherModel()
+        switcher.begin(recency.top(SessionSwitcherModel.maxCandidates, in: Set(ids)))
+        #expect(switcher.ordered.count == 10)
     }
 
     @Test("delete prompts use native Linux wording")
@@ -182,6 +263,26 @@ struct LinuxPolicyTests {
         #expect(session.splitTitle == "split")
         #expect(session.splitFocused)
         #expect(LinuxSidebarPolicy.flaggedRowLabel(for: session, in: store) == "main  —  work")
+    }
+
+    @Test("redundant local shell titles preserve cwd-derived session names")
+    func redundantLocalTitles() {
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "/home/sasha", cwd: "/home/sasha", home: "/tmp/test-home", loginShell: "bash") == "")
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "/h/sasha", cwd: "/home/sasha", home: "/tmp/test-home", loginShell: "fish") == "")
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "~", cwd: "/home/sasha", home: "/home/sasha", loginShell: "fish") == "")
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "~/D/github.com", cwd: "/home/sasha/Developer/github.com",
+            home: "/home/sasha", loginShell: "fish") == "")
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "~/.c/fish", cwd: "/home/sasha/.config/fish",
+            home: "/home/sasha", loginShell: "fish") == "")
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "[server] ~", cwd: "/home/sasha", home: "/home/sasha", loginShell: "fish") == "[server] ~")
+        #expect(LinuxSessionTitlePolicy.recordableTitle(
+            "vim README.md", cwd: "/home/sasha", home: "/home/sasha", loginShell: "fish") == "vim README.md")
     }
 
     @Test("sidebar CSS derives row height from the shared font-size clamp")
@@ -743,6 +844,6 @@ struct SidebarHoverCSSTests {
     func appCSSInstallsHoverRule() {
         // The hover constant only takes effect once `installAppCSS` interpolates it into the
         // installed stylesheet — pin the composed string, not just the constant.
-        #expect(appCSS.contains(LinuxSidebarPolicy.sidebarHoverCSS))
+        #expect(appCSS(prefersReducedMotion: false).contains(LinuxSidebarPolicy.sidebarHoverCSS))
     }
 }

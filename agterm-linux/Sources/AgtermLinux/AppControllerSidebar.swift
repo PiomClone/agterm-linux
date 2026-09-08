@@ -357,6 +357,9 @@ extension AppController {
             // END even though the breadcrumb ends in the workspace: the flagged view is already
             // workspace-scoped, so the tail is what can be given up first.
             gtk_label_set_ellipsize(label, PANGO_ELLIPSIZE_END)
+            LinuxSidebarPolicy.flaggedRowLabel(for: s, in: store).withCString {
+                gtk_widget_set_tooltip_text(W(label), $0)
+            }
         }
         gtk_box_append(cast(box), W(label))
         if let glyph = Self.makeStatusGlyph(
@@ -372,10 +375,9 @@ extension AppController {
             "<span background=\"#cc3333\" foreground=\"white\"> \(text) </span>".withCString { gtk_label_set_markup(badge, $0) }
             gtk_box_append(cast(box), W(badge))
         }
-        // No trailing margin on the box: the selection highlight is painted by the box itself
-        // (the row stays transparent), so a margin would indent the highlight instead of the
-        // content. The trailing inset lives inside the box as CSS `padding-right` (installAppCSS),
-        // mirroring the leading icon's margin_start on the left.
+        // Keep the trailing inset inside the content box as CSS `padding-right` (installAppCSS),
+        // rather than shrinking the row that paints the rounded selection background. This mirrors
+        // the leading icon's margin_start on the left.
         gtk_list_box_row_set_child(GLBR(row), W(box))
         // Rows are PASSIVE: under GTK_SELECTION_NONE the list box's built-in click gesture would
         // still move keyboard focus to a selectable/activatable row on release — after showActive()
@@ -415,30 +417,26 @@ extension AppController {
         return row
     }
 
-    /// The sidebar selection choke point: ONE paint path (the `agterm-selected` CSS class, on the
-    /// row and its content box) and ONE a11y path (`GTK_ACCESSIBLE_STATE_SELECTED` on the row
+    /// The sidebar selection choke point: ONE paint path (the `agterm-selected` CSS class on the
+    /// row) and ONE a11y path (`GTK_ACCESSIBLE_STATE_SELECTED` on the row
     /// accessible, via `publishRowAccessibleSelected`). Every selection change routes through here
     /// — `syncSidebarSelectionStyles`' single predicate pass and the initial paint in
     /// `appendSection`'s build loop — so the visual highlight and the published accessible state
     /// cannot drift apart.
     /// See agterm-linux/docs/sidebar.md (selection contract).
     private func setSidebarSelectionStyle(_ row: OpaquePointer, selected: Bool) {
-        let update: (OpaquePointer?) -> Void = { widget in
-            if selected {
-                gtk_widget_add_css_class(W(widget), "agterm-selected")
-            } else {
-                gtk_widget_remove_css_class(W(widget), "agterm-selected")
-            }
+        if selected {
+            gtk_widget_add_css_class(W(row), "agterm-selected")
+        } else {
+            gtk_widget_remove_css_class(W(row), "agterm-selected")
         }
-        update(row)
-        update(gtk_list_box_row_get_child(GLBR(row)).map { OpaquePointer($0) })
         publishRowAccessibleSelected(row, selected: selected)
     }
 
     /// Publish `GTK_ACCESSIBLE_STATE_SELECTED` on the ROW accessible — the a11y half of the
     /// selection contract (see `setSidebarSelectionStyle` for the contract itself). The state goes
-    /// on the row only, never the row's child (the CSS class touches both, but the child is
-    /// presentation). Verified over AT-SPI on GTK 4.22: the row's `STATE_SELECTED` follows this
+    /// and CSS class both go on the row; its child is presentation only. Verified over AT-SPI on
+    /// GTK 4.22: the row's `STATE_SELECTED` follows this
     /// call (present on the selected row, absent after deselection).
     private func publishRowAccessibleSelected(_ row: OpaquePointer, selected: Bool) {
         var state = GTK_ACCESSIBLE_STATE_SELECTED

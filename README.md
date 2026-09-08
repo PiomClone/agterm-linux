@@ -41,19 +41,35 @@ Code layout:
 
 ### Linux feature parity and platform differences
 
-The `linux-port` branch carries the upstream v0.24.0 terminal model and control protocol, including
+The `linux-port` branch carries the upstream v0.26.1 terminal model and control protocol, including
 split/scratch/overlay terminals, Quick terminal input and read-back, terminal zoom, fullscreen,
 recently closed sessions with grouped undo, light/dark themes, configurable toolbar and sidebar text,
 recent-session and attention popovers, agent status in the multi-session dashboard, stable pane status
 routing, control-event subscriptions, held command sessions, per-pane restore overrides, persisted workspace
 collapse state, workspace focus sets, native script-driven pickers, window minimization, keymap read-back,
-and Ctrl/Shift multi-session selection with batch move, close, flag, status, and drag/drop actions.
+session context, split orientation and pane swapping, three restore modes, zmx session inspection and remote
+attach, and Ctrl/Shift multi-session selection with batch move, close, flag, status, and drag/drop actions.
 The GTK frontend keeps the content toolbar focused on terminal controls.
 Preferences opens with Ctrl+, while Integrations, Keyboard Shortcuts, and About remain available from the command palette.
+The Linux command palette offers **Clear Recent Items** whenever recently closed sessions or workspaces exist.
+The same app-wide cleanup is available as `agtermctl recent clear`.
+Preferences exposes Quick Terminal sizing, cursor shape and blink, and Fresh shells, Re-run commands, or
+experimental Live sessions restore.
+Live mode uses the bundled pinned zmx runtime for primary and split panes; scratch, overlay, and Quick
+terminals remain temporary.
+It requires zsh as the password-database login shell and the bundled Ghostty zsh integration.
+The mode is latched at process startup, and a missing daemon after reboot falls back to recreating the pane
+from its last cleanly captured command.
 
 Linux uses desktop conventions: key labels are Ctrl/Shift rather than Command/Option, native chrome is
 provided by libadwaita, and local `file://` links open their containing folder in the default file manager.
 Its desktop, notification, and Flatpak application ID is `io.github.melonamin.agterm`, owned by this Linux fork.
+Launchers that implement freedesktop Desktop Entry Actions expose **New Session**, **New Window**,
+**Quick Terminal**, **Dashboard**, **Recent Sessions**, and **Sessions Needing Attention** when the app icon
+is right-clicked.
+The first four drive the frontmost GTK window directly; the static Recent and Attention entries open live
+in-app palettes because the desktop-entry format cannot publish dynamic session submenus.
+Launchers that do not implement the optional actions continue to expose the ordinary app launch unchanged.
 Quick Terminal remains an in-window surface with an app-local shortcut on Linux.
 The shared `global-hotkey` keymap verb is parsed for configuration compatibility but is only registered
 system-wide by the macOS host; Linux does not install compositor-specific global shortcut integration.
@@ -63,11 +79,15 @@ Dashboard and terminal-zoom views use stripped native headers: `Dashboard` or th
 shown with a custom window name when one exists, beside the matching exit button.
 These buttons and titles are presentation for the existing `dashboard` and `surface zoom` control paths and
 their tree read-back; they do not require another control command.
+Closed persisted windows appear as **Open Window: _name_** entries in the command palette and reopen with
+their saved workspaces and sessions.
 Dropping directories from the file manager onto a workspace or session row opens one session per directory,
 and **Reveal in Files** opens a session's focused working directory in the default file manager.
 Preferences has a status-driven Integrations page for the CLI, Claude Code hooks, Codex hooks, and the bundled
 agent skill.
 It shows the exact file plan before a write and never replaces unrelated hooks, skills, or executables.
+Linux follows the desktop Reduce Motion preference and the older GTK animation switch:
+agent-status glyphs remain visible but stop pulsing while reduced motion is requested.
 Before GTK initializes, agterm sets `GDK_DISABLE=gles-api,vulkan` on itself (`GDK_DEBUG=gl-disable-gles,vulkan-disable`
 on GTK 4.14–4.15), printing one line whenever it makes the assignment: the bundled Ghostty renderer is desktop-OpenGL-only, and GTK 4.16+
 otherwise prefers OpenGL ES for its own paint context, which leaves every terminal on a "needs OpenGL" overlay.
@@ -90,9 +110,14 @@ What it does:
 
 - **Workspaces.** Sessions are grouped under named workspaces like "work" and "personal", which keeps a screen of concurrent sessions organized. You reach a session by name, by recency, or from the keyboard.
 - **Control API and CLI.** A bundled tool, `agtermctl`, drives almost everything over a local socket: create sessions, type into them, run a program in an overlay and read its exit status, move and resize windows, or post a notification tied to a specific session. A script or an agent can set up and drive its own layout, and send you a notification from the session it was working in.
-- **Splits, scratch, and overlays.** Split a session into two shells, open a scratch terminal over it, or run a program in a full or floating overlay without disturbing the shell underneath.
+- **Splits, scratch, and overlays.** Split a session into two shells side by side or top and bottom, open a scratch terminal over it, or run a program in a full or floating overlay without disturbing the shell underneath.
+- **Three restore modes.** Restore fresh shells, rerun cleanly captured commands, or keep primary and split processes alive with zmx. Linux packages include the pinned zmx runtime.
 - **Agent skill.** An installable skill teaches Claude Code or Codex the control model and the `agtermctl` commands, so an agent running inside agterm can build its own layout, run overlays, manage windows, and show images inline without you explaining the API. On Linux, manage it from **Preferences ▸ Integrations**.
 - **Agent status.** A coding agent reports its state (active, blocked, or completed) onto its session's row, so you can see which of many running agents needs you. On Linux, inspect and install the Claude Code, Codex, Pi, OpenCode, and shell hooks from **Preferences ▸ Integrations**.
+
+A lot of "does it have X?" questions have the same answer: bind X yourself. A `command` line in `keymap.conf` turns any shell line into a key chord, and an overlay gives an interactive program a real terminal over the session, so a file manager, a git UI, or a database browser is one line away. Bigger workflows become scripts, which is what the [cookbook](cookbook/) collects.
+
+You are not meant to write those lines by hand. Install the agent skill (Help ▸ Install Agent Skill…) and ask the agent in your session for what you want, and it writes the line with the right syntax, targeting, and PATH handling. [Extend agterm](https://agterm.com/docs#extend) shows that, and teaches enough of the model to read and change what comes back.
 
 For the real terminal work, rendering, VT parsing, and shell I/O, `agterm` embeds [Ghostty](https://ghostty.org)'s engine (libghostty); everything above is `agterm`'s own.
 
@@ -121,7 +146,7 @@ A full-screen diff TUI running inside a session:
 
 ![Diff TUI](docs/screenshots/diff-tui.png)
 
-A file manager in a floating overlay over the active session:
+The yazi file manager in a floating overlay over the active session, from one `command` line in `keymap.conf`:
 
 ![Floating overlay](docs/screenshots/floating-overlay.png)
 
@@ -154,7 +179,7 @@ A file open in the quick terminal, the window's shared scratch overlay:
 Linux releases are published from this fork as AppImage, DEB, RPM, and relocatable tar artifacts.
 Download them from the [agterm-linux releases page](https://github.com/melonamin/agterm-linux/releases).
 
-The AppImage bundles GTK4, libadwaita, the Swift runtime, libghostty, and Ghostty resources:
+The AppImage bundles GTK4, libadwaita, the Swift runtime, libghostty, Ghostty resources, and zmx:
 
 ```sh
 chmod +x agterm-vX.Y.Z-x86_64.AppImage
@@ -173,7 +198,8 @@ On a modern Fedora-compatible system with glibc 2.39 or newer:
 sudo dnf install ./agterm-linux-vX.Y.Z-x86_64.rpm
 ```
 
-The tarball bundles the Swift runtime and libghostty but expects GTK4 and libadwaita from the host:
+The tarball bundles the Swift runtime, libghostty, Ghostty resources, and zmx but expects GTK4 and
+libadwaita from the host:
 
 ```sh
 tar xzf agterm-linux-vX.Y.Z-x86_64.tar.gz
@@ -219,17 +245,17 @@ Requirements:
 - Swift 6.3.2.
 - GTK4, libadwaita, libepoxy, pkg-config, git, curl, ca-certificates, and xz.
 - zsh, required by the shared `agtermCore` tests.
-- Zig 0.16.0 for the vendored libghostty build.
+- Zig 0.16.0 for the vendored libghostty and zmx builds.
 
 ```sh
 scripts/setup-linux.sh
 cd agterm-linux && swift build
 ```
 
-`scripts/setup-linux.sh` builds the pinned libghostty revision and stages its exact theme dependency,
-shell integration, and compiled `xterm-ghostty` terminfo.
-It reuses a vendored cache only when its library matches the current architecture and its resource set is complete;
-release staging rejects a partial cache.
+`scripts/setup-linux.sh` builds the pinned libghostty and zmx revisions and stages Ghostty's exact theme
+dependency, shell integration, and compiled `xterm-ghostty` terminfo.
+It reuses vendored caches only when libghostty matches the current architecture, the Ghostty resources are
+complete, and the zmx revision matches; release staging rejects a partial cache.
 At runtime Linux advertises `TERM=xterm-ghostty` only when both shell integration and the sibling terminfo database
 resolve, and safely uses `TERM=xterm-256color` when they do not.
 
@@ -493,7 +519,7 @@ To open a terminal at a directory without the CLI, run `agterm-linux <path>` on 
 agterm adds a session in that directory to the last-active window.
 The socket equivalent, and the way to place the session precisely, is `agtermctl session new --cwd <path>`.
 
-The sections below cover the common cases. All 74 commands, with every argument, return value, and error, are documented in the **[Command reference](https://agterm.com/commands)**.
+The sections below cover the common cases. Every command, with its arguments, return value, and errors, is documented in the **[Command reference](https://agterm.com/commands)**.
 
 The macOS app bundles `agtermctl` inside `agterm.app`; upstream's **Help ▸ Install Command Line Tool…** action puts it on `PATH`.
 Linux package and portable-build behavior is described under [Optional integrations](#optional-integrations).
@@ -543,6 +569,12 @@ ArgumentParser reports malformed command lines with exit status `64`.
 These local commands ignore `--socket` and do not require a running app.
 
 Each command targets a session or workspace by its UUID, a unique prefix of that UUID (git-style), or the keyword `active` (the selected session / current workspace). `--target` defaults to `active`, so the current one rarely needs to be named. Mutating commands normally print the affected id; batch `session close` and `session move` accept repeated `--target` options and print the number of sessions actually changed. `tree` prints the workspace and session tree. Add `--json` for the raw response, or `--socket PATH` to override the socket path. The exit code is zero on success, non-zero on error.
+
+On macOS, sessions come back on the next launch with their directory, font size, and split state. **Settings ▸ General ▸ Restore sessions** chooses fresh shells, re-run commands, or live sessions. Live mode wraps every primary and split pane; scratch, overlay, and quick terminals remain temporary. A clean quit leaves each live process running and captures the foreground command as a fallback. The next launch reattaches when the daemon survived. If the daemon is missing after an orderly machine restart, zmx creates it with the captured command; the pane remains live and later launches reattach normally.
+
+The fallback has three exclusions. A pane in a window closed before quit has no capture and starts a fresh shell if its daemon is missing. A hard power loss or force quit never reaches capture. A command refused by `restore-denylist.conf`, carrying a control character, or captured with invalid UTF-8 also starts a fresh shell. SIGTERM leaves live daemons running but skips the clean-quit capture path. `agtermctl zmx list` shows every daemon and the pane that claims it, `agtermctl zmx prune` clears the detached ones no pane claims, and `agtermctl restore mode` reads or sets the policy without opening Settings. Switching away from Live sessions and restarting ends the detached live processes. A launch that still requests Live sessions but cannot use it preserves them for a later eligible launch.
+
+Live restore keeps the running process, usable text and TUI state, and normal terminal colors. The reconstructed screen does not retain inline images, earlier OSC 133 prompt markers, program-changed palette entries, or hyperlink metadata already attached to cells. New output after reattach behaves normally.
 
 ### Native picker
 
@@ -605,7 +637,7 @@ agtermctl workspace move --to top                # reorder a workspace among its
 agtermctl workspace new work --collapsed          # create a workspace closed in the sidebar (fill it with session new --no-select without it opening)
 agtermctl workspace collapse --target "$ws"       # collapse one workspace in the sidebar tree; workspace expand re-opens it (per-workspace, unlike sidebar expand/collapse)
 agtermctl session split toggle                   # split the active session
-agtermctl session resize --split-ratio 0.7       # set the split divider (left-pane fraction); or --grow-left/--grow-right D
+agtermctl session resize --split-ratio 0.7       # set the primary-role fraction; directional grow options follow physical sides
 agtermctl session scratch toggle                 # show/hide the active session's scratch terminal (on|off|toggle)
 agtermctl session flag on                        # flag the active session for the flagged working-set view (on|off|toggle|clear)
 agtermctl session reveal --target 9f3c           # reveal the focused pane's cwd in Finder
@@ -869,9 +901,16 @@ Where the logs and config live, how to read them, and the common problems (a key
 
 ## Restore limitations
 
-Restore reconstructs the structure, not the running processes. Three limitations follow from the design:
+Restore always reconstructs the window/session structure. Three process-level limitations follow:
 
-1. Live processes are not reattached — true process survival would require a tmux-style backend, which is out of scope. By default a restored session re-spawns a fresh login shell in its saved working directory. The optional **Restore running commands on restart** toggle (General settings, off by default) re-runs the command each pane had in the foreground at the last clean quit, so a gate `ssh`, `tail -f`, or `top` comes back — but it is a re-run, not a reattach: only a single-process command restores faithfully (pipelines and compound lines do not); a force-quit or crash captures nothing; and the programs named in `restore-denylist.conf` (in the config directory, seeded with the terminal multiplexers `tmux`/`screen`/`zellij`, one command name per line) are skipped so they start fresh rather than re-launching — everything else, including `python manage.py runserver` or `node server.js`, is restored. Edit that file to add or remove entries. A per-session, per-pane override can pin what a pane restores, winning over both the captured foreground and the session's own `--command`: `agtermctl session restore "claude --resume <id>" --target <session>` pins a shell line, `--none` pins nothing (the pane comes back as a plain shell), and `--clear` drops the override to fall back to auto-capture. The override is written now and consumed on the next launch — it never touches the running session — and it is sticky: it fires again on every restart until cleared, obeys the same setting but bypasses the denylist (it names its command deliberately), and reads back on `tree` as `restoreCommand` (main pane) / `splitRestoreCommand` (split pane). It exists for non-idempotent commands such as `claude --resume <id> --fork-session`, which would otherwise mint a new session on every restart: a Claude Code `SessionStart` hook can rewrite the override to the live session id on every start, so the next restart reattaches instead of forking. Ownership flips to whoever sets it — write it once and forget, and it stays pinned to a stale id. The pinned value is shell code stored in the window's state file and readable via `tree`, so it must not carry secrets.
+1. **Fresh shells** always start a new shell. **Re-run commands** captures each pane's foreground argv on a
+   clean quit and starts it again; pipelines and compound shell state cannot be reconstructed, force-quit or
+   power loss captures nothing, and entries in `restore-denylist.conf` are skipped. **Live sessions** keeps
+   local primary and split processes in zmx daemons and reattaches on the next launch. A reboot removes those
+   daemons, so the saved command is recreated instead. Scratch, overlay, and Quick terminals never survive.
+   Live mode requires zsh as the password-database login shell, plus bundled zmx and zsh integration.
+   Per-pane `session restore` overrides remain sticky and readable through `tree`; they are stored as shell
+   code, so they must not contain secrets.
 2. The saved working directory depends on the `GHOSTTY_ACTION_PWD` callback, which only fires when the shell has Ghostty shell-integration / OSC 7 active (auto-injected for zsh, bash, fish, and nu when the shell-integration resources are present). If the working directory is never reported, a session restores to the directory it was created in.
 3. The live working directory is persisted on quit and on every structural change (adding, closing, moving, renaming, or selecting a session), but not on every `cd` — OSC 7 fires on each prompt redraw, so saving each one would thrash the disk. A crash or force-quit therefore loses only the working-directory changes made since the last structural change or quit.
 

@@ -74,12 +74,23 @@ expect_cache_failure x86_64 "expected x86_64 (x86-64)"
 # Exercise setup-linux.sh itself in a disposable repository: a matching cache exits before build tools
 # are needed, while a complete stale cache reaches the rebuild path and invokes the sentinel git.
 SETUP_ROOT="$WORK/setup-root"
-mkdir -p "$SETUP_ROOT/scripts" "$SETUP_ROOT/linux" "$SETUP_ROOT/agterm-linux/vendor/ghostty"
+mkdir -p "$SETUP_ROOT/scripts" "$SETUP_ROOT/linux" \
+  "$SETUP_ROOT/agterm-linux/vendor/ghostty" "$SETUP_ROOT/agterm-linux/vendor/zmx"
 cp "$ROOT/scripts/setup-linux.sh" "$ROOT/scripts/verify-linux-architecture.sh" \
   "$ROOT/scripts/verify-linux-resources.sh" "$ROOT/scripts/verify-linux-vendor-cache.sh" \
+  "$ROOT/scripts/verify-linux-zmx-cache.sh" \
   "$SETUP_ROOT/scripts/"
-cp "$ROOT/linux/arch.sh" "$ROOT/linux/ghostty-resources.env" "$SETUP_ROOT/linux/"
+cp "$ROOT/linux/arch.sh" "$ROOT/linux/ghostty-resources.env" "$ROOT/linux/zmx.env" "$SETUP_ROOT/linux/"
 cp -R "$WORK/complete/." "$SETUP_ROOT/agterm-linux/vendor/ghostty/"
+cat > "$SETUP_ROOT/agterm-linux/vendor/zmx/zmx" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 0755 "$SETUP_ROOT/agterm-linux/vendor/zmx/zmx"
+printf 'test license\n' > "$SETUP_ROOT/agterm-linux/vendor/zmx/LICENSE"
+# shellcheck source=../linux/zmx.env
+source "$ROOT/linux/zmx.env"
+printf '%s\n' "$ZMX_REV" > "$SETUP_ROOT/agterm-linux/vendor/zmx/REVISION"
 cat > "$WORK/git" <<'EOF'
 #!/usr/bin/env bash
 echo "agterm cache test reached the libghostty rebuild path" >&2

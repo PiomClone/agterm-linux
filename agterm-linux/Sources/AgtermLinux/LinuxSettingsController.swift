@@ -82,7 +82,13 @@ extension AppController {
         for controller in gWindows.values { controller.applyToolbarMode() }
     }
 
-    func setRestoreRunningCommand(_ enabled: Bool) { persist(\.restoreRunningCommand, enabled ? true : nil) }
+    func setRestoreModeAtIndex(_ index: Int) {
+        let mode: RestoreMode = index == 1 ? .rerun : (index == 2 ? .live : .none)
+        var settings = linuxSettingsStore().load()
+        settings.restoreMode = mode
+        settings.restoreRunningCommand = nil
+        try? linuxSettingsStore().save(settings)
+    }
     func setConfirmCloseSession(_ enabled: Bool) { persist(\.confirmCloseSession, enabled ? true : nil) }
     func setCloseGraceUndo(_ enabled: Bool) { persist(\.closeGraceUndoEnabled, enabled ? nil : false) }
     func setNotificationsEnabled(_ enabled: Bool) { persist(\.notificationsEnabled, enabled ? nil : false) }
@@ -199,6 +205,19 @@ extension AppController {
         persist(\.fontSize, value == 13 ? nil : value)
         reloadConfig()
         library.resetSessionFontSizesAllWindows()
+    }
+
+    func setCursorStyleAtIndex(_ index: Int) {
+        let styles = AppSettings.CursorStyle.allCases
+        let value = index == 0 ? nil : styles.indices.contains(index - 1) ? styles[index - 1].rawValue : nil
+        persist(\.cursorStyle, value)
+        reloadConfig()
+    }
+
+    func setCursorBlinkAtIndex(_ index: Int) {
+        let value: Bool? = index == 1 ? true : (index == 2 ? false : nil)
+        persist(\.cursorBlink, value)
+        reloadConfig()
     }
 
     func setFontFamilyAtIndex(_ index: Int) {
@@ -319,6 +338,15 @@ extension AppController {
         for controller in gWindows.values { controller.applyInterfaceFontSize() }
     }
 
+    func setQuickTerminalSizeAtIndex(_ index: Int) {
+        let choices = QuickTerminalMetrics.sizePercentChoices
+        let value = index == 0 ? nil : choices.indices.contains(index - 1) ? choices[index - 1] : nil
+        persist(\.quickTerminalSizePercent, value)
+        for controller in gWindows.values {
+            if let frame = controller.quickFrame { gtk_widget_queue_allocate(W(frame)) }
+        }
+    }
+
     func setInactivePaneMute(_ value: Double) {
         let strength = Int(value)
         persist(\.inactivePaneMuteStrength,
@@ -389,6 +417,8 @@ extension AppController {
         var settings = linuxSettingsStore().load()
         settings.fontFamily = nil
         settings.fontSize = nil
+        settings.cursorStyle = nil
+        settings.cursorBlink = nil
         settings.theme = AppSettings.defaultTheme
         settings.darkTheme = nil
         settings.followSystemAppearance = nil
@@ -409,6 +439,7 @@ extension AppController {
         settings.sidebarFontSize = nil
         settings.interfaceFontSize = nil
         settings.inactivePaneMuteStrength = nil
+        settings.quickTerminalSizePercent = nil
         try? linuxSettingsStore().save(settings)
         reloadConfig()
         for controller in gWindows.values {

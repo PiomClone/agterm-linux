@@ -24,6 +24,22 @@ extension AppController {
         connect(fontSize, "notify::value", unsafeBitCast(onSettingsFontSize, to: GCallback.self))
         adw_preferences_group_add(cast(terminal), W(fontSize))
 
+        let cursorStyles = ["Config default"] + AppSettings.CursorStyle.allCases.map {
+            $0.rawValue.capitalized
+        }
+        let cursorIndex = settings.effectiveCursorStyle.flatMap(AppSettings.CursorStyle.allCases.firstIndex)
+            .map { $0 + 1 } ?? 0
+        adw_preferences_group_add(
+            cast(terminal),
+            W(preferencesCombo("Cursor shape", values: cursorStyles, selected: cursorIndex,
+                               handler: unsafeBitCast(onSettingsCursorStyle, to: GCallback.self))))
+        let blinkIndex = settings.cursorBlink.map { $0 ? 1 : 2 } ?? 0
+        adw_preferences_group_add(
+            cast(terminal),
+            W(preferencesCombo("Cursor blink", values: ["Config default", "On", "Off"],
+                               selected: blinkIndex,
+                               handler: unsafeBitCast(onSettingsCursorBlink, to: GCallback.self))))
+
         let themes = Self.bundledThemes()
         let following = settings.followSystemAppearance == true
         let activeTheme = settings.activeTheme(isDark: Self.systemIsDark)
@@ -123,6 +139,16 @@ extension AppController {
         connect(interfaceFont, "notify::value", unsafeBitCast(onSettingsInterfaceFont, to: GCallback.self))
         adw_preferences_group_add(cast(window), W(interfaceFont))
 
+        let quickChoices = QuickTerminalMetrics.sizePercentChoices
+        let quickIndex = settings.quickTerminalSizePercent.flatMap(quickChoices.firstIndex)
+            .map { $0 + 1 } ?? 0
+        adw_preferences_group_add(
+            cast(window),
+            W(preferencesCombo("Quick terminal size",
+                               values: ["Default (90%)"] + quickChoices.map { "\($0)%" },
+                               selected: quickIndex,
+                               handler: unsafeBitCast(onSettingsQuickTerminalSize, to: GCallback.self))))
+
         let mute = OpaquePointer(adw_spin_row_new_with_range(0, 10, 1))
         "Inactive pane mute".withCString { adw_preferences_row_set_title(cast(mute), $0) }
         adw_spin_row_set_value(
@@ -153,6 +179,16 @@ private let onSettingsFontFamily: @MainActor @convention(c) (OpaquePointer?, Opa
 }
 private let onSettingsFontSize: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated { controllerForWidget(row)?.setFontSize(adw_spin_row_get_value(row)) }
+}
+private let onSettingsCursorStyle: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+    MainActor.assumeIsolated {
+        controllerForWidget(row)?.setCursorStyleAtIndex(Int(adw_combo_row_get_selected(cast(row))))
+    }
+}
+private let onSettingsCursorBlink: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+    MainActor.assumeIsolated {
+        controllerForWidget(row)?.setCursorBlinkAtIndex(Int(adw_combo_row_get_selected(cast(row))))
+    }
 }
 private let onSettingsTheme: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated {
@@ -185,6 +221,11 @@ private let onSettingsSidebarFont: @MainActor @convention(c) (OpaquePointer?, Op
 }
 private let onSettingsInterfaceFont: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated { controllerForWidget(row)?.setInterfaceFontSize(adw_spin_row_get_value(row)) }
+}
+private let onSettingsQuickTerminalSize: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+    MainActor.assumeIsolated {
+        controllerForWidget(row)?.setQuickTerminalSizeAtIndex(Int(adw_combo_row_get_selected(cast(row))))
+    }
 }
 private let onSettingsInactivePaneMute: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated { controllerForWidget(row)?.setInactivePaneMute(adw_spin_row_get_value(row)) }

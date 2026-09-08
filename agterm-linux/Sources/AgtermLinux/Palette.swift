@@ -38,6 +38,9 @@ extension AppController {
             let row = LinuxPaletteRow.action(cmd, in: paletteContext, chord: cmd.builtinAction.flatMap(resolvedChord(for:)))
             return (row: row, run: run(for: cmd))
         }
+        if !library.recentClosedItems.isEmpty {
+            items.append((row: LinuxPaletteRow(title: "Clear Recent Items"), run: { self.clearRecentHistory() }))
+        }
         // Preferences… (the Linux Settings surface; macOS uses the Settings scene / Cmd+,).
         // These Linux-only rows have no BuiltinAction, so no chord resolves and they render title-only.
         items.append((row: LinuxPaletteRow(title: "Preferences…"), run: { self.showSettings() }))
@@ -48,11 +51,13 @@ extension AppController {
         items.append((row: LinuxPaletteRow(title: "Copy Selection"), run: { self.activeSurface()?.performBindingAction("copy_to_clipboard") }))
         items.append((row: LinuxPaletteRow(title: "Paste"), run: { self.activeSurface()?.performBindingAction("paste_from_clipboard") }))
         items.append((row: LinuxPaletteRow(title: "Select All"), run: { self.activeSurface()?.performBindingAction("select_all") }))
-        // Dynamic: switch to (open/raise) any other window — the Linux window-menu equivalent. New Window
-        // is a fixed command above; rename/delete live on the window itself.
+        // Dynamic: explicitly reopen persisted closed windows, matching upstream's "Open Window" palette
+        // rows. Other live windows remain available as Linux-only switch targets. Both paths use
+        // `openWindow`, which raises an attached window or lazily loads and presents a closed one.
         for w in gLibrary.windows where w.id != windowID {
             let target = w.id
-            items.append((row: LinuxPaletteRow(title: "Switch to Window: \(w.name)"), run: { openWindow(target) }))
+            let row = LinuxPaletteRow.window(name: w.name, isOpen: gLibrary.isOpen(target))
+            items.append((row: row, run: { openWindow(target) }))
             items.append((row: LinuxPaletteRow(title: "Rename Window: \(w.name)"), run: { self.renameWindowDialog(target) }))
             if gLibrary.canRemoveWindow {
                 items.append((row: LinuxPaletteRow(title: "Delete Window: \(w.name)"), run: { self.confirmDeleteWindow(target) }))
@@ -116,6 +121,7 @@ extension AppController {
         case .toggleSplit: return { self.toggleSplit(axis: .leftRight) }
         case .toggleHorizontalSplit: return { self.toggleSplit(axis: .topBottom) }
         case .closeSplit: return { self.closeActiveSplit() }
+        case .swapPanes: return { self.swapActiveSessionPanes() }
         case .toggleScratch: return { self.toggleScratch() }
         case .toggleTerminalZoom: return { self.toggleTerminalZoom() }
         case .dashboard: return { self.toggleDashboard() }
@@ -153,10 +159,15 @@ extension AppController {
     /// Jump to a session that needs attention, matching the shared `show_attention` built-in action.
     func showAttentionPalette() { showPalette(attention: true) }
 
-    /// Sessions as palette entries (label = "name — workspace"), each selecting that session.
-    /// `navigableSessions` is the ⌃P switcher's list (every workspace, sidebar order); `attentionSessions`
-    /// is the attention palette's, already ranked blocked→active→completed — which `filterPalette`
-    /// preserves for an empty query rather than alphabetizing.
+    /// Open the live MRU counterpart of the static freedesktop `Recent Sessions` launcher action.
+    func showRecentPalette() {
+        guard !store.navigableRecentSessions(limit: 10).isEmpty else { return }
+        showPalette(recent: true)
+    }
+
+    /// Sessions as palette entries (label = "name — workspace"). `navigableSessions` is the ⌃P switcher's
+    /// sidebar-order list, recent sessions preserve MRU order, and `attentionSessions` is already ranked
+    /// blocked→active→completed. `filterPalette` preserves both dynamic orders for an empty query.
     private func sessionRows(_ sessions: [Session]) -> [LinuxPaletteItem] {
         sessions.map { s in
             let ws = store.workspace(forSession: s.id)?.name ?? ""
@@ -164,7 +175,7 @@ extension AppController {
         }
     }
 
-    func showPalette(sessions: Bool = false, attention: Bool = false) {
+    func showPalette(sessions: Bool = false, recent: Bool = false, attention: Bool = false) {
         if paletteWindow != nil { closePalette(); return }   // re-invoking toggles the palette closed
         guard let win = op(gtk_window_new()) else { return }
         attachControllerContext(to: win, windowID: windowID)
@@ -174,7 +185,8 @@ extension AppController {
                 Unmanaged.passRetained(self).toOpaque())
         gtk_window_set_transient_for(WIN(win), WIN(windowPointer))
         gtk_window_set_modal(WIN(win), 1)
-        let title = attention ? "Go to Attention" : (sessions ? "Go to Session" : "Command Palette")
+        let title = attention ? "Go to Attention"
+            : (recent ? "Go to Recent Session" : (sessions ? "Go to Session" : "Command Palette"))
         title.withCString { gtk_window_set_title(WIN(win), $0) }
         let panelSize = interfacePanelSize(width: 480, height: 360)
         gtk_window_set_default_size(WIN(win), panelSize.0, panelSize.1)
@@ -203,9 +215,14 @@ extension AppController {
         connect(kc, "key-pressed", unsafeBitCast(onPaletteKey as @convention(c) (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> gboolean, to: GCallback.self))
         gtk_widget_add_controller(W(win), kc)
 
-        paletteAll = attention
-            ? LinuxPaletteList(items: sessionRows(store.attentionSessions), preservesNaturalOrder: true)
-            : LinuxPaletteList(items: sessions ? sessionRows(store.navigableSessions) : paletteActionList())
+        if attention {
+            paletteAll = LinuxPaletteList(items: sessionRows(store.attentionSessions), preservesNaturalOrder: true)
+        } else if recent {
+            let sessions = store.navigableRecentSessions(limit: 10).compactMap(store.session(withID:))
+            paletteAll = LinuxPaletteList(items: sessionRows(sessions), preservesNaturalOrder: true)
+        } else {
+            paletteAll = LinuxPaletteList(items: sessions ? sessionRows(store.navigableSessions) : paletteActionList())
+        }
         filterPalette("")
         gtk_window_present(WIN(win))
         _ = gtk_widget_grab_focus(W(entry))

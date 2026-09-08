@@ -10,6 +10,33 @@ private enum LinuxOverlayReadSurface {
 /// Kept beside the main adapter so that already-large compatibility surface stays within the lint limit.
 @MainActor
 extension AppController {
+    func appIdentity() -> ControlResponse {
+        ControlResponse(ok: true, result: ControlResult(app: LinuxAppMetadata.identity))
+    }
+
+    func captureRestoreCommands() -> ControlResponse {
+        let configuredMode = linuxSettingsStore().load().effectiveRestoreMode
+        guard configuredMode == .rerun else {
+            return err("restore.capture requires rerun mode; configured restore mode is "
+                + configuredMode.rawValue)
+        }
+        for controller in gWindows.values { controller.captureForegroundCommands() }
+        let captured = gWindows.values.reduce(into: 0) { count, controller in
+            for session in controller.store.workspaces.flatMap(\.sessions) {
+                if session.foregroundCommand != nil { count += 1 }
+                if session.splitForegroundCommand != nil { count += 1 }
+            }
+        }
+        let paneSuffix = captured == 1 ? "" : "s"
+        guard gLibrary.saveAllOpenChecked() else {
+            return err("captured \(captured) pane\(paneSuffix) but at least one window's save "
+                + "failed; failed windows keep their argv in memory until they save successfully")
+        }
+        var result = ControlResult(count: captured)
+        result.text = "captured \(captured) pane\(paneSuffix)"
+        return ControlResponse(ok: true, result: result)
+    }
+
     func applySessionWatermark(_ id: UUID) {
         surfaces[id]?.applyWatermarkFromSession()
         splitSurfaces[id]?.applyWatermarkFromSession()
@@ -18,6 +45,24 @@ extension AppController {
 
     func readEvents(_ options: ControlEventReadOptions) -> ControlResponse {
         library.readEvents(options)
+    }
+
+    func setSessionContext(_ target: String?, window: String?, context: String?) -> ControlResponse {
+        switch resolveSessionResponse(target) {
+        case .failure(let response): return response
+        case .success(let id):
+            guard store.session(withID: id) != nil else { return err("no such session") }
+            _ = store.setContext(context, forSession: id)
+            updateTitle()
+            refreshSidebar()
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+        }
+    }
+
+    func setSidebarWidth(_ points: Double, window: String?) -> ControlResponse {
+        store.setSidebarWidth(points)
+        if let splitView { applySidebarWidth(splitView) }
+        return ControlResponse(ok: true, result: ControlResult(sidebarWidth: store.sidebarWidth))
     }
 
     func setWorkspaceExpansion(_ target: String?, window: String?, expanded: Bool) -> ControlResponse {
@@ -153,7 +198,7 @@ extension AppController {
             )
         }
         var result = ControlResult(id: id.uuidString)
-        if case .pin = update.pin, linuxSettingsStore().load().restoreRunningCommand != true {
+        if case .pin = update.pin, linuxSettingsStore().load().effectiveRestoreMode != .rerun {
             result.text = "saved, but \"Restore running commands on restart\" is off, so the override will not run"
         }
         return ControlResponse(ok: true, result: result)

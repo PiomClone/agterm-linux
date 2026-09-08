@@ -36,11 +36,14 @@ struct AgtermApp {
         // the session bus and runs ALONGSIDE a deployed one (the Linux analogue of the macOS .debug
         // bundle id) instead of forwarding its launch to the running instance.
         let appID = ProcessInfo.processInfo.environment["AGTERM_APP_ID"] ?? LinuxAppMetadata.applicationID
-        // HANDLES_OPEN (1<<2): route a dir/file arg to the `open` signal (agterm-linux <dir> → a session
-        // there) instead of erroring on unknown args; no-arg launches still fire `activate`.
-        let app = OpaquePointer(adw_application_new(appID, GApplicationFlags(rawValue: 4)))
+        // HANDLES_COMMAND_LINE forwards both freedesktop Desktop Entry Actions and ordinary path launches
+        // to the primary instance. HANDLES_OPEN remains set because the command-line adapter deliberately
+        // calls g_application_open(), preserving the existing open-signal path and relative-path semantics.
+        let flags = GApplicationFlags(rawValue: (1 << 2) | (1 << 3))
+        let app = OpaquePointer(adw_application_new(appID, flags))
         connect(app, "activate", unsafeBitCast(onActivate, to: GCallback.self), nil)
         connect(app, "open", unsafeBitCast(onOpen, to: GCallback.self), nil)
+        connect(app, "command-line", unsafeBitCast(onCommandLine, to: GCallback.self), nil)
         connect(app, "shutdown", unsafeBitCast(onShutdown, to: GCallback.self), nil)
         let status = g_application_run(GAPP(app), CommandLine.argc, CommandLine.unsafeArgv)
         exit(status)
@@ -49,6 +52,88 @@ struct AgtermApp {
 
 private let onActivate: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void = { app, _ in
     MainActor.assumeIsolated { activateApplication(app) }
+}
+
+private let onCommandLine: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> gint = { app, commandLine, _ in
+    MainActor.assumeIsolated {
+        handleApplicationCommandLine(app: app, commandLine: commandLine)
+    }
+}
+
+/// Classifies the invocation in the primary process, then reuses GApplication's existing activate/open
+/// signals so a cold launcher action and a warm second process take exactly the same setup path.
+@MainActor private func handleApplicationCommandLine(
+    app: OpaquePointer?, commandLine: OpaquePointer?
+) -> gint {
+    guard let commandLine else { return 2 }
+    let cmd = UnsafeMutablePointer<GApplicationCommandLine>(commandLine)
+    var argc: gint = 0
+    guard let argv = g_application_command_line_get_arguments(cmd, &argc) else { return 2 }
+    defer { g_strfreev(argv) }
+    let arguments = (1..<Int(argc)).compactMap { index in
+        argv[index].map { String(cString: $0) }
+    }
+
+    switch LinuxApplicationInvocation.parse(arguments: arguments) {
+    case .activate:
+        g_application_activate(GAPP(app))
+    case .open(let paths):
+        var files = paths.map { path in
+            path.withCString { g_application_command_line_create_file_for_arg(cmd, $0) }
+        }
+        defer {
+            files.compactMap { $0 }.forEach { g_object_unref(UnsafeMutableRawPointer($0)) }
+        }
+        files.withUnsafeMutableBufferPointer { buffer in
+            g_application_open(GAPP(app), buffer.baseAddress, gint(buffer.count), "")
+        }
+    case .desktopAction(let action):
+        dispatchDesktopAction(action, app: app)
+    case .invalid(let message):
+        (message + "\n").withCString { g_application_command_line_printerr_literal(cmd, $0) }
+        return 2
+    }
+    return 0
+}
+
+/// Boots a cold primary instance, then sends one static launcher action to the frontmost live window.
+/// A warm blocked action deliberately does not activate/present the window: doing that before the
+/// window-scoped modal check would steal focus from its pending picker even though the action is inert.
+@MainActor private func dispatchDesktopAction(_ action: LinuxDesktopAction, app: OpaquePointer?) {
+    if gLibrary == nil { activateApplication(app) }
+    guard let id = gLibrary.frontmostWindowID ?? gLibrary.windows.first?.id,
+          let controller = gWindows[id] else { return }
+    controller.performDesktopAction(action)
+}
+
+@MainActor extension AppController {
+    /// Central invocation point for every freedesktop action. Dynamic session identities stay in the GTK
+    /// recent/attention palettes because Desktop Entry Actions themselves are static.
+    func performDesktopAction(_ action: LinuxDesktopAction) {
+        let context = LinuxDesktopActionContext(
+            terminalZoomActive: terminalZoom.target != nil,
+            dashboardOpen: dashboard.isOpen,
+            pickerActive: pickController.pending != nil
+        )
+        guard action.isEnabled(in: context) else { return }
+        if action != .newWindow { gtk_window_present(WIN(windowPointer)) }
+
+        switch action {
+        case .newSession:
+            newSession()
+        case .newWindow:
+            openNewWindow()
+        case .quickTerminal:
+            toggleQuick()
+        case .dashboard:
+            toggleDashboard()
+        case .recentSessions:
+            showRecentPalette()
+        case .attention:
+            guard !store.attentionSessions.isEmpty else { return }
+            showAttentionPalette()
+        }
+    }
 }
 
 /// The `open` signal (G_APPLICATION_HANDLES_OPEN): `agterm-linux <dir> [<dir>…]` — first launch OR a
@@ -97,11 +182,40 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
         hasPriorState: FirstRunWelcome.hasPriorState(in: stateDirectory))
     let appearanceSide = LinuxAppearanceSide(isDark: AppController.systemIsDark)
     GhosttyApp.shared.start(appearanceSide: appearanceSide)
+    let restoreDecision = currentSettings.effectiveRestoreMode.launchDecision(
+        liveUnavailableReason: LinuxZmxLaunch.liveUnavailableReason()
+    )
+    gRestoreLaunchDecision = restoreDecision
+    let zmxPath = LinuxZmxLaunch.executablePath()
+    let zmxClient = FileManager.default.isExecutableFile(atPath: zmxPath)
+        ? LinuxZmxClient(
+            executablePath: zmxPath,
+            socketDirectory: ZmxSupport.socketDirectory(forStateDirectory: stateDirectory.path)
+        ) : nil
+    gZmxClient = zmxClient
+    gZmxForegroundResolver = zmxClient.map(LinuxZmxForegroundResolver.init(client:))
     // The notification click-to-reveal target: an `app.reveal` action carrying a session-id string.
     let revealAction = g_simple_action_new("reveal", g_variant_type_new("s"))
     connect(revealAction, "activate", unsafeBitCast(onRevealAction as @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void, to: GCallback.self))
     g_action_map_add_action(app, revealAction)
-    gLibrary = WindowLibrary(directory: linuxStateDirectory())
+    gLibrary = WindowLibrary(
+        directory: stateDirectory,
+        paneFinalizer: { identities in
+            _ = zmxClient?.kill(paneIdentities: identities)
+            gZmxForegroundResolver?.noteLifecycleChange()
+        },
+        launchInventorySink: { identities in
+            gZmxRunningNames = zmxClient?.reap(
+                knownPaneIdentities: identities,
+                launchDecision: restoreDecision
+            ).runningNames
+            gZmxForegroundResolver?.noteLifecycleChange()
+        },
+        launchPaneDrop: { identities in identities.forEach(gSpawnRegistry.pacer.discard) },
+        defaultSessionCwd: ConfigPaths.defaultNewSessionCwd()
+    )
+    let spawnPlan = gLibrary.launchSpawnPlan()
+    gSpawnRegistry.pacer.arm(order: spawnPlan.order, burst: spawnPlan.burst)
     ensureStarterFiles()
     installAppCSS()
     installStatusColorCSS()
@@ -126,6 +240,10 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
         for signal in ["notify::gtk-xft-dpi", "notify::gtk-font-name", "notify::gtk-overlay-scrolling"] {
             connect(desktopSettings, signal,
                     unsafeBitCast(onDesktopSidebarMetricsChanged, to: GCallback.self), nil)
+        }
+        for signal in ["notify::gtk-enable-animations", "notify::gtk-interface-reduced-motion"] {
+            connect(desktopSettings, signal,
+                    unsafeBitCast(onReducedMotionChanged, to: GCallback.self), nil)
         }
     }
     let ids = gLibrary.openIDs()
@@ -175,15 +293,23 @@ func linuxSettingsStore() -> SettingsStore {
 private let onShutdown: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void = { _, _ in
     MainActor.assumeIsolated {
         colorSchemeChangeDebouncer.cancel()
+        gLibrary?.isTerminating = true
         flushOnQuit()
         gControlServer.stop()
     }
 }
 
+private let onReducedMotionChanged: @MainActor @convention(c) (
+    OpaquePointer?, OpaquePointer?, gpointer?
+) -> Void = { _, _, _ in
+    MainActor.assumeIsolated { refreshAppCSS() }
+}
+
 /// The app-wide stylesheet `installAppCSS` loads — internal (not private) so the tests can pin that
-/// interpolated policy constants (the sidebar hover rule) actually reach the installed string.
-let appCSS = """
-    .agterm-blink { animation: agterm-blink-pulse 1.2s ease-in-out infinite; }
+/// interpolated policy constants actually reach the installed string.
+func appCSS(prefersReducedMotion: Bool) -> String {
+    """
+    \(LinuxReduceMotionPolicy.blinkCSS(prefersReducedMotion: prefersReducedMotion))
     /* one selector per keyframe: GTK 4.14's _gtk_css_keyframes_parse takes a single progress value and then
        expects the block, so a `0%, 100%` list is a parse error there - and GTK drops @keyframes silently */
     @keyframes agterm-blink-pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
@@ -202,20 +328,29 @@ let appCSS = """
     .agterm-sidebar #workspace-row .workspace-add-session { opacity: 0; }
     .agterm-sidebar #workspace-row:hover .workspace-add-session { opacity: 1; }
     \(LinuxSidebarPolicy.sidebarHoverCSS)   /* passive rows lose `.activatable`, so hover keys on bare `:hover` — contract + pins live on the constant; see agterm-linux/docs/sidebar.md */
-    /* trailing inset inside the selection highlight (the row's content box paints it, so a box margin would indent the highlight itself) */
+    /* trailing content inset inside the rounded selection row; a row margin would indent the highlight itself */
     .agterm-session-row-content { padding-right: 6px; }
     """
+}
 
-/// Install the app-wide CSS once: the `.agterm-blink` keyframe animation that pulses an in-progress
-/// agent-status glyph (the `AgentIndicator.blink` cue). Added at the application priority so it layers
-/// over the theme without overriding user CSS.
+/// Install the app-wide CSS once. The reloadable provider lets a desktop Reduce Motion change stop or
+/// restore the decorative agent-status pulse immediately on every existing glyph.
+@MainActor private var gAppCSSProvider: OpaquePointer?
+
+@MainActor private func refreshAppCSS() {
+    guard let provider = gAppCSSProvider else { return }
+    let css = appCSS(prefersReducedMotion: linuxPrefersReducedMotion(gtk_settings_get_default()))
+    css.withCString { gtk_css_provider_load_from_string(cast(provider), $0) }
+}
+
 @MainActor private func installAppCSS() {
     guard let display = gdk_display_get_default() else { return }
-    let provider = gtk_css_provider_new()
-    appCSS.withCString { gtk_css_provider_load_from_string(provider, $0) }
+    let provider = OpaquePointer(gtk_css_provider_new())
+    gAppCSSProvider = provider
+    refreshAppCSS()
     // GTK_STYLE_PROVIDER_PRIORITY_APPLICATION = 600; the macro cast isn't available in Swift, the
     // GtkCssProvider pointer is passed straight through as the GtkStyleProvider.
-    gtk_style_context_add_provider_for_display(display, OpaquePointer(provider), 600)
+    gtk_style_context_add_provider_for_display(display, provider, 600)
 }
 
 @MainActor private var gStatusColorProvider: OpaquePointer?
@@ -359,7 +494,7 @@ private let onRevealAction: @MainActor @convention(c) (OpaquePointer?, OpaquePoi
        let cover = session.programOverlayActive ? controller.overlaySurfaces[id] : controller.scratchSurfaces[id] {
         cover.grabFocus(supersedingPopoverCapture: true)
     } else if session.hasSplit {
-        controller.focusPane(left: !wantSplit)
+        controller.focusPane(wantSplit: wantSplit)
     } else {
         controller.sessionFocusTarget(for: id, wantSplit: false)?
             .grabFocus(supersedingPopoverCapture: true)

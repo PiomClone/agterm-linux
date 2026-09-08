@@ -50,6 +50,7 @@ extension AppController {
     func confirmQuit(_ response: String) {
         guard response == "quit" else { return }
         confirmedClose = true
+        library.isTerminating = true
         gtk_window_close(WIN(window))
     }
 
@@ -92,6 +93,7 @@ extension AppController {
         store.finalizeAllPendingCloses()
         cancelPendingWorkspaceToggle()
         cancelLeaderDeadlineForWindowClose()
+        cancelSessionSwitch()
         splitRatioRestore.cancelAll()
         cancelFullscreenTransitionTimeout()
         setTerminalZoom(.off, target: nil)
@@ -102,7 +104,7 @@ extension AppController {
         autoFollowCoordinator.stop()
         let w = gtk_widget_get_width(W(window)), h = gtk_widget_get_height(W(window))
         if w > 0, h > 0 { library.setGeometry(WindowGeometry.Size(width: Double(w), height: Double(h)), forWindow: windowID) }
-        if linuxSettingsStore().load().restoreRunningCommand ?? false { captureForegroundCommands() }
+        if linuxSettingsStore().load().effectiveRestoreMode == .rerun { captureForegroundCommands() }
         store.save()
         store.discardHudBodies()
         quickSurface?.teardown()

@@ -21,15 +21,15 @@ permissions:
   attestations: write
 
 env:
-  UPSTREAM_BASE_TAG: "v0.24.0"
-  UPSTREAM_BASE_COMMIT: "834b74a7f78de06e1c4f66c5e24eafccd047ec64"
+  UPSTREAM_BASE_TAG: "v0.26.1"
+  UPSTREAM_BASE_COMMIT: "c215430d1cb56bfca4e062274947cde6d237c18d"
   SWIFTLINT_VERSION: "0.65.0"
   SWIFTLINT_SHA256: "79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b"
   LINUX_SOURCEKIT_LIB_PATH: "/usr/lib/libsourcekitdInProc.so"
   ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
   NFPM_VERSION: "2.47.0"
   NFPM_SHA256: "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
-  LINUXDEPLOY_SHA256: "421ca71d5c69ea97c6309276232990d43df1dcece0edfaa26bbf926ff96ed12e"
+  LINUXDEPLOY_SHA256: "36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62"
   LINUXDEPLOY_GTK_COMMIT: "7a3fbc31a9e5075073ff8790f26effbac5f84453"
   LINUXDEPLOY_GTK_SHA256: "b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171"
   APPIMAGE_RUNTIME_SHA256: "1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf"
@@ -133,9 +133,14 @@ jobs:
           nfpm --version
           linuxdeploy-x86_64.AppImage --appimage-extract-and-run --version
 
-      - name: Test shared core
+      # The Swift container is root, but persistence failure tests intentionally depend on normal-user
+      # POSIX write permissions. Run them at the same privilege level as the desktop application.
+      - name: Test shared core as an unprivileged user
         working-directory: agtermCore
-        run: swift test
+        run: |
+          useradd --create-home --user-group agterm-test
+          chown -R agterm-test:agterm-test "$GITHUB_WORKSPACE"
+          runuser --user agterm-test -- env HOME=/home/agterm-test swift test
 
       - name: Reject Linux CLI parser drift
         run: scripts/check-linux-cli-drift.sh
@@ -164,16 +169,22 @@ jobs:
       - name: Lint Swift sources
         run: swiftlint lint --strict --quiet
 
-      - name: Cache vendored libghostty
+      - name: Cache vendored Linux runtimes
         id: ghostty-cache
         uses: actions/cache@v6
         with:
-          path: agterm-linux/vendor/ghostty
-          key: libghostty-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
+          path: |
+            agterm-linux/vendor/ghostty
+            agterm-linux/vendor/zmx
+          key: linux-runtimes-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-zmx-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/zmx.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
 
       - name: Verify restored libghostty cache
         if: steps.ghostty-cache.outputs.cache-hit == 'true'
         run: scripts/verify-linux-vendor-cache.sh agterm-linux/vendor/ghostty
+
+      - name: Verify restored zmx cache
+        if: steps.ghostty-cache.outputs.cache-hit == 'true'
+        run: scripts/verify-linux-zmx-cache.sh agterm-linux/vendor/zmx
 
       - name: Test deterministic Ghostty resources
         run: scripts/test-linux-resources.sh
@@ -183,6 +194,9 @@ jobs:
 
       - name: Verify built libghostty cache
         run: scripts/verify-linux-vendor-cache.sh agterm-linux/vendor/ghostty
+
+      - name: Verify built zmx cache
+        run: scripts/verify-linux-zmx-cache.sh agterm-linux/vendor/zmx
 
       - name: Test Linux package
         working-directory: agterm-linux

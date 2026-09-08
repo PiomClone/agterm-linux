@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UPSTREAM_BASE_TAG: "v0.24.0"
-  UPSTREAM_BASE_COMMIT: "834b74a7f78de06e1c4f66c5e24eafccd047ec64"
+  UPSTREAM_BASE_TAG: "v0.26.1"
+  UPSTREAM_BASE_COMMIT: "c215430d1cb56bfca4e062274947cde6d237c18d"
   SWIFTLINT_VERSION: "0.65.0"
   SWIFTLINT_SHA256: "79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b"
   LINUX_SOURCEKIT_LIB_PATH: "/usr/lib/libsourcekitdInProc.so"
@@ -22,6 +22,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       swift: ${{ steps.filter.outputs.swift }}
       cookbook: ${{ steps.filter.outputs.cookbook }}
@@ -60,6 +61,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Keep the shared, host-free controller package green on Linux because it backs the GTK frontend.
     container: swift:6.3.2-noble
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,9 +77,15 @@ jobs:
         run: |
           git tag --force "$UPSTREAM_BASE_TAG" "$UPSTREAM_BASE_COMMIT"
           git merge-base --is-ancestor "$UPSTREAM_BASE_TAG" HEAD
-      - name: swift test
+      # Two persistence tests deliberately verify write failures through POSIX directory permissions.
+      # The official Swift container runs as root, which bypasses those permissions, so exercise the
+      # package as an ordinary desktop user like the application itself.
+      - name: swift test as an unprivileged user
         working-directory: agtermCore
-        run: swift test
+        run: |
+          useradd --create-home --user-group agterm-test
+          chown -R agterm-test:agterm-test "$GITHUB_WORKSPACE"
+          runuser --user agterm-test -- env HOME=/home/agterm-test swift test
       - name: Enforce host-free core boundary
         run: scripts/check-linux-core-boundary.sh "$UPSTREAM_BASE_TAG"
       - name: Reject Linux CLI parser drift
@@ -89,6 +97,7 @@ jobs:
     if: needs.changes.outputs.swift == 'true'
     runs-on: ubuntu-24.04
     container: swift:6.3.2-noble
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -163,21 +172,28 @@ jobs:
         run: |
           source linux/arch.sh
           echo "host=$HOST_ARCH" >> "$GITHUB_OUTPUT"
-      - name: Cache vendored libghostty (keyed on the pinned rev + the patch)
+      - name: Cache vendored Linux runtimes
         id: ghostty-cache
         uses: actions/cache@v6
         with:
-          path: agterm-linux/vendor/ghostty
-          key: libghostty-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
+          path: |
+            agterm-linux/vendor/ghostty
+            agterm-linux/vendor/zmx
+          key: linux-runtimes-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-zmx-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/zmx.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
       - name: Verify restored libghostty cache
         if: steps.ghostty-cache.outputs.cache-hit == 'true'
         run: scripts/verify-linux-vendor-cache.sh agterm-linux/vendor/ghostty
+      - name: Verify restored zmx cache
+        if: steps.ghostty-cache.outputs.cache-hit == 'true'
+        run: scripts/verify-linux-zmx-cache.sh agterm-linux/vendor/zmx
       - name: Test deterministic Ghostty resources
         run: scripts/test-linux-resources.sh
       - name: Build libghostty (skips if the cache restored it)
         run: scripts/setup-linux.sh
       - name: Verify built libghostty cache
         run: scripts/verify-linux-vendor-cache.sh agterm-linux/vendor/ghostty
+      - name: Verify built zmx cache
+        run: scripts/verify-linux-zmx-cache.sh agterm-linux/vendor/zmx
       - name: swift test (agterm-linux)
         working-directory: agterm-linux
         run: swift test
@@ -206,6 +222,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.cookbook == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: recipe layout, index and headings
@@ -249,7 +266,7 @@ jobs:
             if ! head -c 2 "$f" | grep -q '#!'; then
               echo "::error::$f has no shebang"; fail=1
             fi
-          done < <(find cookbook -type f \( -name '*.sh' -o -name '*.zsh' \) -print0)
+          done < <(find cookbook -type f \( -name '*.sh' -o -name '*.zsh' -o -name '*.fish' -o -name '*.py' \) -print0)
 
           exit $fail
       - name: shellcheck
@@ -257,12 +274,35 @@ jobs:
         # without it a failed find would leave the step green having checked nothing
         shell: bash
         run: find cookbook -type f -name '*.sh' -print0 | xargs -0 -r shellcheck
-      - name: Install zsh
-        # not on the ubuntu-latest image, unlike shellcheck
-        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Install recipe shells
+        # neither is on the ubuntu-latest image; fish runs a recipe regression test
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
       - name: zsh syntax check
         # shellcheck cannot parse zsh, so a parse is the only gate .zsh recipes get.
         # -n1 because zsh -n reads one script and treats the rest as its arguments;
         # bash explicitly, for pipefail, same reason as the shellcheck step above
         shell: bash
         run: find cookbook -type f -name '*.zsh' -print0 | xargs -0 -r -n1 zsh -n
+      - name: fish syntax check
+        # nothing lints .fish either, so a parse is the only gate these recipes get.
+        # -n1 because fish --no-execute parses its first argument and ignores the rest,
+        # so a batched call would leave the step green having checked one file
+        shell: bash
+        run: find cookbook -type f -name '*.fish' -print0 | xargs -0 -r -n1 fish --no-execute
+      - name: Install ruff
+        # not on the ubuntu-latest image, unlike shellcheck. pipx, because the runner's
+        # python is externally managed and a bare pip install into it fails
+        run: pipx install ruff
+      - name: ruff
+        # the .py counterpart of shellcheck, so a recipe is linted rather than only parsed.
+        # EXE001 is ignored because it fails a shebang on a non-executable file, which
+        # collides head-on with the shebang the layout step requires of every script, and
+        # would move executable-bit policy into CI where this repo deliberately keeps it
+        # out. bash explicitly, for pipefail, same reason as the shellcheck step above
+        shell: bash
+        run: find cookbook -type f -name '*.py' -print0 | xargs -0 -r ruff check --ignore EXE001
+      - name: Python recipe tests
+        # one process per file keeps recipes independent and gives each test script its own argv.
+        # bash explicitly, for pipefail, same reason as the ruff step above.
+        shell: bash
+        run: find cookbook -type f -name 'test_*.py' -print0 | xargs -0 -r -n1 python3

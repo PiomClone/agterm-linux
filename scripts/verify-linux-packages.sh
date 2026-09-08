@@ -59,6 +59,7 @@ verify_payload() {
   test -x "$payload/bin/agterm-linux.bin"
   test -x "$payload/bin/agtermctl"
   test -x "$payload/bin/agtermctl.bin"
+  test -x "$payload/bin/zmx"
   test -r "$payload/bin/agterm-linux_AgtermLinux.resources/hud/hud.sh"
   test -f "$payload/lib/libghostty.so"
   "$ROOT/scripts/verify-linux-resources.sh" "$payload/share"
@@ -67,7 +68,9 @@ verify_payload() {
   verify_pi_extension "$payload/share/agterm/agent-status/pi/agterm-status.ts"
   verify_opencode_plugin "$payload/share/agterm/agent-status/opencode/agterm-status.js"
   test -f "$payload/share/agterm/agent-skill/SKILL.md"
+  test -s "$payload/share/agterm/ZMX-LICENSE"
   [[ "$(<"$payload/share/agterm/VERSION")" == "$VERSION" ]]
+  test -s "$payload/share/agterm/COMMIT"
   test -f "$payload/share/applications/io.github.melonamin.agterm.desktop"
   desktop-file-validate "$payload/share/applications/io.github.melonamin.agterm.desktop"
   "$VERIFY_ARCH" "$payload/bin/agterm-linux.bin"
@@ -80,6 +83,7 @@ verify_payload() {
     fi
   done
   "$payload/bin/agtermctl" --help >/dev/null
+  ZMX_DIR="$WORK/zmx-help" "$payload/bin/zmx" --help >/dev/null
 }
 
 mkdir -p "$WORK/tar" "$WORK/deb" "$WORK/rpm" "$WORK/appimage"
@@ -121,6 +125,7 @@ test -x "$APPROOT/AppRun"
 test -x "$APPROOT/usr/bin/agterm-linux.bin"
 test -x "$APPROOT/usr/bin/agtermctl"
 test -x "$APPROOT/usr/bin/agtermctl.bin"
+test -x "$APPROOT/usr/bin/zmx"
 "$VERIFY_ARCH" "$APPROOT/usr/bin/agterm-linux.bin"
 test -r "$APPROOT/usr/bin/agterm-linux_AgtermLinux.resources/hud/hud.sh"
 test -x "$APPROOT/usr/share/agterm/agent-status/agterm-agent-status.sh"
@@ -128,7 +133,9 @@ test -x "$APPROOT/usr/share/agterm/agent-status/agterm-codex-status.sh"
 verify_pi_extension "$APPROOT/usr/share/agterm/agent-status/pi/agterm-status.ts"
 verify_opencode_plugin "$APPROOT/usr/share/agterm/agent-status/opencode/agterm-status.js"
 test -f "$APPROOT/usr/share/agterm/agent-skill/SKILL.md"
+test -s "$APPROOT/usr/share/agterm/ZMX-LICENSE"
 [[ "$(<"$APPROOT/usr/share/agterm/VERSION")" == "$VERSION" ]]
+test -s "$APPROOT/usr/share/agterm/COMMIT"
 find "$APPROOT/usr/lib" -name 'libgtk-4.so.1' -print -quit | grep -q .
 find "$APPROOT/usr/lib" -name 'libadwaita-1.so.0' -print -quit | grep -q .
 find "$APPROOT/usr/lib" -name 'libghostty.so' -print -quit | grep -q .
@@ -143,6 +150,7 @@ for binary in agterm-linux.bin agtermctl.bin; do
   fi
 done
 "$APPROOT/usr/bin/agtermctl" --help >/dev/null
+ZMX_DIR="$WORK/zmx-appimage-help" "$APPROOT/usr/bin/zmx" --help >/dev/null
 
 (
   cd "$OUT"

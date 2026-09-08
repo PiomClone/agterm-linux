@@ -159,6 +159,7 @@ final class AppController {
     var confirmedClose = false                       // set once the quit-confirm is accepted
     var badgeEnabled = linuxSettingsStore().load().notificationBadgeEnabled ?? true   // gates the unseen-count pill
     var sessionSwitcher = SessionSwitcherModel()                                  // Ctrl-Tab hold-to-cycle state
+    var heldControlKeys = HeldControlKeys()                      // which Ctrl keys are down (the commit signal)
     var contextMenuPopover: OpaquePointer?                       // live row context menu
     var popoverTookKeyboardFromSearchEntry = false               // set at popup: it took the keyboard from a live search
     var pendingWorkspaceToggle: UUID?
@@ -449,7 +450,7 @@ final class AppController {
     /// The primary pane's shell exited. Mirrors macOS: if a split pane is alive the session SURVIVES,
     /// promoted to that single pane (a primary exit must never destroy the live split shell); with no
     /// split the session closes. `AppStore.closePrimaryPane` decides promote-vs-close.
-    func closePrimaryPane(_ id: UUID) {
+    func closePrimaryPane(_ id: UUID, alreadyFinalized: UUID? = nil) {
         // Capture the survivor (the split pane) before the store clears the session's split flags.
         if dashboard.isOpen { dashboard.promoteSplitMember(session: id) }
         let survivor = splitSurfaces[id]
@@ -457,19 +458,15 @@ final class AppController {
         let survivorOverlay = rightOverlaySurfaces[id]; let survivorWash = rightOverlayWashes[id]
         let survivorWashProvider = rightOverlayWashProviders[id]
         let zoomTarget = suspendTerminalZoomForPrimaryPanePromotion(id)
-        store.closePrimaryPane(id)
+        store.closePrimaryPane(id, alreadyFinalized: alreadyFinalized)
         guard store.session(withID: id) != nil, let survivor, let survivorHost,
               let paned = sessionPanes[id] else {
             reconcile()   // no split → the store closed the session; reconcile drops its widgets
             return
         }
-        // Promote the survivor to the single pane: detach the dead primary (the store already freed its
-        // ghostty surface; teardown never touches the glArea) and reparent the survivor from the end
-        // slot to the start slot, so it fills the page and a future re-split has a free end slot.
-        // Removing a child from a GtkPaned does NOT free the survivor's glArea, so its shell lives on.
-        gtk_paned_set_start_child(paned, nil)
-        gtk_paned_set_end_child(paned, nil)
-        gtk_paned_set_start_child(paned, W(survivorHost))
+        // The store already freed the dead primary's ghostty surface; teardown never touches its glArea.
+        // GtkPaned gives the survivor, which never moves, the full allocation.
+        collapseSplit(paned, dropping: primaryPaneHosts[id], showing: survivorHost)
         surfaces[id] = survivor
         splitSurfaces[id] = nil
         primaryPaneHosts[id] = survivorHost
@@ -477,9 +474,9 @@ final class AppController {
         leftOverlaySurfaces[id] = survivorOverlay; rightOverlaySurfaces[id] = nil
         leftOverlayWashes[id] = survivorWash; rightOverlayWashes[id] = nil
         leftOverlayWashProviders[id] = survivorWashProvider; rightOverlayWashProviders[id] = nil
-        let sid = id
-        survivor.promoteToPrimary(onExit: { [weak self] in self?.closePrimaryPane(sid) })
+        survivor.promoteToPrimaryPane()
         survivor.queueRender()
+        survivor.refresh()
         if store.selectedSessionID == id {
             survivor.grabFocus()
         }
@@ -700,6 +697,7 @@ final class AppController {
         gtk_label_set_xalign(label, 0)
         gtk_widget_set_hexpand(W(label), 1)
         gtk_label_set_ellipsize(label, PANGO_ELLIPSIZE_END)
+        text.withCString { gtk_widget_set_tooltip_text(W(label), $0) }
         nameLabels[label] = (id, isWorkspace)
         let dbl = gtk_gesture_click_new()
         gtk_gesture_single_set_button(dbl, 1)   // left double-click only; right-click goes to the context menu
@@ -738,8 +736,8 @@ final class AppController {
         sessionFocusTarget(for: id)?.grabFocus(supersedingPopoverCapture: true)
     }
 
-    func closeSplitPane(_ id: UUID) {
-        store.closeSplitPane(id)
+    func closeSplitPane(_ id: UUID, alreadyFinalized: UUID? = nil) {
+        store.closeSplitPane(id, alreadyFinalized: alreadyFinalized)
         reconcile()
         if store.selectedSessionID == id {
             sessionFocusTarget(for: id, wantSplit: false)?.grabFocus()
@@ -753,55 +751,17 @@ final class AppController {
         updateToggleIcons()
     }
 
-    /// Move keyboard focus between the two split panes of the active session.
-    func focusPane(left: Bool) {
+    /// Focus the active session's primary or split pane — the MODEL entry point, for role-named callers.
+    func focusPane(wantSplit: Bool) {
         guard let id = store.selectedSessionID, store.session(withID: id)?.hasSplit == true else { return }
-        sessionFocusTarget(for: id, wantSplit: !left)?.grabFocus(supersedingPopoverCapture: true)
+        sessionFocusTarget(for: id, wantSplit: wantSplit)?.grabFocus(supersedingPopoverCapture: true)
     }
 
-    /// Ctrl+Tab: jump to the most-recently-used OTHER session. Selecting re-pushes recency,
-    /// so a second Ctrl+Tab toggles back (Alt-Tab-between-two).
-    /// Ctrl-Tab: begin (or advance) the hold-to-cycle MRU switch via the shared SessionSwitcherModel. The
-    /// first press lands on the most-recent OTHER session; further presses (while Ctrl is held) walk the
-    /// MRU; releasing Ctrl commits (endSessionSwitch). The snapshot insulates the cycle from the recency
-    /// reordering each in-cycle selection triggers.
-    func quickSwitchSession(reverse: Bool = false) {
-        if sessionSwitcher.isActive {
-            if let id = sessionSwitcher.advance(reverse: reverse) { selectSession(id) }
-        } else {
-            let valid = Set(store.navigableSessions.map(\.id))
-            let mru = store.sessionRecency.top(min(10, valid.count), in: valid)
-            if let id = sessionSwitcher.begin(mru) { selectSession(id) }
-        }
-        if sessionSwitcher.isActive { showSwitcherOverlay() }
-    }
-
-    /// Ctrl released → commit the cycle so the next Ctrl-Tab starts fresh from the new MRU order.
-    func endSessionSwitch() { sessionSwitcher.end(); hideSwitcherOverlay() }
-
-    /// Show/refresh the MRU switch overlay: a centered card listing the cycle's sessions (most-recent
-    /// first) with the current one highlighted. A GtkOverlay child over the deck, rebuilt on each advance.
-    private func showSwitcherOverlay() {
-        hideSwitcherOverlay()
-        guard let overlay = deckOverlay, let box = op(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2)),
-              let scroller = sessionSwitcherScroller(containing: box) else { return }
-        gtk_widget_add_css_class(W(box), "agterm-switcher")
-        gtk_widget_add_css_class(W(box), "agterm-interface-panel")
-        for id in sessionSwitcher.ordered {
-            guard let s = store.session(withID: id), let label = op(gtk_label_new(s.displayName)) else { continue }
-            gtk_widget_set_margin_start(W(label), 18); gtk_widget_set_margin_end(W(label), 18)
-            gtk_label_set_xalign(label, 0)
-            gtk_label_set_ellipsize(label, PANGO_ELLIPSIZE_END)
-            if id == sessionSwitcher.current { gtk_widget_add_css_class(W(label), "agterm-switcher-current") }
-            gtk_box_append(cast(box), W(label))
-        }
-        switcherBox = scroller
-        gtk_overlay_add_overlay(overlay, W(scroller))
-    }
-
-    private func hideSwitcherOverlay() {
-        if let overlay = deckOverlay, let box = switcherBox { gtk_overlay_remove_overlay(overlay, W(box)) }
-        switcherBox = nil
+    /// PHYSICAL: the arrow keys and `focusLeftPane`/`focusRightPane` name a direction on screen, so this
+    /// follows the paned slots, which invert after a promotion ([[libghostty]]).
+    func focusPane(left: Bool) {
+        guard let id = store.selectedSessionID else { return }
+        focusPane(wantSplit: primaryInEndSlot(id) ? left : !left)
     }
 
     /// Show a persistent, centered message when the GtkGLArea can't create a GL context (VM/headless/
@@ -922,10 +882,8 @@ final class AppController {
 
     /// Theme the WHOLE window chrome — header bars, content area, popovers, and the sidebar — to the
     /// terminal theme, so a theme change (and the live picker preview) re-colors the entire window, not
-    /// just the terminal. Overriding libadwaita's named colors (`@window_bg_color`, `@headerbar_bg_color`,
-    /// `@view_bg_color`, …) re-themes the whole Adwaita stylesheet at once; the explicit `.agterm-sidebar`
-    /// rules carry the shifted sidebar tint. Display-wide provider above the app CSS, re-applied on every
-    /// theme/preview. A theme with no background drops the override so the Adwaita defaults return.
+    /// just the terminal. Display-wide provider above the app CSS, re-applied on every theme/preview; a
+    /// theme with no background drops the override so the Adwaita defaults return.
     func applyWindowThemeColors(for theme: String?, resolvedColors: ThemeColors? = nil) {
         guard let display = gdk_display_get_default() else { return }
         let colors = resolvedColors ?? Self.themeColors(for: theme)
@@ -944,38 +902,9 @@ final class AppController {
         // Sidebar tint: shift the theme background darker (>5) / lighter (<5) per the Sidebar Tint setting.
         let shift = linuxSettingsStore().load().sidebarBackgroundShift ?? AppSettings.defaultSidebarBackgroundShift
         let sidebarBg = ThemeColorResolver.shiftedHex(themeBg, amount: AppSettings.sidebarShiftAmount(strength: shift))
-        let css = """
-        @define-color window_bg_color \(themeBg);
-        @define-color window_fg_color \(fg);
-        @define-color view_bg_color \(themeBg);
-        @define-color view_fg_color \(fg);
-        @define-color headerbar_bg_color \(themeBg);
-        @define-color headerbar_backdrop_color \(themeBg);
-        @define-color headerbar_fg_color \(fg);
-        @define-color dialog_bg_color \(themeBg);
-        @define-color dialog_fg_color \(fg);
-        @define-color card_bg_color alpha(\(fg), 0.08);
-        @define-color card_fg_color \(fg);
-        @define-color card_shade_color alpha(#000000, 0.25);
-        @define-color popover_bg_color \(themeBg);
-        @define-color popover_fg_color \(fg);
-        @define-color popover_shade_color alpha(#000000, 0.25);
-        @define-color shade_color alpha(#000000, 0.25);
-        @define-color sidebar_bg_color \(sidebarBg);
-        @define-color sidebar_fg_color \(fg);
-        .agterm-sidebar { background-color: \(sidebarBg); }
-        .agterm-sidebar list, .agterm-sidebar row { background-color: transparent; }
-        .agterm-selected { background-color: \(sel); }
-        .agterm-sidebar label { color: \(fg); }
-        .agterm-selected label { color: \(selFg); }
-        .agterm-sidebar button { color: \(fg); }
-        .agterm-sidebar separator { background-color: alpha(\(fg), 0.22); }
-        toolbarview.agterm-sidebar-column > .top-bar,
-        toolbarview.agterm-sidebar-column > .bottom-bar { background-color: \(sidebarBg); color: \(fg); }
-        paned.agterm-sidebar-split > separator {
-            min-width: 1px; padding: 0; background-color: transparent; box-shadow: none;
-        }
-        """
+        let css = ThemeColorResolver.windowThemeCSS(
+            background: themeBg, foreground: fg, selectionBackground: sel,
+            selectionForeground: selFg, sidebarBackground: sidebarBg)
         if Self.sidebarThemeProvider == nil {
             let provider = OpaquePointer(gtk_css_provider_new())
             Self.sidebarThemeProvider = provider

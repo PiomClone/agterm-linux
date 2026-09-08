@@ -39,6 +39,21 @@ struct LinuxQuickCardAllocationTests {
         #expect(card.y == 50 + 37)               // header + (750 - 675) / 2
     }
 
+    @Test("a configured percentage replaces the default and is clamped")
+    func configuredPercent() {
+        let compact = LinuxQuickCardPolicy.cardAllocation(
+            overlayWidth: 1000, overlayHeight: 800, headerHeight: 50, sizePercent: 40
+        )
+        #expect(compact == LinuxQuickCardPolicy.CardAllocation(x: 300, y: 275, width: 400, height: 300))
+
+        let oversized = LinuxQuickCardPolicy.cardAllocation(
+            overlayWidth: 1000, overlayHeight: 800, headerHeight: 50, sizePercent: 500
+        )
+        #expect(oversized == LinuxQuickCardPolicy.cardAllocation(
+            overlayWidth: 1000, overlayHeight: 800, headerHeight: 50, sizePercent: 90
+        ))
+    }
+
     /// The band the card leaves is 5% of the AVAILABLE area on every side — the header is inset on top
     /// of that, not counted against it, which is what keeps the header bar clickable above the card.
     @Test("header inset lands 5% bands around the card, below the header")

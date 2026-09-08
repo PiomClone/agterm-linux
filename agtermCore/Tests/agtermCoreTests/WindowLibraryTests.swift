@@ -40,14 +40,19 @@ final class WindowLibraryTests {
     // MARK: - Seeding
 
     @Test func freshLibrarySeedsOneWindowWithDefaultTree() {
-        let library = WindowLibrary(directory: directory)
+        let library = WindowLibrary(directory: directory, defaultSessionCwd: "/tmp/agterm-home")
         #expect(library.windows.count == 1)
         #expect(library.windows[0].name == "window 1")
         let store = try! #require(library.store(for: library.windows[0].id))
         #expect(store.workspaces.count == 1)
         #expect(store.workspaces[0].name == "workspace 1")
         #expect(store.workspaces[0].sessions.count == 1)
+        #expect(store.workspaces[0].sessions[0].initialCwd == "/tmp/agterm-home")
         #expect(library.openIDs() == [library.windows[0].id])
+
+        let second = library.newWindow()
+        let secondStore = try! #require(library.store(for: second.id))
+        #expect(secondStore.workspaces[0].sessions[0].initialCwd == "/tmp/agterm-home")
     }
 
     @Test func windowNameForIDReturnsNameOrEmpty() {
@@ -110,6 +115,39 @@ final class WindowLibraryTests {
         #expect(restoredWorkspace.sessions.map(\.id) == [first.id, session.id, last.id])
         #expect(store.selectedSessionID == session.id)
         #expect(library.recentClosedItems.isEmpty)
+    }
+
+    @Test func clearingRecentItemsDropsMemoryAndPersistedHistory() {
+        let library = WindowLibrary(directory: directory)
+        let store = try! #require(library.activeStore)
+        let workspace = store.addWorkspace(name: "project")
+        let session = try! #require(store.addSession(toWorkspace: workspace.id, cwd: "/project", name: "api"))
+        store.closeSession(session.id)
+        store.removeWorkspace(workspace.id)
+        #expect(library.recentClosedItems.count == 2)
+
+        #expect(library.clearRecentClosedItems())
+
+        #expect(library.recentClosedItems.isEmpty)
+        #expect(WindowLibrary(directory: directory).recentClosedItems.isEmpty)
+    }
+
+    @Test func failedRecentClearPreservesTheLoadedHistory() throws {
+        let library = WindowLibrary(directory: directory)
+        let store = try #require(library.activeStore)
+        let workspace = store.addWorkspace(name: "project")
+        let session = try #require(store.addSession(toWorkspace: workspace.id, cwd: "/project", name: "api"))
+        store.closeSession(session.id)
+        #expect(library.recentClosedItems.count == 1)
+
+        let recentURL = directory.appendingPathComponent("recent-closed.json")
+        let backupURL = directory.appendingPathComponent("recent-closed-backup.json")
+        try FileManager.default.moveItem(at: recentURL, to: backupURL)
+        try FileManager.default.createDirectory(at: recentURL, withIntermediateDirectories: false)
+
+        #expect(!library.clearRecentClosedItems())
+        #expect(library.recentClosedItems.count == 1)
+        #expect(RecentClosedStore(directory: directory, fileName: "recent-closed-backup.json").load().count == 1)
     }
 
     @Test func reopeningRecentSessionRecreatesMissingOriginalWorkspace() {
@@ -1534,5 +1572,53 @@ final class WindowLibraryTests {
         let reloadedSession = try #require(reloadedStore.session(withID: session.id))
         #expect(reloadedSession.initialCwd == "/changed")
         _ = ws
+    }
+    /// `restore.capture` answers `ok` with a pane count, which is a claim that the argv is on disk, so the
+    /// library has to REPORT a failed flush rather than swallow it. An unwritable windows directory is the
+    /// same lever the stale-file test above uses.
+    @Test func saveAllOpenCheckedReportsAFailedWrite() throws {
+        let id = UUID()
+        try writeWindowFile(id, Snapshot(workspaces: [WorkspaceSnapshot(id: UUID(), name: "work", sessions: [])]))
+        try writeIndex(WindowsIndex(frontmost: id, windows: [WindowEntry(id: id, name: "work", isOpen: true)]))
+        let library = WindowLibrary(directory: directory)
+        #expect(library.saveAllOpenChecked())
+
+        let windowsDir = directory.appendingPathComponent("windows")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: windowsDir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: windowsDir.path) }
+        #expect(!library.saveAllOpenChecked())
+    }
+
+    // MARK: - launch pane drops
+
+    private final class DropLog {
+        var identities: [UUID] = []
+    }
+
+    @Test func closingAWindowDropsEveryPaneItHeld() throws {
+        let log = DropLog()
+        let library = WindowLibrary(directory: directory, paneFinalizer: nil, launchPaneDrop: { log.identities += $0 })
+        let work = library.newWindow(name: "work")
+        let store = try #require(library.store(for: work.id))
+        let session = try #require(store.addSession(toWorkspace: store.workspaces[0].id, cwd: "/tmp"))
+        let expected = Set(PaneIdentityInventory.identities(in: store.workspaces.flatMap(\.sessions)))
+
+        library.closeWindow(work.id)
+
+        #expect(Set(log.identities) == expected)
+        #expect(log.identities.contains(session.paneIdentity))
+    }
+
+    @Test func removingAWindowDropsEveryPaneItHeld() throws {
+        let log = DropLog()
+        let library = WindowLibrary(directory: directory, paneFinalizer: nil, launchPaneDrop: { log.identities += $0 })
+        let work = library.newWindow(name: "work")
+        let store = try #require(library.store(for: work.id))
+        let expected = Set(PaneIdentityInventory.identities(in: store.workspaces.flatMap(\.sessions)))
+
+        library.removeWindow(work.id)
+
+        #expect(Set(log.identities) == expected)
+        #expect(!expected.isEmpty)
     }
 }

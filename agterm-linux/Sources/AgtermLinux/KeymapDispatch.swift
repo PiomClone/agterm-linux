@@ -15,7 +15,7 @@ private let linuxPreferencesChord = Chord(mods: [.control], key: ",")
 
 enum LinuxFixedShortcut: Equatable {
     case preferences
-    case focusPane(left: Bool)
+    case focusPane(split: Bool)
     case fontIncrease
     case fontDecrease
     case fontReset
@@ -30,9 +30,9 @@ func linuxFixedShortcut(for chord: Chord) -> LinuxFixedShortcut? {
     case linuxPreferencesChord:
         return .preferences
     case Chord(mods: [.control], key: "1"):
-        return .focusPane(left: true)
+        return .focusPane(split: false)
     case Chord(mods: [.control], key: "2"):
-        return .focusPane(left: false)
+        return .focusPane(split: true)
     case Chord(mods: [.control], key: "+"), Chord(mods: [.control], key: "="),
          Chord(mods: [.control, .shift], key: "="):
         return .fontIncrease
@@ -291,16 +291,19 @@ extension AppController {
 
     /// The single entry point for a terminal key press (called by GhosttySurface.keyPressed). Returns
     /// true when the key was consumed as an app shortcut / custom command; false to let libghostty encode
-    /// it for the terminal. Dispatch order: Esc leader-abort → reserved host chord → custom command
-    /// matcher → built-in → fixed shortcut → raw arrow/page navigation.
+    /// it for the terminal. Dispatch order: Esc switcher-cancel → Esc leader-abort → reserved host chord →
+    /// custom command matcher → built-in → fixed shortcut → raw arrow/page navigation.
     func handleKey(keyval: UInt32, keycode: UInt32, state: UInt32, sessionID: UUID,
                    origin: GhosttySurface? = nil,
                    context: @autoclosure () -> ShortcutKeyContext? = nil) -> Bool {
         // Reset the leader deadline to the FINAL armed state on every exit: a fresh leader (re)starts the
         // 1.5s timer, a fired/aborted leader cancels it (macOS-parity leader timeout — see syncLeaderDeadline).
         defer { syncLeaderDeadline() }
-        // Escape: abort a half-typed leader (consumed); otherwise pass through to the terminal.
+        // Both press paths funnel here, so this is where the Ctrl-Tab commit signal tracks the Ctrl keys.
+        heldControlKeys.pressed(keyval: keyval, keycode: keycode, state: state)
+        // Esc fires on the keyval alone, ahead of chord parsing, so no modifier test is needed.
         if keyval == 0xFF1B {
+            if sessionSwitcher.isActive { cancelSessionSwitch(); return true }
             if customCommandEngine.isArmed { customCommandEngine.reset(); return true }
             return false
         }
@@ -355,8 +358,8 @@ extension AppController {
         switch shortcut {
         case .preferences:
             showSettings()
-        case .focusPane(let left):
-            focusPane(left: left)
+        case .focusPane(let split):
+            focusPane(wantSplit: split)
         case .fontIncrease:
             (origin ?? focusedSurface())?.performBindingAction(FontBindingAction.increase)
         case .fontDecrease:
@@ -399,13 +402,12 @@ extension AppController {
     }
 
     /// Map a rebindable `BuiltinAction` to its AppController method. EXHAUSTIVE: adding a BuiltinAction
-    /// case fails to compile until it's wired, the Linux analogue of the macOS menu keep-in-sync. Actions
-    /// with no Linux surface are no-ops (and never reach here unless the user explicitly `map`s them).
+    /// case fails to compile until it's wired, the Linux analogue of the macOS menu keep-in-sync.
     private func dispatchBuiltin(_ action: BuiltinAction, sessionID: UUID) {
         switch action {
         case .newWindow: openNewWindow()
-        case .renameWindow: break          // no inline window rename on Linux yet
-        case .deleteWindow: break          // window close is via the titlebar / window.close control
+        case .renameWindow: renameWindowDialog(windowID)
+        case .deleteWindow: confirmDeleteWindow(windowID)
         case .newWorkspace: newWorkspace()
         case .renameWorkspace: if let ws = store.currentWorkspaceID { beginRename(id: ws, isWorkspace: true) }
         case .deleteWorkspace: if store.canRemoveWorkspace, let ws = store.currentWorkspaceID { store.removeWorkspace(ws); reconcile() }

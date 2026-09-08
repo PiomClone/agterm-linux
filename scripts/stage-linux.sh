@@ -35,10 +35,12 @@ APP_RESOURCES="$APP/.build/release/agterm-linux_AgtermLinux.resources"
 }
 
 "$ROOT/scripts/verify-linux-resources.sh" "$APP/vendor/ghostty/share"
+"$ROOT/scripts/verify-linux-zmx-cache.sh" "$APP/vendor/zmx"
 
 mkdir -p "$DEST/bin" "$DEST/lib" "$DEST/share/applications" "$DEST/share/pixmaps"
 install -m755 "$BIN" "$DEST/bin/agterm-linux.bin"
 install -m755 "$CTL" "$DEST/bin/agtermctl.bin"
+install -m755 "$APP/vendor/zmx/zmx" "$DEST/bin/zmx"
 cp -R "$APP_RESOURCES" "$DEST/bin/"
 
 # Bundle the non-system libraries that make the Swift app portable. GTK, libadwaita, and glibc remain
@@ -58,7 +60,9 @@ cp -R "$APP/vendor/ghostty/share/terminfo" "$DEST/share/terminfo"
 mkdir -p "$DEST/share/agterm"
 cp -R "$ROOT/agterm/Resources/agent-status" "$DEST/share/agterm/agent-status"
 cp -R "$ROOT/plugins/agterm/skills/agterm" "$DEST/share/agterm/agent-skill"
+install -m644 "$APP/vendor/zmx/LICENSE" "$DEST/share/agterm/ZMX-LICENSE"
 printf '%s\n' "${AGTERM_PACKAGE_VERSION:-dev}" > "$DEST/share/agterm/VERSION"
+printf '%s\n' "${AGTERM_PACKAGE_COMMIT:-$(git -C "$ROOT" rev-parse HEAD)}" > "$DEST/share/agterm/COMMIT"
 
 DESKTOP="$ROOT/packaging/linux/io.github.melonamin.agterm.desktop"
 install -m644 "$DESKTOP" "$DEST/share/applications/io.github.melonamin.agterm.desktop"
@@ -85,6 +89,8 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 [[ -d "$HERE/share/ghostty" ]] && export AGTERM_GHOSTTY_RESOURCES="$HERE/share/ghostty"
 [[ -f "$HERE/share/agterm/VERSION" ]] && export AGTERM_VERSION="$(cat "$HERE/share/agterm/VERSION")"
+[[ -f "$HERE/share/agterm/COMMIT" ]] && export AGTERM_COMMIT="$(cat "$HERE/share/agterm/COMMIT")"
+export AGTERM_ZMX_PATH="$HERE/bin/zmx"
 exec "$HERE/bin/agterm-linux.bin" "$@"
 LAUNCH
 chmod 0755 "$DEST/bin/agterm-linux"

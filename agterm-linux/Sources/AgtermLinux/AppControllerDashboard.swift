@@ -61,7 +61,10 @@ extension AppController {
         if quickVisible { setQuick(false) }
         if paletteWindow != nil { closePalette() }
         searchSurface?.endSearch()
-        if sessionSwitcher.isActive { endSessionSwitch() }
+        cancelSessionSwitch()
+        gSpawnRegistry.prioritize(members.compactMap {
+            surface(for: .session($0.session, $0.surface))
+        })
         dashboard.open(members: members, fontMode: fontMode)
         refreshPaneOverlayCoverage()
         suppressAutoFollow()
@@ -112,7 +115,7 @@ extension AppController {
             session.splitFocused = member.surface == .split
         }
         closeDashboard(refocus: false)
-        if member.surface == .split { focusPane(left: false) } else { focusPane(left: true) }
+        focusPane(wantSplit: member.surface == .split)
     }
 
     func moveDashboardHighlight(_ direction: DashboardLayout.Direction) {

@@ -1,3 +1,5 @@
+import agtermCore
+
 enum LinuxQuickCardPolicy {
     /// The chrome of the floating quick-terminal card — and, by construction, of the floating session
     /// overlay, which carries the same `agterm-quick` class on the same GtkFrame shape.
@@ -59,7 +61,7 @@ enum LinuxQuickCardPolicy {
     /// Named for the CARD deliberately: the unqualified `sizePercent` already means the SESSION overlay's
     /// own percentage elsewhere in the port (`session.overlay.resize`, `overlaySizePercent`), and the two
     /// are unrelated numbers.
-    static let cardSizePercent: Int32 = 90
+    static let defaultCardSizePercent = 90
 
     /// Where the quick-terminal card sits inside the deck overlay, in overlay coordinates.
     /// A struct rather than a 4-member tuple, per the `large_tuple` budget.
@@ -96,20 +98,21 @@ enum LinuxQuickCardPolicy {
     /// The caller passes `headerHeight: 0` when the header is hidden; that visibility gate belongs to it
     /// (`onDeckOverlayChildPosition` explains why), not here.
     static func cardAllocation(overlayWidth: Int32, overlayHeight: Int32,
-                               headerHeight: Int32) -> CardAllocation {
+                               headerHeight: Int32, sizePercent: Int? = nil) -> CardAllocation {
         let width = max(0, overlayWidth)
         let height = max(0, overlayHeight)
         let header = min(max(0, headerHeight), height)
         let availableHeight = height - header
-        let cardWidth = scaledToPercent(width)
-        let cardHeight = scaledToPercent(availableHeight)
+        let percent = QuickTerminalMetrics.clampSizePercent(sizePercent ?? defaultCardSizePercent)
+        let cardWidth = scaledToPercent(width, percent: percent)
+        let cardHeight = scaledToPercent(availableHeight, percent: percent)
         return CardAllocation(x: (width - cardWidth) / 2,
                               y: header + (availableHeight - cardHeight) / 2,
                               width: cardWidth,
                               height: cardHeight)
     }
 
-    private static func scaledToPercent(_ value: Int32) -> Int32 {
-        Int32(clamping: Int64(value) * Int64(cardSizePercent) / 100)
+    private static func scaledToPercent(_ value: Int32, percent: Int) -> Int32 {
+        Int32(clamping: Int64(value) * Int64(percent) / 100)
     }
 }

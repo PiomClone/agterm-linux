@@ -76,10 +76,10 @@ extension AppController: ControlActions {
 
     func controlTree(window: String?) -> ControlResponse {
         let baseTree = store.controlTree(
-            foreground: { [weak self] session in self?.surfaces[session.id]?.foregroundCommand() },
-            splitForeground: { [weak self] session in self?.splitSurfaces[session.id]?.foregroundCommand() },
-            fontSize: { [weak self] in self?.surfaces[$0.id]?.currentFontSize() },
-            splitFontSize: { [weak self] in self?.splitSurfaces[$0.id]?.currentFontSize() },
+            paneForeground: { ($0.surface as? GhosttySurface)?.paneForeground() },
+            splitPaneForeground: { ($0.splitSurface as? GhosttySurface)?.paneForeground() },
+            fontSize: { ($0.surface as? GhosttySurface)?.currentFontSize() },
+            splitFontSize: { ($0.splitSurface as? GhosttySurface)?.currentFontSize() },
             scratchFontSize: { [weak self] in self?.scratchSurfaces[$0.id]?.currentFontSize() },
             quickVisible: { [weak self] in self?.quickVisible ?? false },
             zoomedSurface: { [weak self] in self?.terminalZoom.target?.controlID },
@@ -94,7 +94,7 @@ extension AppController: ControlActions {
                 case .fixed: return "fixed"
                 case .auto: return "auto"
                 }
-            }
+            }, app: LinuxAppMetadata.identity
         )
         let tree = projectingLinuxAutoFollow(baseTree)
         return ControlResponse(ok: true, result: ControlResult(tree: tree))
@@ -465,7 +465,6 @@ extension AppController: ControlActions {
             return ok(id)
         }
     }
-
     func focusSessionPane(_ target: String?, window: String?, pane: String?) -> ControlResponse {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
@@ -474,7 +473,8 @@ extension AppController: ControlActions {
             guard let parsed = ControlPaneFocusMode.parse(pane) else {
                 return err("invalid pane: \(pane ?? "other")")
             }
-            let toSplit = parsed.wantsSplit(currentSplitFocused: session.splitFocused)
+            let toSplit = parsed.wantsSplit(currentSplitFocused: session.splitFocused,
+                                            primaryInEndSlot: primaryInEndSlot(id))
             store.setPaneFocus(toSplit, forSession: id)
             syncSplit(session)
             rebuildSidebar()
@@ -486,7 +486,6 @@ extension AppController: ControlActions {
             return ok(id)
         }
     }
-
     func resizeSplit(_ target: String?, window: String?, resize: ControlSplitResize) -> ControlResponse {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
@@ -497,20 +496,22 @@ extension AppController: ControlActions {
             switch resize {
             case .ratio(let value): ratio = value
             case .delta(let delta): ratio = current + delta
+            case .paneDelta(let target, let delta): ratio = current + target.primaryRatioDelta(
+                delta, primaryInEndSlot: primaryInEndSlot(id))
             }
             _ = store.applySplitRatio(ratio, forSession: id)
             if let paned = sessionPanes[id] {
                 let extent = session.splitAxis == .topBottom
                     ? gtk_widget_get_height(W(paned)) : gtk_widget_get_width(W(paned))
+                let applied = session.splitRatio ?? AppStore.splitRatioDefault
                 gtk_paned_set_position(
                     paned,
-                    Int32(Double(max(1, extent)) * (session.splitRatio ?? AppStore.splitRatioDefault))
+                    Int32(Double(max(1, extent)) * panedFraction(applied, session: id))
                 )
             }
             return ok(id)
         }
     }
-
     func setSurfaceZoom(_ target: String?, window: String?, mode: ControlToggleMode) -> ControlResponse {
         let raw = target?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "active"
         let resolved: TerminalZoomTarget?
@@ -977,6 +978,12 @@ extension AppController: ControlActions {
             }
             return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, text: text))
         }
+    }
+
+    func clearRecentClosedItems() -> ControlResponse {
+        let affected = gLibrary.recentClosedItems.count
+        guard gLibrary.clearRecentClosedItems() else { return err(RecentClearError.persistenceFailed) }
+        return ControlResponse(ok: true, result: ControlResult(affected: affected))
     }
 
     func clearRestoreCommands() -> ControlResponse {
