@@ -95,6 +95,14 @@ extension AppController {
                     "Toolbar", values: ["Normal", "Compact", "Hidden"], selected: toolbarIndex,
                     handler: unsafeBitCast(onSettingsToolbarMode, to: GCallback.self))))
 
+        let buttonsIndex = settings.effectiveWindowButtonsOnLeft ? 0 : 1
+        adw_preferences_group_add(
+            cast(window),
+            W(
+                preferencesCombo(
+                    "Window buttons", values: ["Left", "Right"], selected: buttonsIndex,
+                    handler: unsafeBitCast(onSettingsWindowButtonsSide, to: GCallback.self))))
+
         let opacity = OpaquePointer(adw_spin_row_new_with_range(0, 100, 5))
         "Background opacity".withCString { adw_preferences_row_set_title(cast(opacity), $0) }
         "Your Wayland/X11 compositor owns background blur".withCString {
@@ -208,6 +216,11 @@ private let onSettingsAlternateTheme: @MainActor @convention(c) (OpaquePointer?,
 private let onSettingsToolbarMode: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated {
         controllerForWidget(row)?.setToolbarModeAtIndex(Int(adw_combo_row_get_selected(cast(row))))
+    }
+}
+private let onSettingsWindowButtonsSide: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+    MainActor.assumeIsolated {
+        controllerForWidget(row)?.setWindowButtonsSideAtIndex(Int(adw_combo_row_get_selected(cast(row))))
     }
 }
 private let onSettingsBackgroundOpacity: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in

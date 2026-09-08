@@ -206,7 +206,10 @@ final class AppController {
         // Sidebar header: regular GTK desktops keep left-side controls; Hyprland owns window actions.
         let sidebarHeader = OpaquePointer(adw_header_bar_new())
         self.sidebarHeader = sidebarHeader
-        let decorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons() ? ":" : "close,minimize,maximize:"
+        let buttonsOnLeft = linuxSettingsStore().load().effectiveWindowButtonsOnLeft
+        let decorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons() || !buttonsOnLeft
+            ? ":"
+            : LinuxDesktopEnvironment.decorationLayout(buttonsOnLeft: true)
         decorationLayout.withCString { adw_header_bar_set_decoration_layout(sidebarHeader, $0) }
         let scroller = OpaquePointer(gtk_scrolled_window_new())
         sidebarScroller = scroller
@@ -249,6 +252,12 @@ final class AppController {
         self.contentHeader = contentHeader
         adw_header_bar_set_show_start_title_buttons(contentHeader, 0)
         adw_header_bar_set_show_end_title_buttons(contentHeader, 0)
+        let contentDecorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons() || buttonsOnLeft
+            ? ":"
+            : LinuxDesktopEnvironment.decorationLayout(buttonsOnLeft: false)
+        contentDecorationLayout.withCString {
+            adw_header_bar_set_decoration_layout(contentHeader, $0)
+        }
         installInterfaceTitle(in: contentHeader)
         // Title-bar session pickers and terminal toggles mirror the macOS top-right action cluster.
         // `pack_end` stacks leftward, so construction proceeds from the visual right edge.
@@ -273,6 +282,7 @@ final class AppController {
         updateDashboardButton()
         applyInterfaceElements()
         let contentToolbar = OpaquePointer(adw_toolbar_view_new())
+        gtk_widget_add_css_class(W(contentToolbar), "agterm-content-column")
         adw_toolbar_view_add_top_bar(contentToolbar, W(contentHeader))
         let contentBox = OpaquePointer(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
         self.contentBox = contentBox
@@ -282,6 +292,7 @@ final class AppController {
         adw_toolbar_view_set_content(contentToolbar, W(contentBox))
         let split = buildSidebarSplit(sidebar: sidebarToolbar, content: contentToolbar)
         applyToolbarMode()
+        applyWindowButtonPlacement()
         applySidebarFontSize()
         applyInterfaceFontSize()
         // The whole split (sidebar + deck) sits under a GtkOverlay so the quick terminal can float over
@@ -908,7 +919,7 @@ final class AppController {
         if Self.sidebarThemeProvider == nil {
             let provider = OpaquePointer(gtk_css_provider_new())
             Self.sidebarThemeProvider = provider
-            gtk_style_context_add_provider_for_display(display, provider, 650)   // above the app CSS (600)
+            gtk_style_context_add_provider_for_display(display, provider, 850)   // above app CSS (800)
         }
         if let provider = Self.sidebarThemeProvider {
             css.withCString { gtk_css_provider_load_from_string(cast(provider), $0) }

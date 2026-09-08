@@ -30,7 +30,10 @@ extension AppController {
                      makeInterfaceSettingsPage(settings),
                      makeNotificationsSettingsPage(settings), makeAgentStatusSettingsPage(settings),
                      makeKeyMappingSettingsPage(settings), makeIntegrationsSettingsPage()]
-        for preferencesPage in pages { adw_preferences_dialog_add(cast(dialog), cast(preferencesPage)) }
+        for preferencesPage in pages {
+            attachControllerContext(to: preferencesPage, windowID: windowID)
+            adw_preferences_dialog_add(cast(dialog), cast(preferencesPage))
+        }
         page.rawValue.withCString { adw_preferences_dialog_set_visible_page_name(cast(dialog), $0) }
         connect(dialog, "closed", unsafeBitCast(onSettingsClosed, to: GCallback.self),
                 Unmanaged.passRetained(self).toOpaque())

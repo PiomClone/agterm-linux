@@ -89,6 +89,13 @@ extension AppController {
         settings.restoreRunningCommand = nil
         try? linuxSettingsStore().save(settings)
     }
+
+    func setWindowButtonsSideAtIndex(_ index: Int) {
+        persist(\.windowButtonsOnLeft, index == 0 ? true : false)
+        for controller in gWindows.values { controller.applyWindowButtonPlacement() }
+    }
+
+    func setRestoreRunningCommand(_ enabled: Bool) { persist(\.restoreRunningCommand, enabled ? true : nil) }
     func setConfirmCloseSession(_ enabled: Bool) { persist(\.confirmCloseSession, enabled ? true : nil) }
     func setCloseGraceUndo(_ enabled: Bool) { persist(\.closeGraceUndoEnabled, enabled ? nil : false) }
     func setNotificationsEnabled(_ enabled: Bool) { persist(\.notificationsEnabled, enabled ? nil : false) }
@@ -434,6 +441,7 @@ extension AppController {
         var settings = linuxSettingsStore().load()
         settings.toolbarMode = nil
         settings.compactToolbar = nil
+        settings.windowButtonsOnLeft = nil
         settings.backgroundOpacity = nil
         settings.sidebarBackgroundShift = nil
         settings.sidebarFontSize = nil
@@ -444,6 +452,7 @@ extension AppController {
         reloadConfig()
         for controller in gWindows.values {
             controller.applyToolbarMode()
+            controller.applyWindowButtonPlacement()
             controller.applyWindowTranslucency()
             controller.applySidebarFontSize()
             controller.applyInterfaceFontSize()

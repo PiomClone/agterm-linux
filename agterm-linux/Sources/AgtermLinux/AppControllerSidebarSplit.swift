@@ -149,6 +149,7 @@ extension AppController {
         guard let paned = splitView, let sidebar = gtk_paned_get_start_child(paned) else { return }
         gtk_widget_set_visible(sidebar, store.sidebarVisible ? 1 : 0)
         applySidebarWidth(paned)
+        applyWindowButtonPlacement()
         refocusIfStranded()   // hiding the column strands an inline rename's entry
     }
 

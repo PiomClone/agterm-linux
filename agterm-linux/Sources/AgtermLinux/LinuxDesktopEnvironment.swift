@@ -1,6 +1,10 @@
 import Foundation
 
 enum LinuxDesktopEnvironment {
+    static func decorationLayout(buttonsOnLeft: Bool) -> String {
+        buttonsOnLeft ? "close,minimize,maximize:" : ":minimize,maximize,close"
+    }
+
     /// Hyprland users manage window actions through compositor bindings, so duplicating them in
     /// client-side header bars adds foreign-looking chrome that other GTK desktops still expect.
     static func hidesClientSideWindowButtons(

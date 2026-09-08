@@ -174,7 +174,10 @@ extension AppController {
         gtk_widget_set_hexpand(W(host), 1)
         gtk_widget_set_vexpand(W(host), 1)
         gtk_widget_set_focusable(W(host), 1)
-        let decorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons() ? ":" : "close,minimize,maximize:"
+        let decorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons()
+            ? ":"
+            : LinuxDesktopEnvironment.decorationLayout(
+                buttonsOnLeft: linuxSettingsStore().load().effectiveWindowButtonsOnLeft)
         decorationLayout.withCString { adw_header_bar_set_decoration_layout(header, $0) }
         let title = LinuxModalTitle.dashboard(window: library.windows.first(where: { $0.id == windowID }))
         let titleLabel = OpaquePointer(gtk_label_new(title))

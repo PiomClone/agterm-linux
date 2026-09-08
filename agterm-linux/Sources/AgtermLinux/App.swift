@@ -330,6 +330,9 @@ func appCSS(prefersReducedMotion: Bool) -> String {
     \(LinuxSidebarPolicy.sidebarHoverCSS)   /* passive rows lose `.activatable`, so hover keys on bare `:hover` — contract + pins live on the constant; see agterm-linux/docs/sidebar.md */
     /* trailing content inset inside the rounded selection row; a row margin would indent the highlight itself */
     .agterm-session-row-content { padding-right: 6px; }
+    .agterm-sidebar-column { background-color: alpha(@window_fg_color, 0.03); }
+    paned.agterm-sidebar-split > separator,
+    paned.agterm-sidebar-split separator { min-width: 0px; padding: 0; margin: 0; background-color: transparent; background-image: none; border: none; box-shadow: none; outline: none; opacity: 0; }
     """
 }
 

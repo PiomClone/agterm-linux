@@ -207,6 +207,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Legacy decode shim for the pre-`toolbarMode` two-state toggle: false = normal bar, true/nil =
     /// compact. Read only by `effectiveToolbarMode` when `toolbarMode` is unset.
     public var compactToolbar: Bool?
+    /// Whether client-side window buttons are placed on the left; nil preserves the Linux default.
+    public var windowButtonsOnLeft: Bool?
     /// Hex colors (`#RRGGBB`) for the agent-status glyph's three states; nil each means the built-in
     /// default (active a muted lavender-grey `#DBD9E6`, blocked system amber, completed system green).
     public var activeStatusColorHex: String?
@@ -303,7 +305,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 darkTheme: String? = nil, followSystemAppearance: Bool? = nil,
                 cursorStyle: String? = nil, cursorBlink: Bool? = nil,
                 backgroundOpacity: Double? = nil, backgroundBlur: Int? = nil, notificationsEnabled: Bool? = nil,
-                toolbarMode: String? = nil, compactToolbar: Bool? = nil, notificationBadgeEnabled: Bool? = nil,
+                toolbarMode: String? = nil, compactToolbar: Bool? = nil, windowButtonsOnLeft: Bool? = nil,
+                notificationBadgeEnabled: Bool? = nil,
                 activeStatusColorHex: String? = nil, blockedStatusColorHex: String? = nil,
                 completedStatusColorHex: String? = nil, activeStatusShape: String? = nil,
                 blockedStatusShape: String? = nil, completedStatusShape: String? = nil,
@@ -334,6 +337,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.notificationsEnabled = notificationsEnabled
         self.toolbarMode = toolbarMode
         self.compactToolbar = compactToolbar
+        self.windowButtonsOnLeft = windowButtonsOnLeft
         self.notificationBadgeEnabled = notificationBadgeEnabled
         self.activeStatusColorHex = activeStatusColorHex
         self.blockedStatusColorHex = blockedStatusColorHex
@@ -394,6 +398,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var effectiveToolbarMode: ToolbarMode {
         toolbarMode.flatMap(ToolbarMode.init(rawValue:)) ?? (compactToolbar == false ? .normal : .compact)
     }
+
+    /// The resolved client-side window-button placement. Existing Linux installs default to left.
+    public var effectiveWindowButtonsOnLeft: Bool { windowButtonsOnLeft ?? true }
 
     /// The resolved Dock-bounce mode: the explicit `dockBounce` when a KNOWN raw value, else `off`. The
     /// single read point.

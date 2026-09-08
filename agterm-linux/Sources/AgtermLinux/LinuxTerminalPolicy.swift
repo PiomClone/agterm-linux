@@ -6,12 +6,10 @@ enum GhosttyDefaults {
     /// the user's `<configDir>/ghostty.conf` still overrides every key — the same
     /// 4-layer config stack macOS uses (bundled → global → scoped → settings).
     static let baseConfLines = """
-    # widen libghostty's default 2px inner padding to 8px horizontally and 6px
-    # vertically, matching upstream macOS. on Linux the GtkGLArea carries no
-    # margin of its own (see GhosttySurface), so libghostty's inner padding is
-    # the only one applied to the terminal content.
-    window-padding-x = 8
-    window-padding-y = 6
+    # zero inner padding so terminal grid fills the workspace area completely
+    window-padding-x = 0
+    window-padding-y = 0
+    window-padding-balance = true
 
     # keep the cursor a steady block everywhere. the shell-integration `cursor`
     # feature otherwise flips it to a bar at the prompt and back to a block

@@ -67,8 +67,8 @@ struct LinuxPolicyTests {
         let defaults = GhosttyDefaults.baseConfLines
         #expect(defaults.contains("cursor-style = block"))
         #expect(defaults.contains("cursor-click-to-move = false"))
-        #expect(defaults.contains("window-padding-x = 8"))
-        #expect(defaults.contains("window-padding-y = 6"))
+        #expect(defaults.contains("window-padding-x = 0"))
+        #expect(defaults.contains("window-padding-y = 0"))
         #expect(defaults.contains("shell-integration-features = no-cursor,no-title"))
         #expect(defaults.contains("keybind = performable:ctrl+shift+key_c=copy_to_clipboard"))
         #expect(defaults.contains("keybind = performable:ctrl+shift+key_v=paste_from_clipboard"))

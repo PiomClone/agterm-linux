@@ -82,7 +82,10 @@ extension AppController {
             gtk_widget_set_hexpand(W(host), 1)
             gtk_widget_set_vexpand(W(host), 1)
             gtk_widget_add_css_class(W(header), "agterm-modal-header")
-            let decorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons() ? ":" : "close,minimize,maximize:"
+            let decorationLayout = LinuxDesktopEnvironment.hidesClientSideWindowButtons()
+                ? ":"
+                : LinuxDesktopEnvironment.decorationLayout(
+                    buttonsOnLeft: linuxSettingsStore().load().effectiveWindowButtonsOnLeft)
             decorationLayout.withCString { adw_header_bar_set_decoration_layout(header, $0) }
             let title = LinuxModalTitle.normal(
                 sessionName: store.activeSession?.displayName,
