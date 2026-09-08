@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const ACTIVE = ["active", "--blink"];
-const BLOCKED = ["blocked"];
+const BLOCKED = ["blocked", "--blink"];
 const COMPLETED = ["completed", "--auto-reset"];
 
 /**
@@ -34,6 +34,20 @@ function defaultWrapperPath() {
 
 function errorName(error) {
   return typeof error?.name === "string" ? error.name : undefined;
+}
+
+function notificationArgs(event, statusArgs) {
+  if (!statusArgs || statusArgs[0] !== "blocked") return null;
+  switch (event?.type) {
+    case "permission.asked":
+      return ["notify", "OpenCode ждёт разрешения", "--title", "OpenCode"];
+    case "question.asked":
+      return ["notify", "OpenCode задал вопрос", "--title", "OpenCode"];
+    case "session.error":
+      return ["notify", "OpenCode завершился с ошибкой", "--title", "OpenCode"];
+    default:
+      return null;
+  }
 }
 
 /**
@@ -188,7 +202,11 @@ export const AgtermStatusPlugin = async () => {
   return {
     event: async ({ event }) => {
       const args = mapEventToArgs(event);
-      if (args) await enqueue(args);
+      if (args) {
+        await enqueue(args);
+        const notification = notificationArgs(event, args);
+        if (notification) await enqueue(notification);
+      }
     },
   };
 };

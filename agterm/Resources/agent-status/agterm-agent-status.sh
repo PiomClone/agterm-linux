@@ -5,6 +5,7 @@
 #   agterm-agent-status.sh completed         # agent finished a turn
 #   agterm-agent-status.sh blocked  --blink  # agent is waiting on you (pulse for attention)
 #   agterm-agent-status.sh idle              # clear the indicator
+#   agterm-agent-status.sh notify "Message" --title "OpenCode"
 #
 # States: idle | active | completed | blocked. An optional --blink / --auto-reset
 # (and any further args) is forwarded verbatim to `agtermctl session status`.
@@ -42,6 +43,17 @@ shift
 pane_args=()
 [ -n "${AGTERM_PANE:-}" ] && pane_args+=(--pane "$AGTERM_PANE")
 [ -n "${AGTERM_PANE_ID:-}" ] && pane_args+=(--pane-id "$AGTERM_PANE_ID")
+
+if [ "$state" = notify ]; then
+  if [ -n "${AGTERM_SOCKET:-}" ]; then
+    "${AGTERMCTL:-agtermctl}" notify "$1" \
+      --target "$AGTERM_SESSION_ID" --socket "$AGTERM_SOCKET" "${@:2}" >/dev/null 2>&1 || true
+  else
+    "${AGTERMCTL:-agtermctl}" notify "$1" \
+      --target "$AGTERM_SESSION_ID" "${@:2}" >/dev/null 2>&1 || true
+  fi
+  exit 0
+fi
 
 if [ -n "${AGTERM_SOCKET:-}" ]; then
   "${AGTERMCTL:-agtermctl}" session status "$state" \
