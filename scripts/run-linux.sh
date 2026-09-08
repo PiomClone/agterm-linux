@@ -5,14 +5,28 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SWIFT_HOME="$HOME/.local/share/mise/installs/swift/6.3.2"
+if [ -d "$HOME/.local/share/mise/installs/swift/6.3.2/usr" ]; then
+  SWIFT_HOME="$HOME/.local/share/mise/installs/swift/6.3.2"
+elif [ -d "$HOME/prj/.tools/mise/data/installs/swift/6.3.2/usr" ]; then
+  SWIFT_HOME="$HOME/prj/.tools/mise/data/installs/swift/6.3.2"
+else
+  SWIFT_HOME="$HOME/.local/share/mise/installs/swift/6.3.2"
+fi
 COMPAT="$HOME/.local/share/swift-linux-compat"
 export PATH="$SWIFT_HOME/usr/bin:$PATH"
-# Arch ships wide ncurses + soname-bumped libxml2; the Ubuntu Swift toolchain
-# wants the older sonames. Bridge them (no sudo) for build + run.
+
+# Arch and Debian/Ubuntu place ncurses/libxml2 in different lib paths.
+# Bridge them (no sudo) for build + run.
+LIBNCURSES_SRC="$(ls /usr/lib*/libncursesw.so.6 /usr/lib/*/libncursesw.so.6 /usr/lib*/libncurses.so.6 /usr/lib/*/libncurses.so.6 2>/dev/null | head -n 1 || true)"
+LIBXML2_SRC="$(ls /usr/lib*/libxml2.so.* /usr/lib/*/libxml2.so.* 2>/dev/null | sort -V | tail -n 1 || true)"
+
 mkdir -p "$COMPAT"
-[ -e "$COMPAT/libncurses.so.6" ] || ln -sf /usr/lib/libncursesw.so.6 "$COMPAT/libncurses.so.6"
-[ -e "$COMPAT/libxml2.so.2" ]   || ln -sf "$(ls /usr/lib/libxml2.so.* | sort -V | tail -1)" "$COMPAT/libxml2.so.2"
+if [ ! -e "$COMPAT/libncurses.so.6" ] && [ -n "$LIBNCURSES_SRC" ]; then
+  ln -sf "$LIBNCURSES_SRC" "$COMPAT/libncurses.so.6"
+fi
+if [ ! -e "$COMPAT/libxml2.so.2" ] && [ -n "$LIBXML2_SRC" ]; then
+  ln -sf "$LIBXML2_SRC" "$COMPAT/libxml2.so.2"
+fi
 export LD_LIBRARY_PATH="$COMPAT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Point the dev build at the vendored ghostty resources (shell-integration + sibling terminfo) so
