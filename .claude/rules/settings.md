@@ -88,13 +88,16 @@ paths:
   contract, so freeing it risks a crash and the rare leak is accepted.
 - `.agtermAppearanceChanged` is required because terminal color is not observable; it updates
   `terminalColor`, quick-terminal backing, title/window appearance, and non-observable chrome mirrors.
-- Settings is a 540x640 six-tab SwiftUI scene with explicit selection defaulting General, preventing
+- Settings is a 540x680 six-tab SwiftUI scene with explicit selection defaulting General, preventing
   `com_apple_SwiftUI_Settings_selectedTabIndex` persistence. General holds Mouse, Sessions, and Ghostty
   Config. Appearance holds Terminal and Window. Interface groups `InterfaceElement`s two per row, plus
   Multiple Windows and the quick terminal's panel size, which sits there rather than under Appearance's
   Window because the panel belongs to no window.
   Notifications holds banner/badge/attention/bounce/sound. Agent Status holds colors/shapes, sound,
-  auto-follow, and Reset. Key Mapping holds config directory, diagnostics, and Reload.
+  status reset, auto-follow, and Reset. Key Mapping holds config directory, diagnostics, and Reload.
+- `statusReset` stores a raw `StatusReset` (`firstKey`|`enter`|`never`), nil for the default `firstKey`,
+  resolved by `effectiveStatusReset` and mirrored to `GhosttyApp.statusReset`, which the surface factories'
+  keystroke-clear closure reads at keystroke time. Reset to defaults clears it with the glyph settings.
 - Keep titlebar construction in `WindowContentView+Titlebar.swift` so `WindowContentView.swift` remains
   below the 1000-line limit.
 - Keep Agent Status shape pickers in a trailing-aligned 80-point column wider than the 64.5...68-point
@@ -229,9 +232,12 @@ paths:
 - `confirmCloseSession` defaults off and is read on demand, without a mirror. Prompt only for GUI active
   close and sidebar row close; skip under XCUITest. Control `session.close` must never prompt.
 - `hiddenInterfaceElements` stores raw names and preserves unknown values while toggling known ones; empty
-  maps nil. Titlebar cases are `sidebarToggle`, `sessionName`, `windowName`, `recentSessions`, `scratch`,
-  `split`, `dashboard`, `quickTerminal`; sidebar cases are `newWorkspace`, `newSession`, `flaggedView`,
-  `focusFilter`, and row-level `workspaceAddSession`. Attention has its separate default-off setting.
+  maps nil. Titlebar cases are `sidebarToggle`, `sessionName`, `windowName`, `remoteHost`, `sessionContext`,
+  `recentSessions`, `scratch`, `split`, `dashboard`, `quickTerminal`, `customCommands`; sidebar cases are
+  `newWorkspace`, `newSession`, `flaggedView`, `focusFilter`, and row-level `workspaceAddSession`.
+  A `hiddenByDefault` case (`customCommands` alone) is governed by `shownInterfaceElements` instead, the
+  same shape with the opposite sense, and its name in the hidden list is ignored. Attention has its
+  separate default-off setting.
 - `InterfaceElement` owns section/display name; the tab iterates `allCases`. Mutate the raw set, then push
   resolved known values to `GhosttyApp`. SwiftUI gates with `shows(_:)`; the AppKit row "+" checks the
   mirror on hover. Titlebar group dividers appear only between adjacent groups that each retain at least

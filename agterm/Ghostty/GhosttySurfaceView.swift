@@ -16,7 +16,7 @@ private let logger = Logger(subsystem: "com.umputun.agterm", category: "GhosttyS
 final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     nonisolated(unsafe) private(set) var surface: ghostty_surface_t?
 
-    private let workingDirectory: String
+    let workingDirectory: String
 
     /// The command run as the surface's process instead of the login shell, nil for the login shell; read in
     /// `createSurface`. The overlay uses it to run one program (e.g. a TUI) whose exit closes the overlay.
@@ -63,6 +63,8 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
 
     /// The owning model session, `weak` to break the cycle with `Session.surface`. Set by the factory.
     weak var session: Session?
+    /// Input ownership also follows sessionless overlay and scratch surfaces.
+    weak var focusSession: Session?
 
     /// Whether this primary/split pane launched through zmx. Fixed before `createSurface` reads its config.
     let backedByZmx: Bool
@@ -121,14 +123,14 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     /// whose focus report is suppressed though the user is looking at it. Set by the main/split factories.
     var onClearUnseen: (() -> Void)?
 
-    /// Called on the main actor on EVERY keystroke into this surface, carrying whether the key interrupts the
-    /// agent (Escape or Ctrl-C). The factory decides per pane via `AgentIndicator.clearedBy(pane:isInterrupt:)`:
-    /// clear the glyph to idle only when THIS surface's pane owns a clearable status — `blocked`/`completed`
-    /// on any key, `active` only on an interrupt — so foreground typing cannot wipe a background pane's block.
-    /// Passing the pane rather than reading `view.session` lets the scratch, which has none, self-clear.
-    /// Status is otherwise control-driven; this is the one input-driven clear, for the decline case Claude
-    /// Code fires no hook for.
-    var onUserInputClearsStatus: ((Bool) -> Void)?
+    /// Called on the main actor on EVERY keystroke into this surface, carrying what the key means to the glyph
+    /// (`InterruptKeystroke.classify`: interrupt, submit or plain typing). The factory decides per pane via
+    /// `AgentIndicator.clearedBy(pane:keystroke:reset:)`: clear the glyph to idle only when THIS surface's pane
+    /// owns a clearable status — `blocked`/`completed` as the Status reset setting says, `active` only on an
+    /// interrupt — so foreground typing cannot wipe a background pane's block. Passing the pane rather than
+    /// reading `view.session` lets the scratch, which has none, self-clear. Status is otherwise
+    /// control-driven; this is the one input-driven clear, for the decline case Claude Code fires no hook for.
+    var onUserInputClearsStatus: ((StatusKeystroke) -> Void)?
 
     /// Called on the main actor on EVERY keystroke to stamp user activity and reset the window's auto-follow
     /// idle timer. Fires unconditionally, unlike `onUserInputClearsStatus`: ordinary typing in an idle
@@ -185,10 +187,8 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     var rendererVisible = true
     /// Sweeps the hidden layer's retained frame on a slow cadence; exits itself on reveal or teardown.
     var hiddenJanitorTask: Task<Void, Never>?
-    /// Sanitized OSC 7 value expected back as libghostty's synthetic title while this pane has no real title.
-    private var pendingPwdFallbackTitle: String?
     /// After `destroySurface()` the view is retired: never recreate a surface (a stray viewDidMoveToWindow).
-    private var isDestroyed = false
+    private(set) var isDestroyed = false
 
     /// Guards `handleProcessExit` so the close runs once. Both the `SHOW_CHILD_EXITED` action and the
     /// `close_surface_cb` can fire for one exit (ghostty documents no ordering/exclusivity between them).
@@ -516,13 +516,6 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         // no save(): OSC 7 fires on every cd/prompt redraw and would thrash the disk. live cwd is persisted on
         // quit and on structural mutations, so a crash loses only cwd changes since the last save. the
         // equality guard matters likewise: an equal write still notifies observers and churns the reconcile.
-        if let session {
-            let modelTitle = isSplitPane ? session.splitTitle : session.oscTitle
-            let titleIsBlank = modelTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
-            pendingPwdFallbackTitle = titleIsBlank ? pwd : nil
-        } else {
-            pendingPwdFallbackTitle = nil
-        }
         if isSplitPane {
             if session?.splitCwd != pwd { session?.splitCwd = pwd }
         } else {
@@ -534,13 +527,17 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         // already on the main actor; `oscTitle`/`splitTitle` are observed, so the sidebar row and window
         // title refresh live. like applyPwd this does NOT save() — OSC set-title re-fires on every prompt
         // redraw — and sanitizes: the title flows unquoted into a /bin/sh -c line via {AGT_SESSION_NAME}.
-        logger.debug("terminal title pane=\(self.paneToken, privacy: .public) split=\(self.isSplitPane) cwd=\(self.workingDirectory, privacy: .public) title=\(rawTitle, privacy: .public)")
         let title = TerminalText.sanitized(rawTitle)
-        if pendingPwdFallbackTitle == title {
-            pendingPwdFallbackTitle = nil
-            return
-        }
-        pendingPwdFallbackTitle = nil
+        // one value for the log and the drop below, so a trace can never name a cwd the check did not use.
+        let paneCwd = session.map { isSplitPane ? $0.cwd(for: .right) : $0.effectiveCwd }
+        logger.debug("terminal title pane=\(self.paneToken, privacy: .public) split=\(self.isSplitPane) cwd=\(paneCwd ?? "<none>", privacy: .public) title=\(rawTitle, privacy: .public)")
+
+        // libghostty answers OSC 7 with a synthetic title equal to the pwd, and its PWD action does not
+        // reliably reach `applyPwd` before that title, so no arming handshake catches it. A shell titles
+        // with a basename or an abbreviated path, never the bare absolute cwd. Compares the SANITIZED
+        // title, since `applyPwd` stores a sanitized cwd. Residual: between a cd and its OSC 7 the cwd
+        // here is still the old one, so a synthetic title for the NEW directory is accepted.
+        if title == paneCwd { return }
 
         if isSplitPane {
             if session?.splitTitle != title { session?.splitTitle = title }
@@ -771,7 +768,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     /// Starts the bounded auto-focus retry (overlay only), if not already done/in-flight.
     private func requestAutoFocus(in window: NSWindow?) {
         guard autoFocus, deckActive, !didAutoFocus, !autoFocusInFlight, let window,
-              !Self.pickOwnsFocus(in: window) else { return }
+              !deferFocusToAsk() else { return }
         autoFocusInFlight = true
         restoreAutoFocus(in: window, attempt: 0)
     }
@@ -780,7 +777,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     /// first responder, then marks it focused. Bounded; gives up if the view is torn down or moved windows
     /// (macterm's FocusRestoration pattern).
     private func restoreAutoFocus(in window: NSWindow, attempt: Int) {
-        guard autoFocus, deckActive, !didAutoFocus, !isDestroyed, !Self.pickOwnsFocus(in: window) else {
+        guard autoFocus, deckActive, !didAutoFocus, !isDestroyed, !deferFocusToAsk() else {
             autoFocusInFlight = false
             return
         }
@@ -813,7 +810,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     }
 
     private func retryReparentFocus(attempt: Int, heldFor: Int) {
-        guard !isDestroyed, !Self.pickOwnsFocus(in: window) else {
+        guard !isDestroyed, !deferFocusToAsk() else {
             reparentFocusInFlight = false
             return
         }
@@ -832,12 +829,13 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         }
     }
 
-    /// A picker is modal to terminal keyboard focus in its own window. The check lives inside both retry loops,
-    /// not just their callers: a picker can open after a retry starts, and the next tick must stop before it
-    /// steals first responder from the picker field.
-    static func pickOwnsFocus(in window: NSWindow?) -> Bool {
+    /// Rechecked inside retries so a newly opened dialog can claim its region's input.
+    static func pickOwnsFocus(in window: NSWindow?, session: Session? = nil, pane: OverlayPane? = nil) -> Bool {
         guard let window, let windowID = WindowRegistry.shared.windowID(for: window) else { return false }
-        return PickRegistry.shared.controller(for: windowID)?.pending != nil
+        if PickRegistry.shared.controller(for: windowID)?.modalPending == true { return true }
+        guard let session, let catcher = AskKeyCatcher.KeyCatcherView.sessionCatchers.object(forKey: session.id as NSUUID),
+              catcher.window === window else { return false }
+        return catcher.sessionInput?.blocksTerminalFocus(in: window, pane: pane) == true
     }
 
     func destroySurface() {

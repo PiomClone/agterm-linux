@@ -87,7 +87,9 @@ extension AppStore {
         guard let location = location(ofSession: sessionID) else { return false }
         let workspace = workspaces[location.workspaceIndex]
         let wasActive = selectedSessionID == sessionID
-        let session = workspaces[location.workspaceIndex].sessions.remove(at: location.sessionIndex)
+        let session = workspace.sessions[location.sessionIndex]
+        session.cancelPendingAsk()
+        workspaces[location.workspaceIndex].sessions.remove(at: location.sessionIndex)
         emitSessionClosed(session, workspace: workspace.id)
         dropLaunchPanes([session])
         // undo reinserts THIS object, so an override armed at bootstrap and never consumed would survive the
@@ -157,6 +159,7 @@ extension AppStore {
             guard workspaces.indices.contains(close.workspaceIndex),
                   workspaces[close.workspaceIndex].sessions.indices.contains(close.sessionIndex),
                   workspaces[close.workspaceIndex].sessions[close.sessionIndex].id == close.session.id else { continue }
+            close.session.cancelPendingAsk()
             _ = workspaces[close.workspaceIndex].sessions.remove(at: close.sessionIndex)
         }
         dropLaunchPanes(closes.map(\.session))
@@ -199,6 +202,9 @@ extension AppStore {
     @discardableResult
     public func softRemoveWorkspace(_ workspaceID: UUID, grace: TimeInterval = AppStore.pendingCloseGraceInterval) -> Bool {
         guard canRemoveWorkspace, let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return false }
+        for session in workspaces[index].sessions {
+            session.cancelPendingAsk()
+        }
         let visibleWorkspace = workspaces.remove(at: index)
         dropLaunchPanes(visibleWorkspace.sessions)
         forgetFreshWorkspace(workspaceID)
@@ -336,6 +342,17 @@ extension AppStore {
         }
         pendingCloseOrder.removeAll { pendingCloseRecords[$0] == nil }
         return (folded, focusMember)
+    }
+
+    /// Whether a pending close is holding workspace `id`: the workspace itself, or a session recorded as
+    /// having lived in it, whose undo would put that workspace back.
+    func pendingHoldsWorkspace(_ id: UUID) -> Bool {
+        pendingCloseRecords.values.contains { record in
+            switch record {
+            case .sessions(let close): return close.sessions.contains { $0.workspaceID == id }
+            case .workspace(let close): return close.workspace.id == id
+            }
+        }
     }
 
     /// Session ids a pending close still holds. They are absent from the tree, but their live objects are

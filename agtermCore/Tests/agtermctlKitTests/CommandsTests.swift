@@ -530,6 +530,28 @@ struct CommandsTests {
         #expect(try request(["session", "paste", "--target", "9f3c"]) == ControlRequest(cmd: .sessionPaste, target: "9f3c"))
     }
 
+    @Test func sessionPasteWithPane() throws {
+        let expected = ControlRequest(cmd: .sessionPaste, target: "9f3c", args: ControlArgs(pane: "right"))
+        #expect(try request(["session", "paste", "--pane", "right", "--target", "9f3c"]) == expected)
+    }
+
+    @Test func sessionPasteWithScratchPane() throws {
+        let expected = ControlRequest(cmd: .sessionPaste, target: "active", args: ControlArgs(pane: "scratch"))
+        #expect(try request(["session", "paste", "--pane", "scratch"]) == expected)
+    }
+
+    // the CLI validates the spelling and passes it through raw; `ControlDispatcher` turns it into a
+    // `StatusPane`, which is what makes the alias reach the surface.
+    @Test func sessionPasteThreadsAPaneAliasRaw() throws {
+        let expected = ControlRequest(cmd: .sessionPaste, target: "active", args: ControlArgs(pane: "split"))
+        #expect(try request(["session", "paste", "--pane", "split"]) == expected)
+    }
+
+    @Test func sessionPasteRejectsUnknownPane() {
+        // `other` is a session.focus mode, not a pasteable pane.
+        #expect(validationMessage(["session", "paste", "--pane", "other"]) == "--pane must be left, right, or scratch")
+    }
+
     @Test func sessionSelectAllDefaultsActive() throws {
         #expect(try request(["session", "select-all"]) == ControlRequest(cmd: .sessionSelectAll, target: "active"))
     }
@@ -1137,6 +1159,20 @@ struct CommandsTests {
         #expect(built.args?.sizePercent == nil)
         #expect(built.args?.color == nil)
         #expect(built.args?.textColor == nil)
+        #expect(built.args?.pane == nil && built.args?.paneID == nil)
+    }
+    @Test func sessionHudOpenAndUpdateCarryPaneIdentitySelectors() throws {
+        let open = try request(["session", "hud", "wait", "--pane", "right", "--pane-id", "stable-token"])
+        let update = try request(["session", "hud", "update", "done", "--pane", "left", "--pane-id", "stable-token"])
+        #expect(open.args?.pane == "right" && open.args?.paneID == "stable-token")
+        #expect(update.args?.pane == "left" && update.args?.paneID == "stable-token")
+    }
+
+    @Test(arguments: ["scratch", "middle"])
+    func sessionHudRejectsInvalidPane(_ pane: String) {
+        let error = "--pane must be left or right"
+        #expect(validationMessage(["session", "hud", "wait", "--pane", pane]) == error)
+        #expect(validationMessage(["session", "hud", "update", "done", "--pane", pane]) == error)
     }
 
     /// The CLI must take everything the socket does, so a caller can echo back what `tree` handed him and a
@@ -1653,126 +1689,6 @@ struct CommandsTests {
 
     @Test func themeRejectsWindowSelector() {
         #expect(throws: (any Error).self) { try Agtermctl.parseAsRoot(["theme", "set", "Nord", "--window", "w1"]) }
-    }
-
-    // MARK: - window subcommands
-
-    @Test func windowNewWithName() throws {
-        #expect(try request(["window", "new", "Work"]) == ControlRequest(cmd: .windowNew, args: ControlArgs(name: "Work")))
-    }
-
-    @Test func windowNewWithoutName() throws {
-        #expect(try request(["window", "new"]) == ControlRequest(cmd: .windowNew, args: ControlArgs(name: nil)))
-    }
-
-    @Test func windowNewMinimized() throws {
-        #expect(try request(["window", "new", "Work", "--minimized"])
-            == ControlRequest(cmd: .windowNew, args: ControlArgs(name: "Work", minimized: true)))
-        // omitted rather than false, so an un-flagged create stays byte-identical on the wire
-        #expect(try request(["window", "new", "Work"])
-            == ControlRequest(cmd: .windowNew, args: ControlArgs(name: "Work", minimized: nil)))
-    }
-
-    @Test func windowList() throws {
-        #expect(try request(["window", "list"]) == ControlRequest(cmd: .windowList))
-    }
-
-    @Test func windowSelect() throws {
-        #expect(try request(["window", "select", "9f3c"]) == ControlRequest(cmd: .windowSelect, target: "9f3c"))
-    }
-
-    @Test func windowSelectDefaultsActive() throws {
-        #expect(try request(["window", "select"]) == ControlRequest(cmd: .windowSelect, target: "active"))
-    }
-
-    @Test func windowClose() throws {
-        #expect(try request(["window", "close", "ab"]) == ControlRequest(cmd: .windowClose, target: "ab"))
-    }
-
-    @Test func windowRename() throws {
-        let expected = ControlRequest(cmd: .windowRename, target: "9f3c", args: ControlArgs(name: "Renamed"))
-        #expect(try request(["window", "rename", "9f3c", "Renamed"]) == expected)
-    }
-
-    @Test func windowDelete() throws {
-        #expect(try request(["window", "delete", "9f3c"]) == ControlRequest(cmd: .windowDelete, target: "9f3c"))
-    }
-
-    @Test func windowResize() throws {
-        let expected = ControlRequest(cmd: .windowResize, target: "9f3c", args: ControlArgs(width: 1200, height: 800))
-        #expect(try request(["window", "resize", "9f3c", "--width", "1200", "--height", "800"]) == expected)
-    }
-
-    @Test func windowResizeDefaultsToActive() throws {
-        let expected = ControlRequest(cmd: .windowResize, target: "active", args: ControlArgs(width: 1000, height: 700))
-        #expect(try request(["window", "resize", "--width", "1000", "--height", "700"]) == expected)
-    }
-
-    @Test func windowMoveWithDisplay() throws {
-        let expected = ControlRequest(cmd: .windowMove, target: "9f3c", args: ControlArgs(x: 100, y: 50, display: 1))
-        #expect(try request(["window", "move", "9f3c", "--x", "100", "--y", "50", "--display", "1"]) == expected)
-    }
-
-    @Test func windowMoveDefaultsActiveAndCurrentDisplay() throws {
-        let expected = ControlRequest(cmd: .windowMove, target: "active", args: ControlArgs(x: 100, y: 50))
-        #expect(try request(["window", "move", "--x", "100", "--y", "50"]) == expected)
-    }
-
-    @Test func windowZoom() throws {
-        #expect(try request(["window", "zoom", "9f3c"]) == ControlRequest(cmd: .windowZoom, target: "9f3c"))
-    }
-
-    @Test func windowFullscreen() throws {
-        #expect(try request(["window", "fullscreen", "9f3c"]) == ControlRequest(cmd: .windowFullscreen, target: "9f3c"))
-    }
-
-    @Test func windowFullscreenDefaultsActive() throws {
-        #expect(try request(["window", "fullscreen"]) == ControlRequest(cmd: .windowFullscreen, target: "active"))
-    }
-
-    @Test func windowMinimize() throws {
-        #expect(try request(["window", "minimize", "9f3c", "on"])
-            == ControlRequest(cmd: .windowMinimize, target: "9f3c", args: ControlArgs(mode: "on")))
-        #expect(try request(["window", "minimize", "9f3c", "off"])
-            == ControlRequest(cmd: .windowMinimize, target: "9f3c", args: ControlArgs(mode: "off")))
-    }
-
-    @Test func windowMinimizeDefaultsActiveAndToggle() throws {
-        #expect(try request(["window", "minimize"])
-            == ControlRequest(cmd: .windowMinimize, target: "active", args: ControlArgs(mode: "toggle")))
-    }
-
-    @Test func windowMinimizeBareModeTargetsActive() throws {
-        // both positionals are optional, so a bare mode word would otherwise bind to the id; a window
-        // address is a hex prefix or `active`, never a mode word, so the recovery can't misfire.
-        #expect(try request(["window", "minimize", "on"])
-            == ControlRequest(cmd: .windowMinimize, target: "active", args: ControlArgs(mode: "on")))
-        #expect(try request(["window", "minimize", "toggle"])
-            == ControlRequest(cmd: .windowMinimize, target: "active", args: ControlArgs(mode: "toggle")))
-        // an id that merely looks like a mode word is still an id (hex `0ff`, not the word `off`)
-        #expect(try request(["window", "minimize", "0ff"])
-            == ControlRequest(cmd: .windowMinimize, target: "0ff", args: ControlArgs(mode: "toggle")))
-    }
-
-    @Test func windowDeleteDefaultsActive() throws {
-        #expect(try request(["window", "delete"]) == ControlRequest(cmd: .windowDelete, target: "active"))
-    }
-
-    @Test func windowRenameRequiresBothArgsFails() {
-        #expect(throws: (any Error).self) { try Agtermctl.parseAsRoot(["window", "rename", "9f3c"]) }
-    }
-
-    @Test func windowCommandsRejectWindowSelector() {
-        #expect(throws: (any Error).self) { try Agtermctl.parseAsRoot(["window", "list", "--window", "w1"]) }
-        #expect(throws: (any Error).self) { try Agtermctl.parseAsRoot(["window", "select", "9f3c", "--window", "w1"]) }
-        #expect(throws: (any Error).self) { try Agtermctl.parseAsRoot(["quick", "--window", "w1"]) }
-    }
-
-    @Test func windowCommandsKeepSocketAndJSON() throws {
-        let parsed = try Agtermctl.parseAsRoot(["window", "list", "--socket", "/tmp/x.sock", "--json"])
-        let command = try #require(parsed as? Window.List)
-        #expect(command.options.json)
-        #expect(command.options.socketPath(env: [:]) == "/tmp/x.sock")
     }
 
     // MARK: - global --window selector

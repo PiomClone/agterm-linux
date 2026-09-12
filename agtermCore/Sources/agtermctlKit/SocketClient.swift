@@ -144,7 +144,7 @@ struct SocketClient {
         print(formatResponse(response, json: json, echoID: echoID, affectedNoun: affectedNoun))
     }
 
-    /// Render the immediate `pick.open` response as the documented `{"id":"…"}` JSON object.
+    /// Render a pick or ask open response as the documented `{"id":"…"}` JSON object.
     static func formatPickID(_ id: String) throws -> String {
         String(decoding: try JSONEncoder().encode(ControlResult(id: id)), as: UTF8.self)
     }
@@ -152,6 +152,21 @@ struct SocketClient {
     /// Render the nested `pick.result` payload itself, rather than the enclosing control response.
     static func formatPickResult(_ result: ControlPickResult) throws -> String {
         String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+    }
+
+    /// formatAskResult emits the nested ask payload without the control response wrapper.
+    static func formatAskResult(_ result: ControlAskResult) throws -> String {
+        String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+    }
+
+    /// askExitCode distinguishes user dismissal from administrative cancellation.
+    static func askExitCode(for outcome: ControlAskOutcome) -> ExitCode {
+        switch outcome {
+        case .answered: .success
+        case .escaped: ExitCode(rawValue: 3)
+        case .pending: .failure
+        case .cancelled: ExitCode(rawValue: 2)
+        }
     }
 
     /// Map every picker state to a process status. `pending` is non-terminal in the blocking loop; if
@@ -229,6 +244,9 @@ struct SocketClient {
             // the bare column, scriptable as a command substitution. This stays one value even if the
             // payload ever gains a row: a second field belongs under --json, not in a format callers parse.
             return "\(cursor.column)"
+        }
+        if let width = response.result?.width, let height = response.result?.height {
+            return "\(width) \(height)"
         }
         if let ratio = response.result?.ratio {
             // session.resize echoes the applied (clamped) primary-pane fraction, scriptable as a bare number.
@@ -393,8 +411,11 @@ struct SocketClient {
                 let realizedTag = session.realized == false ? " (not realized)" : ""
                 let tags = splitTag + realizedTag + (session.overlay ? " (overlay)" : "")
                     + (session.scratch ? " (scratch)" : "")
+                let splitCwdSuffix = session.splitCwd.map { $0 == session.cwd ? "" : "  split cwd: \($0)" } ?? ""
                 let titleSuffix = session.title.map { "  title: \($0)" } ?? ""
-                lines.append("  \(smark) \(session.name)\(tags)  [\(session.id)]  \(session.cwd)\(titleSuffix)")
+                let attribution = session.liveAttribution.map { "  live attribution: \($0)" } ?? ""
+                let splitAttribution = session.splitLiveAttribution.map { "  split live attribution: \($0)" } ?? ""
+                lines.append("  \(smark) \(session.name)\(tags)  [\(session.id)]  \(session.cwd)\(splitCwdSuffix)\(titleSuffix)\(attribution)\(splitAttribution)")
             }
         }
         return lines.joined(separator: "\n")

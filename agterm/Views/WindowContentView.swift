@@ -87,6 +87,9 @@ struct WindowContentView: View {
     /// Whether the attention popover (the mouse equivalent of the ⌃⇧I attention palette) is shown, anchored
     /// on the title-bar bell. Non-private so the `+RecentSessions` extension's bell/rows can toggle it.
     @State var attentionPopoverShown = false
+    /// Whether the custom-commands popover (the mouse form of the ⌃⇧O palette) is shown, anchored on its
+    /// title-bar button. Non-private so the `+CustomCommands` extension's button/rows can toggle it.
+    @State var customCommandsShown = false
     /// Sidebar width and visibility live on the per-window `AppStore`, persisted in `Snapshot` and shared
     /// with the toolbar button, View menu, palette and the `sidebar` control command.
     /// Height of the custom titlebar row: title + cwd normal, one short line compact, zero hidden (an
@@ -130,6 +133,10 @@ struct WindowContentView: View {
             pickPaletteOverlay
                 .padding(.top, titlebarHeight)
                 .zIndex(20)
+        }
+        .overlayPreferenceValue(AskAnchorPreferenceKey.self) { anchors in
+            askDialogOverlay(anchors).zIndex(20)
+                .allowsHitTesting(pick.pendingAsk != nil)
         }
         // with the title bar hidden (.hiddenTitleBar), pull our header to the very top so the traffic
         // lights overlay it as one row; no system title bar is left to clip the content.
@@ -177,6 +184,7 @@ struct WindowContentView: View {
         // reshuffle the selection under it and an action-palette run hit the wrong session.
         .onChange(of: palette.mode == nil) { _, closed in
             if closed {
+                actions.resignDismissedFieldEditor(for: windowID)
                 store.resumeAutoFollow()
                 actions.focusActiveSession()
             } else {
@@ -185,19 +193,20 @@ struct WindowContentView: View {
         }
         // a native picker owns keyboard focus like a palette: pair auto-follow suppression per window, then
         // return first responder to this window's terminal after every resolution path.
-        .onChange(of: pick.pending?.id) { old, new in
-            if old == nil, new != nil, !pickSuppressesAutoFollow {
-                // a socket-driven picker may arrive with either title-bar popover already open; dismiss
-                // both so no second interactive surface remains above the modal picker. The quick-terminal
+        .onChange(of: pick.modalPending) { old, new in
+            if !old, new, !pickSuppressesAutoFollow {
+                // a socket-driven picker may arrive with a title-bar popover already open; dismiss them
+                // all so no second interactive surface remains above the modal picker. The quick-terminal
                 // panel is now exactly that surface and the worst of them: it floats above every window and
                 // holds key, so the picker would open under it with neither the screen nor the keyboard.
                 // `canShow` stops the reverse order; this is the same class from the other direction.
                 QuickTerminalController.shared.hide()
                 recentSessionsShown = false
                 attentionPopoverShown = false
+                customCommandsShown = false
                 store.suppressAutoFollow()
                 pickSuppressesAutoFollow = true
-            } else if old != nil, new == nil, pickSuppressesAutoFollow {
+            } else if old, !new, pickSuppressesAutoFollow {
                 store.resumeAutoFollow()
                 pickSuppressesAutoFollow = false
                 if pickFocusRestoration.pickerResolved(isFrontmost: isFrontmost) {
@@ -220,9 +229,8 @@ struct WindowContentView: View {
             if let state = fullscreenState(from: note) { windowFullscreen = state }
         })
         // blend the title bar with the terminal; report frontmost/close to the library; surface the window
-        // un-minimized on launch. the title token re-runs the blend in updateNSView on a session switch.
-        .background(WindowAccessor(titleToken: windowTitle, windowID: windowID, library: library, store: store,
-                                   captureOnExit: captureOnExit))
+        // un-minimized on launch. a child view: it reads the OS title in its own body, never in this one.
+        .background(windowTitleSync)
         .onAppear {
             terminalZoom.targetResolver = { [store] in
                 TerminalZoomController.resolveTarget(store: store)
@@ -239,6 +247,7 @@ struct WindowContentView: View {
                 pickSuppressesAutoFollow = false
             }
             PickRegistry.shared.unregister(windowID)
+            store.workspaces.flatMap(\.sessions).forEach { $0.cancelPendingAsk() }
         }
     }
 
@@ -304,8 +313,8 @@ struct WindowContentView: View {
             .opacity(terminalZoom.target == nil ? 1 : 0)
             .allowsHitTesting(terminalZoom.target == nil)
             .onChange(of: isFrontmost) { _, frontmost in
-                if frontmost, pick.pending != nil { palette.close() }
-                if frontmost, pickFocusRestoration.windowBecameFrontmost(pickPending: pick.pending != nil) {
+                if frontmost, pick.modalPending { palette.close() }
+                if frontmost, pickFocusRestoration.windowBecameFrontmost(pickPending: pick.modalPending) {
                     restoreFocusAfterPick()
                 }
             }
@@ -561,7 +570,7 @@ struct WindowContentView: View {
     /// Mounted only while a palette is open in the frontmost window; its content (search field + result
     /// list) is rebuilt from `palette.mode`.
     @ViewBuilder private var commandPaletteOverlay: some View {
-        if isFrontmost, pick.pending == nil, palette.mode != nil {
+        if isFrontmost, !pick.modalPending, palette.mode != nil {
             CommandPalette(controller: palette, actions: actions, terminalAreaInset: terminalAreaInset)
         }
     }
@@ -596,6 +605,66 @@ struct WindowContentView: View {
             )
             .id(pending.id)
         }
+    }
+
+    private func askDialogOverlay(_ anchors: AskAnchorPreferences) -> some View {
+        GeometryReader { proxy in
+            if let ask = pick.pendingAsk {
+                let valid = askAnchorIsValid(ask.anchor)
+                ZStack {
+                    Color.clear.contentShape(Rectangle()).onTapGesture {}
+                    if let frame = askAnchorFrame(ask.anchor, anchors: anchors, proxy: proxy), valid {
+                        AskDialogView(ask: ask, anchorFrame: frame, font: askFont,
+                                      foreground: chromeText, background: terminalColor, focusAllowed: isFrontmost,
+                                      onAnswer: { index in
+                                          guard pick.pendingAsk?.id == ask.id else { return }
+                                          let button = ask.buttons[index]
+                                          pick.resolveAsk(ControlAskResult(result: .answered, id: button.id,
+                                                                           label: button.label, index: index))
+                                      },
+                                      onDismiss: {
+                                          guard pick.pendingAsk?.id == ask.id else { return }
+                                          actions.escapePendingAsk(for: windowID)
+                                      })
+                    }
+                }
+                .id(ask.id)
+                .onChange(of: valid, initial: true) { _, valid in
+                    if !valid, pick.pendingAsk?.id == ask.id { pick.cancelAsk() }
+                }
+            }
+        }
+    }
+
+    var askFont: NSFont {
+        let size = actions.settingsModel?.settings.fontSize ?? GhosttyApp.shared.baseFontSize
+        if let family = actions.settingsModel?.settings.fontFamily, let font = NSFont(name: family, size: size) {
+            return font
+        }
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    private func askAnchorIsValid(_ anchor: AskAnchor?) -> Bool {
+        guard let anchor else { return true }
+        guard store.selectedSessionID == anchor.sessionID,
+              let session = store.session(withID: anchor.sessionID) else { return false }
+        guard let identity = anchor.paneIdentity else { return anchor.pane == nil }
+        guard let pane = session.paneRole(forIdentity: identity) else { return false }
+        return session.rendersPane(pane)
+    }
+
+    private func askAnchorFrame(_ anchor: AskAnchor?, anchors: AskAnchorPreferences, proxy: GeometryProxy) -> CGRect? {
+        guard let anchor else {
+            return CGRect(x: terminalAreaInset, y: titlebarHeight, width: max(0, proxy.size.width - terminalAreaInset),
+                          height: max(0, proxy.size.height - titlebarHeight))
+        }
+        guard anchors.sessionID == anchor.sessionID else { return nil }
+        if let identity = anchor.paneIdentity {
+            guard let session = store.session(withID: anchor.sessionID),
+                  let pane = session.paneRole(forIdentity: identity), let bounds = anchors.panes[pane] else { return nil }
+            return proxy[bounds]
+        }
+        return anchors.container.map { proxy[$0] }
     }
 
     /// The Ctrl-Tab session switcher overlay, mounted only while cycling in the frontmost window.

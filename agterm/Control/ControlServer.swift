@@ -499,15 +499,15 @@ final class ControlServer {
                 .sessionSearch, .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize,
                 .sessionOverlayResult, .sessionOverlayCopy, .sessionOverlayText,
                 .sessionBackground, .sessionText, .quick, .quickType, .quickText,
-                .windowNew, .windowList, .windowSelect,
+                .windowNew, .windowList, .windowSelect, .windowGo,
                 .windowClose, .windowRename, .windowDelete, .windowResize, .windowMove, .windowZoom,
                 .windowFullscreen, .windowMinimize,
                 .restoreClear, .restoreCapture, .restoreMode, .recentClear, .zmxList, .zmxPrune,
-                .zmxKill, .zmxTree, .zmxAttach, .dashboard, .version:
+                .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .dashboard, .version:
             return ControlResponse(ok: false, error: "control dispatcher did not handle \(request.cmd.rawValue)")
         case .debugAppearance:
             return setDebugAppearance(args: request.args)
-        case .pickOpen, .pickResult, .pickCancel:
+        case .pickOpen, .pickResult, .pickCancel, .askOpen, .askResult, .askCancel:
             preconditionFailure("pick command returned nil from ControlDispatcher")
         case .sessionHudOpen, .sessionHudUpdate, .sessionHudClose:
             preconditionFailure("hud command returned nil from ControlDispatcher")

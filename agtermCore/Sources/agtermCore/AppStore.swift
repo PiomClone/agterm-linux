@@ -265,16 +265,19 @@ public final class AppStore {
     /// closure, so one here would leave a bare `controlTree()` ambiguous between the two.
     public func controlTree(paneForeground: (Session) -> CommandRestore.PaneForeground?,
                             splitPaneForeground: (Session) -> CommandRestore.PaneForeground? = { _ in nil },
+                            liveAttribution: (UUID) -> SessionHost.Attribution? = { _ in nil },
                             fontSize: (Session) -> Double? = { _ in nil },
                             splitFontSize: (Session) -> Double? = { _ in nil },
                             scratchFontSize: (Session) -> Double? = { _ in nil },
                             quickVisible: () -> Bool? = { nil },
                             zoomedSurface: () -> String? = { nil },
                             pickPending: () -> String? = { nil },
+                            askPending: () -> String? = { nil },
                             dashboardMembers: () -> [String]? = { nil },
                             dashboardHighlighted: () -> String? = { nil },
                             dashboardFontSize: () -> Double? = { nil },
-                            dashboardFontMode: () -> String? = { nil }, app: AppIdentity? = nil) -> ControlTree {
+                            dashboardFontMode: () -> String? = { nil }, app: AppIdentity? = nil,
+                            liveReset: ControlLiveResetReadback? = nil) -> ControlTree {
         let activeID = selectedSessionID
         // `currentWorkspaceID`, not the selected session's owner: an EMPTY destination selects nothing, so
         // deriving this from the selection alone made `tree` name the workspace `workspace.go` just left.
@@ -284,6 +287,11 @@ public final class AppStore {
                 // each closure inspects live processes, so call it once and split the answer in two.
                 let mainPane = paneForeground(session)
                 let splitPane = splitPaneForeground(session)
+                let local = session.remoteHost == nil
+                let mainAttribution: SessionHost.Attribution? = local && session.surface?.backedByZmx == true
+                    ? liveAttribution(session.paneIdentity) ?? .unknown : nil
+                let splitAttribution: SessionHost.Attribution? = local && session.hasSplit && session.splitSurface?.backedByZmx == true
+                    ? session.splitPaneIdentity.flatMap(liveAttribution) ?? .unknown : nil
                 let idle = session.agentIndicator.status == .idle
                 let status = idle ? nil : session.agentIndicator.status.rawValue
                 let statusPane = idle ? nil : session.agentIndicator.statusPane?.rawValue
@@ -306,6 +314,7 @@ public final class AppStore {
                                           overlaySizePercent: session.programOverlayActive
                                               ? session.overlaySizePercent : nil,
                                           paneOverlays: paneOverlays(session), hud: hudNode(session),
+                                          ask: session.askPending.map { ControlSessionAsk(id: $0.id, pane: session.askTargetPane?.rawValue) },
                                           scratch: session.scratchActive, flagged: session.flagged,
                                           commandWait: (session.initialCommand != nil && session.commandWait) ? true : nil,
                                           splitCommandWait: (session.splitInitialCommand != nil && session.splitCommandWait)
@@ -331,7 +340,9 @@ public final class AppStore {
                                           // no app-side closure like the font sizes above. An empty slot is
                                           // false, not omitted — "no terminal" either way to a caller.
                                           realized: session.surface?.isRealized ?? false,
-                                          context: session.context, remoteHost: session.remoteHost)
+                                          context: session.context, remoteHost: session.remoteHost,
+                                          splitCwd: session.hasSplit ? session.cwd(for: .right) : nil,
+                                          liveAttribution: mainAttribution?.rawValue, splitLiveAttribution: splitAttribution?.rawValue)
             }
             return ControlWorkspaceNode(id: workspace.id.uuidString, name: workspace.name,
                                         active: workspace.id == activeWorkspaceID,
@@ -347,7 +358,7 @@ public final class AppStore {
                            dashboardHighlighted: dashboardHighlighted(),
                            dashboardFontSize: dashboardFontSize(),
                            dashboardFontMode: dashboardFontMode(),
-                           pickPending: pickPending(), app: app)
+                           pickPending: pickPending(), askPending: askPending(), app: app, liveReset: liveReset)
     }
 
     /// The tree's `paneOverlays`: the panes covered by their own overlay, omitted when neither is.
@@ -364,7 +375,8 @@ public final class AppStore {
                               spinner: spec.spinner?.rawValue ?? HudSpinner.noneName,
                               backgroundColor: spec.backgroundColor, textColor: spec.textColor,
                               sizePercent: session.overlaySizePercent,
-                              heightPercent: session.hudHeightPercent, position: spec.position.rawValue)
+                              heightPercent: session.hudHeightPercent, position: spec.position.rawValue,
+                              pane: session.hudTargetPane?.rawValue)
     }
 
     /// Creates a workspace and appends it. With `revealNewWorkspace` (the default) and the filter ON, the new
@@ -493,7 +505,9 @@ public final class AppStore {
         guard let location = location(ofSession: sessionID) else { return }
         let wasActive = selectedSessionID == sessionID
         let workspace = workspaces[location.workspaceIndex]
-        let removed = workspaces[location.workspaceIndex].sessions.remove(at: location.sessionIndex)
+        let removed = workspace.sessions[location.sessionIndex]
+        removed.cancelPendingAsk()
+        workspaces[location.workspaceIndex].sessions.remove(at: location.sessionIndex)
         emitSessionClosed(removed, workspace: workspace.id)
         dropLaunchPanes([removed])
         recordRecentClosedSession(removed, workspaceID: workspace.id, workspaceName: workspace.name,
@@ -532,7 +546,10 @@ public final class AppStore {
         // record the membership BEFORE `dropFocusMember` below prunes it, so Reopen Closed Item can re-mark it
         recordRecentClosedWorkspace(workspace, selectedSessionID: removingActive ? selectedSessionID : nil,
                                     focusMember: focusedWorkspaceIDs.contains(workspaceID))
-        for session in workspace.sessions { emitSessionClosed(session, workspace: workspace.id) }
+        for session in workspace.sessions {
+            session.cancelPendingAsk()
+            emitSessionClosed(session, workspace: workspace.id)
+        }
         if workspace.sessions.isEmpty { scheduleTreeChanged() }
         finalizePaneIdentities(workspace.sessions)
         dropLaunchPanes(workspace.sessions)

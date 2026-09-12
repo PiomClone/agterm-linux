@@ -66,6 +66,7 @@ public enum Command: String, Codable, Sendable {
     case windowNew = "window.new"
     case windowList = "window.list"
     case windowSelect = "window.select"
+    case windowGo = "window.go"
     case windowClose = "window.close"
     case windowRename = "window.rename"
     case windowDelete = "window.delete"
@@ -82,6 +83,9 @@ public enum Command: String, Codable, Sendable {
     case pickOpen = "pick.open"
     case pickResult = "pick.result"
     case pickCancel = "pick.cancel"
+    case askOpen = "ask.open"
+    case askResult = "ask.result"
+    case askCancel = "ask.cancel"
     case restoreClear = "restore.clear"
     case recentClear = "recent.clear"
     case version = "version"
@@ -90,6 +94,7 @@ public enum Command: String, Codable, Sendable {
     case zmxList = "zmx.list"
     case zmxPrune = "zmx.prune"
     case zmxKill = "zmx.kill"
+    case zmxReset = "zmx.reset"
     case zmxTree = "zmx.tree"
     case zmxAttach = "zmx.attach"
     /// UI-TEST-ONLY: forces the app-level appearance (`light`|`dark` via `args.name`) so an XCUITest can
@@ -189,8 +194,9 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     /// `ratioDelta` grows (`primary`|`split` roles or the same four physical positions); to read for
     /// `session.text` (`left`|`right`, omitted = the focused pane, no `other`); `session.type` injects into
     /// (`left`|`right`, omitted = left/main); set `session.status` (`left`|`right`|`scratch`, omitted =
-    /// `left`/main, parsed to `StatusPane`); and `session.restore` pins (same `StatusPane` spelling, omitted
-    /// = `left`/main, `scratch` rejected app-side).
+    /// `left`/main, parsed to `StatusPane`); `session.restore` pins (same `StatusPane` spelling, omitted
+    /// = `left`/main, `scratch` rejected app-side); and `session.hud.open`/`.update` use as optional placement
+    /// bounds (`left`/`right` only, omitted = the whole session detail area).
     ///
     /// The `session.overlay.*` family (`.open`/`.close`/`.result`/`.copy`/`.text`) scopes to ONE pane with
     /// it, parsed to `OverlayPane`, which
@@ -200,15 +206,16 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     /// unaffected. A pane overlay is always full-pane, so
     /// `--pane` conflicts with `session.overlay.open --size-percent` and `session.overlay.resize` refuses it.
     public var pane: String?
-    /// A surface's STABLE spawn token for `session.status`/`session.restore`/`session.text --pane-id` (the
-    /// shell's baked `AGTERM_PANE_ID`, forwarded by the agent-status hook). Resolving it against the session's
+    /// A surface's STABLE spawn token for `session.status`/`session.restore`/`session.text`/`session.hud.*`
+    /// (the shell's baked `AGTERM_PANE_ID`, forwarded by the agent-status hook). Resolving it against the session's
     /// live surfaces OVERRIDES the stale role `pane`, so a call from a moved pane reaches the CURRENT slot;
     /// empty/unknown falls back to `pane`. Opaque — validated only by resolving.
-    /// `session.restore` diverges: an unresolvable token with NO explicit `pane` errors there rather than
-    /// silently using `left`, since a wrong restore pin persists. See `Session.paneRole(forToken:)`, #199.
+    /// `session.restore` and `session.hud.*` diverge: an unresolvable token with NO explicit `pane` errors
+    /// rather than silently choosing session-wide or main placement. See `Session.paneRole(forToken:)`, #199.
     public var paneID: String?
-    /// Absolute primary-pane split fraction (0...1) for `session.resize`, clamped server-side to
-    /// `AppStore.splitRatioMin...splitRatioMax`. Mutually exclusive with `ratioDelta`.
+    /// Absolute primary-pane split fraction (0...1) of the pane area below the titlebar band, for
+    /// `session.resize`, clamped server-side to `AppStore.splitRatioMin...splitRatioMax`. Mutually exclusive
+    /// with `ratioDelta`.
     public var ratio: Double?
     /// Relative split-divider nudge for `session.resize`. With a resize `pane`, its signed magnitude grows
     /// that role or physical position; without `pane`, the legacy form remains a signed PRIMARY-pane
@@ -252,7 +259,7 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     /// both dimensions; omitted gives the default full-pane overlay. Also the new size for
     /// `session.overlay.resize` (mutually exclusive with `full`), and the caller's OVERRIDE of the HUD panel's
     /// app-measured WIDTH for `session.hud.open`/`.update` — a HUD is always floating, so omitting it sizes the
-    /// panel from the message rather than covering the pane, and its height is measured either way.
+    /// panel from the message rather than covering its session or pane bounds, and its height is measured either way.
     public var sizePercent: Int?
     /// For `session.overlay.resize`, requests the full-pane (translucent, session-hidden) overlay — the way
     /// to switch a floating overlay back to full. Mutually exclusive with `sizePercent`.
@@ -283,11 +290,22 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     public var query: String?
     /// Whether `pick.open` accepts the current query as a custom result.
     public var allowCustom: Bool?
+    /// buttons are the caller-ordered choices for ask.open.
+    public var buttons: [ControlAskButton]?
+    /// defaultButton identifies the initially highlighted ask button.
+    public var defaultButton: String?
+    /// style selects terminal or gui ask decoration.
+    public var style: String?
+    /// align positions the ask button block within its panel.
+    public var align: String?
+    /// destructiveButton identifies the ask button styled as destructive.
+    public var destructiveButton: String?
     /// Target window whose tree a session/workspace/tree/font command operates on: id / prefix / `active`
     /// (= frontmost).
     public var window: String?
-    /// New window frame width/height in points for `window.resize`.
+    /// width is window.resize width in points, or ask.open width as an integer percent (10...100).
     public var width: Int?
+    /// New window frame height in points for `window.resize`.
     public var height: Int?
     /// The sidebar divider position in points for `sidebar.width`, clamped server-side to
     /// `AppStore.sidebarWidthMin...sidebarWidthMax`. `Double`, not `width`'s `Int`: the divider drag writes a
@@ -337,7 +355,9 @@ public struct ControlArgs: Codable, Sendable, Equatable {
                 command: String? = nil, wait: Bool? = nil, sizePercent: Int? = nil, full: Bool? = nil,
                 follow: Bool? = nil, message: String? = nil, detail: String? = nil, spinner: String? = nil,
                 items: [ControlPickItem]? = nil, prompt: String? = nil,
-                query: String? = nil, allowCustom: Bool? = nil, window: String? = nil,
+                query: String? = nil, allowCustom: Bool? = nil,
+                buttons: [ControlAskButton]? = nil, defaultButton: String? = nil,
+                destructiveButton: String? = nil, style: String? = nil, align: String? = nil, window: String? = nil,
                 pane: String? = nil, paneID: String? = nil, to: String? = nil,
                 after: String? = nil, before: String? = nil, run: String? = nil,
                 kinds: [String]? = nil, limit: Int? = nil,
@@ -377,6 +397,11 @@ public struct ControlArgs: Codable, Sendable, Equatable {
         self.prompt = prompt
         self.query = query
         self.allowCustom = allowCustom
+        self.buttons = buttons
+        self.defaultButton = defaultButton
+        self.style = style
+        self.align = align
+        self.destructiveButton = destructiveButton
         self.window = window
         self.pane = pane
         self.paneID = paneID
@@ -445,6 +470,9 @@ public struct ControlRequest: Codable, Sendable, Equatable {
 /// for `session.copy`. All optional.
 public struct ControlResult: Codable, Sendable, Equatable {
     public var id: String?
+    /// Applied window frame dimensions in integer points, echoed by `window.resize`.
+    public var width: Int?
+    public var height: Int?
     public var tree: ControlTree?
     public var text: String?
     public var windows: [ControlWindowNode]?
@@ -471,8 +499,8 @@ public struct ControlResult: Codable, Sendable, Equatable {
     /// from. Without the echo a caller cannot tell an out-of-range request from an honored one, both
     /// answering ok.
     public var sidebarWidth: Double?
-    /// The pane `session.restore` wrote, as a `StatusPane` raw value.
-    /// Present on every success, including the `--pane` and default-to-main paths.
+    /// pane is the role written by session.restore or the pane anchor resolved by ask.open.
+    /// session.restore reports it on every success, including the default-to-main path.
     public var pane: String?
     /// The light/dark syncing state for `theme.set`/`theme.list`, from the stored theme: `sync` = whether it
     /// is ghostty's dual `light:,dark:` form (the terminal tracks the macOS appearance), `light`/`dark` its
@@ -486,6 +514,8 @@ public struct ControlResult: Codable, Sendable, Equatable {
     public var keymap: ControlKeymap?
     /// The current or terminal picker outcome for `pick.result`.
     public var pick: ControlPickResult?
+    /// ask is the current or terminal dialog outcome for ask.result.
+    public var ask: ControlAskResult?
     /// The addressed surface's cursor position for `surface.cursor`.
     public var cursor: ControlCursor?
     /// The app serving this socket, for `version`. The same value `tree` carries.
@@ -497,6 +527,8 @@ public struct ControlResult: Codable, Sendable, Equatable {
     public var zmx: ControlZmxInventory?
     /// Another machine's attachable sessions, for `zmx tree`.
     public var remote: ControlRemoteTree?
+    /// What `zmx.reset` confirmed: the sessions and panes it will reset at the next launch.
+    public var liveReset: ControlLiveResetStatus?
 
     public init(id: String? = nil, tree: ControlTree? = nil, text: String? = nil,
                 windows: [ControlWindowNode]? = nil, exitCode: Int? = nil, count: Int? = nil,
@@ -505,12 +537,17 @@ public struct ControlResult: Codable, Sendable, Equatable {
                 sidebarWidth: Double? = nil, pane: String? = nil,
                 sync: Bool? = nil, light: String? = nil, dark: String? = nil,
                 events: ControlEventBatch? = nil, keymap: ControlKeymap? = nil,
-                pick: ControlPickResult? = nil, cursor: ControlCursor? = nil,
+                pick: ControlPickResult? = nil, ask: ControlAskResult? = nil, cursor: ControlCursor? = nil,
                 app: AppIdentity? = nil, restore: ControlRestoreStatus? = nil,
-                zmx: ControlZmxInventory? = nil, remote: ControlRemoteTree? = nil) {
+                zmx: ControlZmxInventory? = nil, remote: ControlRemoteTree? = nil,
+                liveReset: ControlLiveResetStatus? = nil,
+                width: Int? = nil, height: Int? = nil) {
+        self.width = width
+        self.height = height
         self.restore = restore
         self.zmx = zmx
         self.remote = remote
+        self.liveReset = liveReset
         self.id = id
         self.tree = tree
         self.text = text
@@ -529,6 +566,7 @@ public struct ControlResult: Codable, Sendable, Equatable {
         self.events = events
         self.keymap = keymap
         self.pick = pick
+        self.ask = ask
         self.cursor = cursor
         self.app = app
     }

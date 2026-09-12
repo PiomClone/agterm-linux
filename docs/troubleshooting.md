@@ -341,16 +341,28 @@ agterm is behaving correctly: it emits paired focus-in and focus-out reports wit
 
 Workaround until the upstream fix: answer the prompt before switching away, or if you have already returned to a stuck prompt, press `Esc` to dismiss it and let Claude Code re-ask.
 
+## Claude Code prints links as plain text instead of clickable labels
+
+Inside agterm, Claude Code prints a link as `label (https://…)` rather than as an OSC 8 hyperlink, so a list of ticket or PR links becomes a wall of URLs.
+
+agterm identifies itself to spawned shells as `TERM_PROGRAM=agterm`, with `TERM_PROGRAM_VERSION` carrying agterm's version, in place of the `ghostty` pair embedded libghostty would set ([#201](https://github.com/umputun/agterm/issues/201), [#203](https://github.com/umputun/agterm/pull/203)). Claude Code decides hyperlink support from a list of terminal names that does not include `agterm`, so it prints the URL. agterm renders OSC 8 links and ⌘-click opens them; only the detection is off.
+
+Workaround: set `FORCE_HYPERLINK=1` for the tool. Claude Code reads it before any terminal check. Per command, `FORCE_HYPERLINK=1 claude` or an alias. For every new shell, add `env = FORCE_HYPERLINK=1` to `~/.config/agterm/ghostty.conf`, reload the config (File ▸ Reload Config) and open a new session; that form also forces links into redirected output, because the variable skips the tty check as well.
+
+`env = TERM_PROGRAM=ghostty` in that file does nothing: agterm applies its identity after the config file. The durable fix is upstream, Claude Code recognizing `agterm` or `TERM=xterm-ghostty`. Reported in [discussion #583](https://github.com/umputun/agterm/discussions/583).
+
 ## Why agterm asks for camera, microphone and the rest
 
 agterm's code signature carries seven resource-access entitlements: Automation (Apple Events), camera,
 microphone, contacts, calendars, location and photos. agterm never touches any of them itself, and the
 `NSxxxUsageDescription` strings in `Info.plist` say so.
 
-They are there for the programs you run inside a session. macOS treats agterm as the *responsible app* for
-what it spawns, so when a command-line tool asks for the microphone, the request is charged to agterm. This
-is attribution, not inheritance: the entitlement has to sit on agterm precisely because the child does not
-get one of its own. Under hardened runtime, which agterm is signed with, a missing entitlement does not
+They are there for the programs you run inside a session. When macOS attributes a command-line tool to
+agterm, its permission requests are charged to agterm.
+The [Live pane diagnosis below](#agterm-would-like-to-access-data-from-other-apps-keeps-coming-back)
+explains when that attribution can be lost. This is attribution, not inheritance: the entitlement has to
+sit on agterm precisely because the child does not get one of its own. Under hardened runtime, which
+agterm is signed with, a missing entitlement does not
 produce a denial. `tccd` refuses to prompt at all, records nothing, and agterm never appears in the matching
 Privacy pane, so there is no way to approve it by hand either. The tool just fails, with nothing pointing at
 the cause. Ghostty, kitty, iTerm2 and Macterm ship the same seven; WezTerm ships those plus Bluetooth.
@@ -376,7 +388,7 @@ without complaint.
 Those three folders, along with removable and network volumes, are protected by macOS directly. It is a
 different mechanism from the section above: agterm is not sandboxed, and unlike the services listed there no
 missing entitlement can suppress this family's prompt. macOS defines an optional usage-description string per
-folder and agterm ships none, so the prompt carries macOS's own wording rather than agterm's. What matters is
+folder and agterm ships one for each, so the prompt carries agterm's wording. What matters is
 that the answer is recorded against the application macOS holds responsible. Approving kitty or
 Terminal says nothing about agterm, so a Mac where every other terminal reads the folder can still refuse
 this one, and as with the services above a dismissed prompt is not re-offered and the command just keeps
@@ -391,6 +403,37 @@ To tell a privacy denial from ordinary permission bits, run `/bin/ls -la ~/Downl
 against the folder itself, rather than a replacement such as `eza`. A privacy denial usually reads as
 `Operation not permitted` and ordinary permission bits as `Permission denied`, and some replacements print
 the same wording for both.
+
+## "agterm would like to access data from other apps" keeps coming back
+
+macOS App Data consent belongs to a running process and has no separate entry in System Settings.
+If a Live pane loses its responsible process, commands in it can become responsible for themselves and
+repeat the consent request.
+
+Read `liveAttribution` and `splitLiveAttribution` in `agtermctl tree --json`;
+the [tree reference](https://agterm.com/commands#tree) defines the values.
+A pane marked `supervisor` keeps microphone requests attributed to agterm after you quit and relaunch
+agterm. App Data is expected to behave the same, but has not been checked.
+
+A pane reads `app` when its daemon was created without the session host, either by an older agterm or
+because the host could not start; it remains attributed to the running agterm. When that agterm quits,
+the pane becomes `orphaned`; the same happens to panes whose session host dies. Commands in an
+`orphaned` pane remain responsible for themselves until the pane is replaced. Restarting agterm does not
+repair this.
+
+Agterm ▸ Reset Live Sessions… replaces every `orphaned` and `app` pane at once. The dialog says how many
+live sessions it resets; on Reset, agterm quits, ends those sessions' processes at the next launch and
+reopens itself with the same sessions and layout, starting each captured command again where possible.
+Other work running in those sessions stops, and agent conversations may need to be resumed by hand.
+Sessions already marked `supervisor` are left alone. A notification afterwards says how many sessions
+the reset covered; a session whose old process could not be confirmed gone gets no command restarted,
+and the reset can be run again. `agtermctl zmx reset --force` does the same without the dialog.
+
+For App Data prompts in `orphaned` or `app` panes, grant agterm Full Disk Access under
+System Settings ▸ Privacy & Security ▸ Full Disk Access; the
+[folder-access section](#a-command-cannot-read-downloads-desktop-or-documents) explains the scope of that grant.
+Full Disk Access does not grant the microphone. Its permission is controlled separately under
+System Settings ▸ Privacy & Security ▸ Microphone.
 
 ## Reporting a problem
 

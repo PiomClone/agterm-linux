@@ -30,16 +30,16 @@ extension GhosttySurfaceView {
     // MARK: - Keyboard
 
     /// Reduce an `NSEvent` to the host-free `InterruptKeystroke` classifier — Escape or a bare Ctrl-C.
-    private func isInterruptKeystroke(_ event: NSEvent) -> Bool {
+    private func classifyKeystroke(_ event: NSEvent) -> StatusKeystroke {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         var modifiers: KeyModifiers = []
         if flags.contains(.control) { modifiers.insert(.control) }
         if flags.contains(.command) { modifiers.insert(.command) }
         if flags.contains(.option) { modifiers.insert(.option) }
         if flags.contains(.shift) { modifiers.insert(.shift) }
-        return InterruptKeystroke.isInterrupt(keyCode: event.keyCode,
-                                              character: event.charactersIgnoringModifiers,
-                                              modifiers: modifiers)
+        return InterruptKeystroke.classify(keyCode: event.keyCode,
+                                           character: event.charactersIgnoringModifiers,
+                                           modifiers: modifiers)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -50,14 +50,15 @@ extension GhosttySurfaceView {
         // every keystroke is user activity: reset the auto-follow idle timer UNCONDITIONALLY, not gated on
         // the status-clear below, else typing in an idle session yanks the user to a blocked one mid-type.
         onUserInput?()
-        // a keystroke clears an attention glyph to idle: blocked/completed on ANY key, active ONLY on an
-        // interrupt (Escape or Ctrl-C), so typing while the agent works keeps the "working" glyph but
-        // cancelling a pending prompt drops it. Claude Code treats Ctrl-C like Esc for dismissing a prompt,
-        // yet neither fires a hook and a cancelled prompt can still read active (its blocked notification
-        // lands seconds later), so this is the only signal that drops the stale glyph. fire UNCONDITIONALLY
-        // with the isInterrupt flag: the pane-scoped decision belongs to AgentIndicator.clearedBy, so the
-        // scratch (no view.session) self-clears too and a background pane's block survives foreground typing.
-        onUserInputClearsStatus?(isInterruptKeystroke(event))
+        // a keystroke clears an attention glyph to idle: blocked/completed as the Status reset setting says,
+        // active ONLY on an interrupt (Escape or Ctrl-C), so typing while the agent works keeps the "working"
+        // glyph but cancelling a pending prompt drops it. Claude Code treats Ctrl-C like Esc for dismissing a
+        // prompt, yet neither fires a hook and a cancelled prompt can still read active (its blocked
+        // notification lands seconds later), so this is the only signal that drops the stale glyph. fire
+        // UNCONDITIONALLY with the classified key: the pane-scoped decision belongs to AgentIndicator.clearedBy,
+        // so the scratch (no view.session) self-clears too and a background pane's block survives foreground
+        // typing.
+        onUserInputClearsStatus?(classifyKeystroke(event))
         let action: ghostty_input_action_e = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
@@ -151,6 +152,7 @@ extension GhosttySurfaceView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !deferMouseToAsk(with: event) else { return }
         guard let surface else { return }
         window?.makeFirstResponder(self)
         updateGhosttyFocus()
@@ -159,6 +161,7 @@ extension GhosttySurfaceView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !askBlocksFocus else { return }
         guard let surface else { return }
         reportMousePos(from: event)
         _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods(event))
@@ -398,7 +401,11 @@ extension GhosttySurfaceView: @preconcurrency NSTextInputClient {
         ghostty_surface_preedit(surface, nil, 0)
     }
 
-    func selectedRange() -> NSRange { _selectedRange }
+    /// Dictation needs a valid caret outside a composition (#555), and the stored IME selection is stale
+    /// once one ends.
+    func selectedRange() -> NSRange {
+        hasMarkedText() ? _selectedRange : NSRange(location: 0, length: 0)
+    }
     func markedRange() -> NSRange { _markedRange }
     func hasMarkedText() -> Bool { _markedRange.location != NSNotFound }
 

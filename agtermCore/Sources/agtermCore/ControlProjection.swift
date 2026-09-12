@@ -61,10 +61,13 @@ public struct ControlHudNode: Codable, Sendable, Equatable {
     /// the accepted `top`/`bottom` aliases, so a caller reads one spelling whichever he sent. Always present,
     /// including the `center` default, so a caller who omitted it never has to know what the default is.
     public let position: String
+    /// The pane currently carrying the stable HUD target, nil/omitted for session-wide placement.
+    public let pane: String?
 
     public init(message: String, detail: String? = nil, spinner: String = HudSpinner.noneName,
                 backgroundColor: String? = nil, textColor: String? = nil,
-                sizePercent: Int? = nil, heightPercent: Int? = nil, position: String) {
+                sizePercent: Int? = nil, heightPercent: Int? = nil, position: String,
+                pane: String? = nil) {
         self.message = message
         self.detail = detail
         self.spinner = spinner
@@ -73,6 +76,20 @@ public struct ControlHudNode: Codable, Sendable, Equatable {
         self.sizePercent = sizePercent
         self.heightPercent = heightPercent
         self.position = position
+        self.pane = pane
+    }
+}
+
+/// The session's pending terminal ask and its current pane placement.
+public struct ControlSessionAsk: Codable, Sendable, Equatable {
+    /// Exact request id for result and cancellation lookup.
+    public let id: String
+    /// Current left/right placement, nil for the whole session.
+    public let pane: String?
+
+    public init(id: String, pane: String? = nil) {
+        self.id = id
+        self.pane = pane
     }
 }
 
@@ -81,6 +98,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     public let id: String
     public let name: String
     public let cwd: String
+    /// The split pane's last reported or fallback directory, including hidden splits; omitted without one.
+    public let splitCwd: String?
     /// The raw terminal title from the latest OSC 0/1/2 (a remote host over SSH, a shell `PROMPT_COMMAND`);
     /// nil/omitted when none reported. The unprocessed `Session.oscTitle`, distinct from `name` (the derived
     /// sidebar label, which uses it as one fallback); a remote session's local `cwd` goes stale, this does not.
@@ -97,11 +116,15 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     public let hasSplit: Bool?
     /// True only when every existing primary/split pane is currently zmx-backed; nil on older servers.
     public let backedByZmx: Bool?
+    /// Process attribution for each local Live pane; this does not describe permission grants.
+    public let liveAttribution: String?
+    public let splitLiveAttribution: String?
     /// Divider direction for a live split (`vertical`=left/right, `horizontal`=top/bottom); nil without one.
     public let splitAxis: String?
-    /// The primary-pane fraction (0.05...0.95) of a session that HAS a split (shown or hidden); nil with no
-    /// split OR when the ratio was never explicitly set (via `session.resize` or a divider drag), the divider
-    /// then sitting at the default 0.5. The read side of `session.resize`, otherwise echoed only on that call.
+    /// The primary-pane fraction (0.05...0.95) of the pane area below the titlebar band, for a session that
+    /// HAS a split; nil with no split, or while the split has never been SHOWN, since the divider is seeded
+    /// on its first layout. A shown split therefore always reports a value, 0.5 when nothing set one. The
+    /// read side of `session.resize`, otherwise echoed only on that call.
     public let splitRatio: Double?
     /// For a session that HAS a split (shown or hidden), which pane holds keyboard focus: `true` = split
     /// (right), `false` = main (left); nil/omitted with no split. The read side of `session.focus`.
@@ -121,6 +144,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     /// The HUD panel occupying the session-wide overlay slot; nil/omitted when none is up. Mutually exclusive
     /// with `overlay` — one slot, and whichever holds it is the one that reports.
     public let hud: ControlHudNode?
+    /// Pending terminal ask; GUI asks are exposed at the tree's top level.
+    public let ask: ControlSessionAsk?
     public let scratch: Bool
     public let flagged: Bool
     /// What the session is FOR, the read side of `session.context`; nil/omitted when none is set. Durable
@@ -224,7 +249,7 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
                 hasSplit: Bool? = nil, backedByZmx: Bool?, splitAxis: String? = nil,
                 splitRatio: Double? = nil, splitFocused: Bool? = nil,
                 overlay: Bool = false, overlaySizePercent: Int? = nil, paneOverlays: [String]? = nil,
-                hud: ControlHudNode? = nil, scratch: Bool = false, flagged: Bool = false,
+                hud: ControlHudNode? = nil, ask: ControlSessionAsk? = nil, scratch: Bool = false, flagged: Bool = false,
                 commandWait: Bool? = nil, splitCommandWait: Bool? = nil,
                 foreground: [String]? = nil, splitForeground: [String]? = nil,
                 foregroundShell: String? = nil, splitForegroundShell: String? = nil,
@@ -234,7 +259,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
                 background: BackgroundWatermark? = nil, unseen: Int? = nil,
                 fontSize: Double? = nil, splitFontSize: Double? = nil, scratchFontSize: Double? = nil,
                 surfaces: [ControlSurfaceNode]? = nil, realized: Bool? = nil,
-                context: String? = nil, remoteHost: String? = nil) {
+                context: String? = nil, remoteHost: String? = nil, splitCwd: String? = nil,
+                liveAttribution: String? = nil, splitLiveAttribution: String? = nil) {
         self.id = id
         self.name = name
         self.cwd = cwd
@@ -250,6 +276,7 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
         self.overlaySizePercent = overlaySizePercent
         self.paneOverlays = paneOverlays
         self.hud = hud
+        self.ask = ask
         self.scratch = scratch
         self.flagged = flagged
         self.context = context
@@ -274,7 +301,10 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
         self.scratchFontSize = scratchFontSize
         self.surfaces = surfaces
         self.realized = realized
+        self.splitCwd = splitCwd
         self.remoteHost = remoteHost
+        self.liveAttribution = liveAttribution
+        self.splitLiveAttribution = splitLiveAttribution
     }
 }
 
@@ -377,19 +407,25 @@ public struct ControlTree: Codable, Sendable, Equatable {
     public let dashboardFontMode: String?
     /// The id of the picker currently awaiting a choice, or nil when no picker is open.
     public let pickPending: String?
+    /// The pending GUI ask; terminal asks are exposed on their session nodes.
+    public let askPending: String?
     /// The app serving this socket. Constant rather than live like every field above it, and present so an
     /// agent already reading the tree gets its version floor without a second round-trip; `version` answers
     /// the same question for a caller that has no tree, no window, and no JSON parser.
     public let app: AppIdentity?
+    /// The Live sessions reset state: app-global like `app`, omitted when nothing is pending and no launch
+    /// has consumed a marker. The read side of `zmx.reset`.
+    public let liveReset: ControlLiveResetReadback?
 
     public init(workspaces: [ControlWorkspaceNode], idleMs: Int? = nil, autoFollowMs: Int? = nil,
                 sidebarVisible: Bool? = nil, sidebarMode: String? = nil, sidebarWidth: Double? = nil, workspaceFilter: Bool? = nil,
                 quickVisible: Bool? = nil,
                 zoomedSurface: String? = nil, dashboardMembers: [String]? = nil,
                 dashboardHighlighted: String? = nil, dashboardFontSize: Double? = nil,
-                dashboardFontMode: String? = nil, pickPending: String? = nil,
-                app: AppIdentity? = nil) {
+                dashboardFontMode: String? = nil, pickPending: String? = nil, askPending: String? = nil,
+                app: AppIdentity? = nil, liveReset: ControlLiveResetReadback? = nil) {
         self.workspaces = workspaces
+        self.liveReset = liveReset
         self.idleMs = idleMs
         self.autoFollowMs = autoFollowMs
         self.sidebarVisible = sidebarVisible
@@ -403,6 +439,7 @@ public struct ControlTree: Codable, Sendable, Equatable {
         self.dashboardFontSize = dashboardFontSize
         self.dashboardFontMode = dashboardFontMode
         self.pickPending = pickPending
+        self.askPending = askPending
         self.app = app
     }
 }

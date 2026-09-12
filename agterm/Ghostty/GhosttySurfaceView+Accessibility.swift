@@ -17,11 +17,12 @@ import AppKit
 ///
 /// The surface renders its own contents on the GPU and is otherwise deliberately absent from
 /// the a11y tree (see `DashboardView` — "the Metal-backed surface is not in the a11y tree").
-/// The side effect of that absence: assistive and voice tools — VoiceOver, the system
-/// Dictation, and third-party dictation apps such as MacWhisper — probe `AXFocusedUIElement`
-/// for a focused *text field* before they engage. Finding none over the terminal, they never
-/// show their input widget or route text into it (in agterm the MacWhisper hold-to-dictate
-/// widget simply never appears, while it does in every ordinary NSTextView/webview terminal).
+/// The side effect of that absence: assistive and voice tools — VoiceOver and third-party
+/// dictation apps such as MacWhisper — probe `AXFocusedUIElement` for a focused *text field*
+/// before they engage. Finding none over the terminal, they never show their input widget or
+/// route text into it (in agterm the MacWhisper hold-to-dictate widget simply never appears,
+/// while it does in every ordinary NSTextView/webview terminal). The system Dictation is not
+/// one of them: it starts and inserts through `NSTextInputClient`, with no text read from here (#555).
 ///
 /// This extension reports the minimal shape of an editable text field: role `.textArea`,
 /// focusable, with a settable value. Tools that insert via `AXValue` land in `setAccessibilityValue`;
@@ -53,7 +54,7 @@ import AppKit
 /// design — the same flag drag/cursor use), so a split exposes TWO "Terminal" text areas. Only the
 /// first-responder pane reports `isAccessibilityFocused`, advertises its value settable, and accepts a
 /// write; the other reads as a non-settable text area. A client that anchors on `AXFocusedUIElement`
-/// (MacWhisper, Dictation) targets the right pane; a client that enumerates by role/label sees the
+/// (MacWhisper) targets the right pane; a client that enumerates by role/label sees the
 /// unfocused pane is not settable and skips it. Accepted: only one pane can be the live text destination
 /// at a time, and narrowing exposure to the focused pane would hide the other from screen readers.
 ///
@@ -205,7 +206,7 @@ extension GhosttySurfaceView {
     /// Tell AX the focused element moved, because `isAccessibilityFocused` (= `liveFocus`) just changed.
     ///
     /// The companion to `postAccessibilityExposureChange` for the FOCUS half: a client that anchors on
-    /// `AXFocusedUIElement` (MacWhisper, system Dictation) needs to hear the focus leave one pane for
+    /// `AXFocusedUIElement` (MacWhisper) needs to hear the focus leave one pane for
     /// another — a split-pane switch or a window key change moves it without any element appearing or
     /// disappearing.
     ///
@@ -278,12 +279,12 @@ extension GhosttySurfaceView {
     /// dictating user counts as idle (`onUserInput` is what resets the window's auto-follow timer, so
     /// auto-follow would yank the selection to a blocked session MID-sentence and deliver the rest of the
     /// text to the wrong terminal) and a session's stale agent-status glyph survives a dictated reply
-    /// (`onUserInputClearsStatus`). `isInterrupt` is always false: an AX insert carries text, never the
-    /// Escape/Ctrl-C keystroke that clears an ACTIVE glyph, so it clears blocked/completed only — the same
-    /// answer `isInterruptKeystroke` gives for an ordinary printable key.
+    /// (`onUserInputClearsStatus`). Always plain typing: a multi-line insert lands as a paste, not as Return,
+    /// and an AX insert is never the Escape/Ctrl-C interrupt that clears an ACTIVE glyph, so it clears
+    /// blocked/completed only, and only when the Status reset setting clears on the first key.
     private func insertFromAccessibility(_ text: String) {
         onUserInput?()
-        onUserInputClearsStatus?(false)
+        onUserInputClearsStatus?(.other)
         // ends any live composition BEFORE either branch. `insertPasted` commits for itself now, so the
         // paste branch's second call is a no-op against the `hasMarkedText()` guard; the `insertText`
         // branch has no commit of its own (it IS the commit path), so the call has to happen here.

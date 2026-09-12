@@ -402,6 +402,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// The resolved client-side window-button placement. Existing Linux installs default to left.
     public var effectiveWindowButtonsOnLeft: Bool { windowButtonsOnLeft ?? true }
 
+    /// The resolved status-reset mode: the explicit `statusReset` when a KNOWN raw value, else `firstKey`.
+    public var effectiveStatusReset: StatusReset {
+        statusReset.flatMap(StatusReset.init(rawValue:)) ?? .firstKey
+    }
+
     /// The resolved Dock-bounce mode: the explicit `dockBounce` when a KNOWN raw value, else `off`. The
     /// single read point.
     public var effectiveDockBounce: DockBounce {

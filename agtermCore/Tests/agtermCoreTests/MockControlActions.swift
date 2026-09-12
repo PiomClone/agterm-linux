@@ -97,6 +97,9 @@ final class MockControlActions: ControlActions {
         case pickOpen(PendingPick, window: String?, follow: Bool)
         case pickResult(target: String, window: String?)
         case pickCancel(target: String, window: String?)
+        case askOpen(PendingAsk, target: String?, window: String?, placement: ControlAskPlacement, follow: Bool)
+        case askResult(target: String, window: String?)
+        case askCancel(target: String, window: String?)
         case restoreClear
         case recentClear
         case restoreCapture
@@ -173,6 +176,9 @@ final class MockControlActions: ControlActions {
     var nextPickOpenResponse = ControlResponse(ok: true)
     var nextPickResultResponse = ControlResponse(ok: true)
     var nextPickCancelResponse = ControlResponse(ok: true)
+    var nextAskOpenResponse = ControlResponse(ok: true)
+    var nextAskResultResponse = ControlResponse(ok: true)
+    var nextAskCancelResponse = ControlResponse(ok: true)
     var nextRestoreClearResponse = ControlResponse(ok: true)
     var nextRecentClearResponse = ControlResponse(ok: true)
     var nextRestoreCaptureResponse = ControlResponse(ok: true)
@@ -640,6 +646,22 @@ final class MockControlActions: ControlActions {
     func cancelPick(_ target: String, window: String?) -> ControlResponse {
         calls.append(.pickCancel(target: target, window: window))
         return nextPickCancelResponse
+    }
+
+    func openAsk(_ ask: PendingAsk, target: String?, window: String?,
+                 placement: ControlAskPlacement, follow: Bool) -> ControlResponse {
+        calls.append(.askOpen(ask, target: target, window: window, placement: placement, follow: follow))
+        return nextAskOpenResponse
+    }
+
+    func askResult(_ target: String, window: String?) -> ControlResponse {
+        calls.append(.askResult(target: target, window: window))
+        return nextAskResultResponse
+    }
+
+    func cancelAsk(_ target: String, window: String?) -> ControlResponse {
+        calls.append(.askCancel(target: target, window: window))
+        return nextAskCancelResponse
     }
 
     func clearRecentClosedItems() -> ControlResponse {
