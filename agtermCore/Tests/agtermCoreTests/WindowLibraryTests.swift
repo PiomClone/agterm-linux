@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 #if os(Linux)
 import Glibc

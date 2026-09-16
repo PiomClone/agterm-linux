@@ -301,7 +301,7 @@ final class ControlServer: @unchecked Sendable {
              .sidebar, .sidebarMode, .sidebarExpand, .sidebarCollapse, .workspaceFilter,
              .windowNew, .windowList, .windowSelect, .windowGo, .windowClose, .windowRename, .windowDelete,
              .windowResize, .windowMove, .windowZoom, .windowFullscreen, .windowMinimize,
-             .keymapReload, .keymapList, .configReload, .themeSet, .themeList,
+             .keymapReload, .keymapList, .hooksReload, .hooksList, .configReload, .themeSet, .themeList,
              .pickOpen, .pickResult, .pickCancel, .askOpen, .askResult, .askCancel, .sidebarWidth,
              .restoreClear, .restoreCapture, .restoreMode, .recentClear, .version,
              .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .debugAppearance:

@@ -407,6 +407,13 @@ extension AppController {
         reconcile()
     }
 
+    func editHooks() {
+        guard let id = store.selectedSessionID else { return }
+        let path = ConfigPaths.hooksPath(configDirectory: configDirectory()).path
+        store.openOverlay(id, command: ConfigPaths.editorCommand(forPath: path), sizePercent: 95)
+        reconcile()
+    }
+
     func syncSplit(_ s: Session) {
         if dashboard.isOpen,
            dashboardRuntime.targets.values.contains(where: {

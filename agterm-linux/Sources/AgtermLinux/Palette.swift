@@ -147,6 +147,8 @@ extension AppController {
         case .reloadKeymap: return { reloadKeymapAllWindows(reportingIn: self) }
         case .editGhosttyConfig: return { self.editGhosttyConfig() }
         case .reloadConfig: return { self.reloadConfig() }
+        case .editHooks: return { self.editHooks() }
+        case .reloadHooks: return { self.reloadConfig() }
         case .clearFlagged: return { self.clearFlagged() }
         case .clearFocus: return { self.focusWorkspace(nil) }
         case .addWorkspaceToFocus: return { self.addActiveWorkspaceToFocus() }

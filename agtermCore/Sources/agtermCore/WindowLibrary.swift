@@ -68,8 +68,9 @@ public final class WindowLibrary {
     /// The ordered window metadata, for the menu/palette.
     public private(set) var windows: [WindowInfo]
 
-    /// App-wide recent closed sessions/workspaces, newest first. Reopening inserts into the active window;
-    /// independent of window reopen semantics.
+    /// App-wide recent closed sessions/workspaces, newest first. Reopening inserts into the active window
+    /// unless another one still holds the session, live or pending its close, in which case it restores
+    /// there. Independent of window reopen semantics.
     public private(set) var recentClosedItems: [RecentClosedItem]
 
     /// The id of the frontmost on-screen window, mirrored into the index on change. Outlives the window
@@ -245,6 +246,22 @@ public final class WindowLibrary {
         windows.map(\.id).filter { stores[$0] != nil }
     }
 
+    /// Whether more than one window is open, i.e. whether a window step has anywhere to go. Closed entries
+    /// are not candidates — a step must not silently open a window the way `window.select` does.
+    public var canStepWindows: Bool {
+        openIDs().count > 1
+    }
+
+    /// The next/previous OPEN window in library order, WRAPPING from `activeWindowID`; the caller raises it.
+    /// Closed entries are skipped for the reason `canStepWindows` gives. Nil below two open windows, where a
+    /// step would only re-raise the one it is on. Backs `next_window`/`previous_window` and `window.go`.
+    public func navigateWindow(_ direction: WorkspaceNavigation) -> WindowInfo.ID? {
+        let ids = openIDs()
+        guard ids.count > 1, let current = activeWindowID, let i = ids.firstIndex(of: current) else { return nil }
+        let step = direction == .next ? 1 : -1
+        return ids[((i + step) % ids.count + ids.count) % ids.count]
+    }
+
     /// Every session across all open windows, flattened — the walk the per-session sweeps share
     /// (restore-running-command capture + `restore.clear`).
     public func allOpenSessions() -> [Session] {
@@ -344,14 +361,20 @@ public final class WindowLibrary {
         return windows.first { $0.id == id }?.name ?? ""
     }
 
+    /// The window's user-set name, nil for an auto "window N" name or an unknown id.
+    public func customWindowName(for id: UUID) -> String? {
+        guard let info = windows.first(where: { $0.id == id }), info.hasCustomName else { return nil }
+        return info.name
+    }
+
     public var defaultWindowName: String {
         "window \(windows.count + 1)"
     }
 
     // MARK: - Mutation
 
-    /// Creates a window seeded with "workspace 1" and one session at the host-provided default cwd,
-    /// opens it, and persists the index. Defaults the name to "window N".
+    /// Creates a window seeded with "workspace 1" and one $HOME session, opens it, and persists the index.
+    /// Defaults the name to "window N".
     @discardableResult
     public func newWindow(name: String? = nil) -> WindowInfo {
         // the name feeds {AGT_WINDOW_NAME}; see TerminalText.
@@ -449,7 +472,10 @@ public final class WindowLibrary {
         store.finalizeAllPendingCloses()
         store.dropLaunchPanes(store.workspaces.flatMap(\.sessions))
         for workspace in store.workspaces {
-            for session in workspace.sessions { store.emitSessionClosed(session, workspace: workspace.id) }
+            for session in workspace.sessions {
+                session.cancelPendingAsk()
+                store.emitSessionClosed(session, workspace: workspace.id)
+            }
         }
         store.scheduleTreeChanged()
         stores[id] = nil
@@ -490,7 +516,10 @@ public final class WindowLibrary {
         if let store = stores[id] {
             store.dropLaunchPanes(store.workspaces.flatMap(\.sessions))
             for workspace in store.workspaces {
-                for session in workspace.sessions { store.emitSessionClosed(session, workspace: workspace.id) }
+                for session in workspace.sessions {
+                    session.cancelPendingAsk()
+                    store.emitSessionClosed(session, workspace: workspace.id)
+                }
             }
         }
         scheduleTreeChanged(for: id)
@@ -942,10 +971,10 @@ public final class WindowLibrary {
     /// are real panes whose daemons would otherwise read as unclaimed. Nil when the directory itself could
     /// not be read, which is not the same answer as "no stray files".
     private func strayWindowFileIDs(indexed: Set<UUID>) -> [UUID]? {
-        guard (try? windowsDirectory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
-            return nil
-        }
-        guard let contents = try? FileManager.default.contentsOfDirectory(at: windowsDirectory,
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: windowsDirectory.path, isDirectory: &isDir),
+              isDir.boolValue,
+              let contents = try? FileManager.default.contentsOfDirectory(at: windowsDirectory,
                                                                           includingPropertiesForKeys: nil) else {
             return nil
         }

@@ -38,9 +38,11 @@ extension WindowLibrary {
         return reopenRecentClosedReportingWindow(item.id, into: targetStore)
     }
 
-    public func clearRecentClosedItems() {
-        recentClosedStore.clear()
+    @discardableResult
+    public func clearRecentClosedItems() -> Bool {
+        guard recentClosedStore.clear() else { return false }
         refreshRecentClosedItems()
+        return true
     }
 
     /// Which store restores `item`, in priority order: the window holding the session itself, then the one

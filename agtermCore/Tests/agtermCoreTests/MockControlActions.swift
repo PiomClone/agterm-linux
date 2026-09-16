@@ -44,7 +44,7 @@ final class MockControlActions: ControlActions {
         case surfaceZoom(target: String?, window: String?, ControlToggleMode)
         case surfaceCursor(target: String?, window: String?)
         case dashboard(targets: [String], window: String?, close: Bool, fontMode: DashboardFontMode, mru: Bool)
-        case font(target: String?, window: String?, pane: String?, String)
+        case font(target: String?, window: String?, pane: StatusPane?, String)
         case keymapReload
         case keymapList
         case hooksReload
@@ -59,6 +59,7 @@ final class MockControlActions: ControlActions {
         case zmxList
         case zmxPrune
         case zmxKill(target: String, window: String?, pane: ZmxPaneRole)
+        case zmxReset
         case zmxTree(host: String?)
         case zmxAttach(host: String, session: String)
         case sidebarVisibility(ControlToggleMode)
@@ -71,7 +72,7 @@ final class MockControlActions: ControlActions {
         case quickText(all: Bool, lines: Int?)
         case sessionType(target: String?, window: String?, ControlSessionTypeOptions)
         case sessionCopy(target: String?, window: String?)
-        case sessionPaste(target: String?, window: String?)
+        case sessionPaste(target: String?, window: String?, pane: StatusPane?)
         case sessionSelectAll(target: String?, window: String?)
         case sessionSearch(target: String?, window: String?, text: String?, to: String?)
         case overlayOpen(target: String?, window: String?, ControlSessionOverlayOpenOptions)
@@ -80,14 +81,15 @@ final class MockControlActions: ControlActions {
         case overlayResult(target: String?, window: String?, pane: OverlayPane?)
         case overlayCopy(target: String?, window: String?, pane: OverlayPane?)
         case overlayText(target: String?, window: String?, ControlSessionOverlayTextOptions)
-        case hudOpen(target: String?, window: String?, HudSpec)
-        case hudUpdate(target: String?, window: String?, HudSpec)
+        case hudOpen(target: String?, window: String?, HudSpec, ControlHudPlacement)
+        case hudUpdate(target: String?, window: String?, HudSpec, ControlHudPlacement)
         case hudClose(target: String?, window: String?)
         case sessionBackground(target: String?, window: String?, ControlSessionBackgroundOptions)
         case sessionText(target: String?, window: String?, ControlSessionTextOptions)
         case windowNew(String?, minimized: Bool)
         case windowList
         case windowSelect(target: String?)
+        case windowGo(WorkspaceNavigation)
         case windowClose(target: String?)
         case windowRename(target: String?, String)
         case windowDelete(target: String?)
@@ -142,6 +144,7 @@ final class MockControlActions: ControlActions {
     var nextZmxListResponse = ControlResponse(ok: true)
     var nextZmxPruneResponse = ControlResponse(ok: true)
     var nextZmxKillResponse = ControlResponse(ok: true)
+    var nextZmxResetResponse = ControlResponse(ok: true)
     var nextRemoteTreeResponse = ControlResponse(ok: true)
     var nextRemoteAttachResponse = ControlResponse(ok: true)
     var nextQuickResponse = ControlResponse(ok: true)
@@ -169,6 +172,7 @@ final class MockControlActions: ControlActions {
     var nextWindowNewResponse = ControlResponse(ok: true)
     var nextWindowListResponse = ControlResponse(ok: true)
     var nextWindowSelectResponse = ControlResponse(ok: true)
+    var nextWindowGoResponse = ControlResponse(ok: true)
     var nextWindowCloseResponse = ControlResponse(ok: true)
     var nextWindowRenameResponse = ControlResponse(ok: true)
     var nextWindowDeleteResponse = ControlResponse(ok: true)
@@ -381,7 +385,7 @@ final class MockControlActions: ControlActions {
         return nextDashboardResponse
     }
 
-    func font(_ target: String?, window: String?, pane: String?, action: String) -> ControlResponse {
+    func font(_ target: String?, window: String?, pane: StatusPane?, action: String) -> ControlResponse {
         calls.append(.font(target: target, window: window, pane: pane, action))
         return nextFontResponse
     }
@@ -457,6 +461,11 @@ final class MockControlActions: ControlActions {
         return nextZmxKillResponse
     }
 
+    func resetLiveSessions() -> ControlResponse {
+        calls.append(.zmxReset)
+        return nextZmxResetResponse
+    }
+
     func remoteTree(host: String?) async -> ControlResponse {
         calls.append(.zmxTree(host: host))
         return nextRemoteTreeResponse
@@ -518,8 +527,8 @@ final class MockControlActions: ControlActions {
         return nextSessionCopyResponse
     }
 
-    func pasteSession(_ target: String?, window: String?) -> ControlResponse {
-        calls.append(.sessionPaste(target: target, window: window))
+    func pasteSession(_ target: String?, window: String?, pane: StatusPane?) -> ControlResponse {
+        calls.append(.sessionPaste(target: target, window: window, pane: pane))
         return nextSessionPasteResponse
     }
 
@@ -567,12 +576,22 @@ final class MockControlActions: ControlActions {
     }
 
     func openHud(_ target: String?, window: String?, spec: HudSpec) -> ControlResponse {
-        calls.append(.hudOpen(target: target, window: window, spec))
+        openHud(target, window: window, spec: spec, placement: ControlHudPlacement())
+    }
+
+    func openHud(_ target: String?, window: String?, spec: HudSpec,
+                 placement: ControlHudPlacement) -> ControlResponse {
+        calls.append(.hudOpen(target: target, window: window, spec, placement))
         return nextHudOpenResponse
     }
 
     func updateHud(_ target: String?, window: String?, spec: HudSpec) -> ControlResponse {
-        calls.append(.hudUpdate(target: target, window: window, spec))
+        updateHud(target, window: window, spec: spec, placement: ControlHudPlacement())
+    }
+
+    func updateHud(_ target: String?, window: String?, spec: HudSpec,
+                   placement: ControlHudPlacement) -> ControlResponse {
+        calls.append(.hudUpdate(target: target, window: window, spec, placement))
         return nextHudUpdateResponse
     }
 
@@ -605,6 +624,11 @@ final class MockControlActions: ControlActions {
     func windowSelect(_ target: String?) async -> ControlResponse {
         calls.append(.windowSelect(target: target))
         return nextWindowSelectResponse
+    }
+
+    func windowGo(direction: WorkspaceNavigation) -> ControlResponse {
+        calls.append(.windowGo(direction))
+        return nextWindowGoResponse
     }
 
     func windowClose(_ target: String?) async -> ControlResponse {
@@ -678,14 +702,14 @@ final class MockControlActions: ControlActions {
         return nextAskCancelResponse
     }
 
-    func clearRecentClosedItems() -> ControlResponse {
-        calls.append(.recentClear)
-        return nextRecentClearResponse
-    }
-
     func clearRestoreCommands() -> ControlResponse {
         calls.append(.restoreClear)
         return nextRestoreClearResponse
+    }
+
+    func clearRecentClosedItems() -> ControlResponse {
+        calls.append(.recentClear)
+        return nextRecentClearResponse
     }
 
     func captureRestoreCommands() -> ControlResponse {

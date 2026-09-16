@@ -55,16 +55,6 @@ extension IntegrationService {
             )
         }
 
-        if let cli = environment.packageCLI() {
-            return IntegrationItemStatus(
-                kind: .commandLineTool,
-                state: .installed,
-                path: cli.path,
-                version: environment.version(for: cli),
-                detail: "A system-package installation was detected outside the current PATH; update it with the package manager."
-            )
-        }
-
         if IntegrationFilesystem.fingerprint(launcher).value != "missing" {
             let launcherType = (try? FileManager.default.attributesOfItem(atPath: launcher.path)[.type])
                 as? FileAttributeType
@@ -88,6 +78,16 @@ extension IntegrationService {
 
         guard environment.portableLauncherAllowed else {
             return sandboxedCLIStatus()
+        }
+
+        if let cli = environment.packageCLI() {
+            return IntegrationItemStatus(
+                kind: .commandLineTool,
+                state: .installed,
+                path: cli.path,
+                version: environment.version(for: cli),
+                detail: "A system-package installation was detected outside the current PATH; update it with the package manager."
+            )
         }
 
         guard let bundled = environment.bundledCLI() else {
