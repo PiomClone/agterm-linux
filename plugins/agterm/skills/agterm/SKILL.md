@@ -5,9 +5,10 @@ description: >
   running inside an agterm session and asked to control the terminal: create, rename, close, select or
   reorder sessions and workspaces; split panes; toggle the scratch terminal; run a program in an overlay
   and read its exit status; post a HUD panel or a desktop notification; show a native picker with
-  caller-supplied choices; display an image inline; type into a session, copy its selection or search its
-  scrollback; manage windows; change font size; set the theme; reload or edit the keymap and the
-  agterm-scoped ghostty config; subscribe to status, notification, lifecycle and tree-change events.
+  caller-supplied choices or a question dialog with named buttons; display an image inline; type into a
+  session, copy its selection or search its scrollback; manage windows; change font size; set the theme;
+  reload or edit the keymap, the event hooks and the agterm-scoped ghostty config; subscribe to status,
+  notification, lifecycle, pane-visibility and tree-change events.
   Covers the window/workspace/session addressing model and the AGTERM_* environment a spawned shell sees,
   platform-supported persistent sessions, the cookbook recipes, the running version, and diagnosing problems or filing an agterm bug or feature request.
 when_to_use: >
@@ -24,8 +25,8 @@ allowed-tools: Bash(agtermctl *)
 agterm is a native desktop terminal with macOS and GTK Linux frontends. It exposes a programmatic control channel over a local unix
 socket, driven by the companion CLI `agtermctl`. Use it to build and steer terminal layouts, run
 programs in overlays, type into sessions, notify the user in the exact session you are working in,
-and subscribe to control events. Events cover status, notifications, session lifecycle, and
-structural tree changes. They do not stream terminal output; use `session text` to read a buffer.
+and subscribe to control events. Events cover status, notifications, session lifecycle, split and
+scratch pane visibility, and structural tree changes; `hooks.conf` runs a shell line on any of them. They do not stream terminal output; use `session text` to read a buffer.
 
 ## Am I inside agterm?
 
@@ -256,10 +257,11 @@ that window, omitted when no pick is pending.
 
 **events**: continuously print control events, subscribing from the current tail when no cursor is
 given. Use `--json` for one bare event object per line; filter with repeatable or comma-separated
-`--kind status|notify|session.created|session.closed|tree.changed`; resume with paired
-`--run RUN --after SEQ`; and set page size with `--limit 1...1000`. The app retains 4,096 events for
-one process run. Cursor run changes, expiry, and ahead-of-tail errors are fatal and are never silently
-rebaselined. There is no terminal-output event stream.
+`--kind` over `status`, `notify`, `session.created`, `session.closed`, `tree.changed`, `pane.split`,
+`pane.scratch`, `remote.opened` and `remote.closed`; resume with paired `--run RUN --after SEQ`; and set
+page size with `--limit 1...1000`. The app retains 4,096 events for one process run. Cursor run changes,
+expiry, and ahead-of-tail errors are fatal and are never silently rebaselined. There is no
+terminal-output event stream.
 
 **workspace** — `workspace new [name] [--collapsed]` (`--collapsed` creates it closed in the sidebar so you can fill
 it with `session new --no-select` without it opening, and keeps it out of the focus set; a plain create
@@ -507,11 +509,13 @@ The most-recently-used grid also has a GUI opener: **⌘⇧G** on macOS or **Ctr
 TOGGLE the frontmost window's MRU dashboard auto-sized (identical to `dashboard --mru --auto-size`); no new
 control command, the socket `dashboard` command is unchanged.
 
-**pick**: `pick [--prompt TEXT] [--query TEXT] [--allow-custom] [--follow] [--window W] [--no-block]` reads
-choices from stdin and opens the target window's native fuzzy picker. Supply nonblank lines (each line is
-both the id and label) or a JSON array of `{id,label,subtitle?}` items; typing matches labels only, and an
-empty query keeps the supplied order, so the caller's first item is the one Return runs. `--query` prefills
-the field and filters on open, which re-ranks and drops that order. An empty item list is accepted only with
+**pick**: `pick [--prompt TEXT] [--query TEXT] [--select ID] [--allow-custom] [--follow] [--window W] [--no-block]`
+reads choices from stdin and opens the target window's native fuzzy picker. Supply nonblank lines (each line
+is both the id and label) or a JSON array of `{id,label,subtitle?}` items; typing matches labels only, and an
+empty query keeps the supplied order, so without `--select` the caller's first item is the one Return runs. `--query` prefills
+the field and filters on open, which re-ranks and drops that order. `--select ID` opens with that item
+highlighted and scrolled into view (it must name a supplied item; a `--query` that hides it leaves the first
+visible row). An empty item list is accepted only with
 `--allow-custom`, giving a plain text prompt; stdin is read either way, so an itemless call needs
 `< /dev/null` or it blocks. The default blocks until the user chooses or cancels and prints the bare JSON
 result. `--no-block` prints the picker id instead;
@@ -540,6 +544,8 @@ Visibility/mode act on the frontmost window; `sidebar expand`/`collapse`/`width`
 **font** — `font inc|dec|reset [--pane left|right|scratch]` — change a session pane's font size (omitted/`left` = main pane, `right` = the split pane, `scratch` = the scratch terminal). Read the resulting size back from `tree` (`fontSize`/`splitFontSize`/`scratchFontSize` per pane).
 
 **keymap** — `keymap reload` — re-read `keymap.conf` (prints the parse-diagnostic count). `keymap list` — show the resolved keymap AND the live menu key equivalents: every built-in with its current binds (the menu chord first, then any `|`-separated alternatives a key monitor delivers), the custom commands, the parse diagnostics, and what the menu bar is actually dispatching. Use it to check a rebind took effect, to find a free chord, or to spot a chord the keymap resolved but the menu is not carrying.
+
+**hooks** — `hooks reload` — re-read `hooks.conf` (prints the parse-diagnostic count); `hooks list` — every `on <kind> <shell...>` line with its running pid and elapsed seconds, pending and dropped counts, last failure, and a retired marker for a removed line whose script still runs. A hook gets the event JSON on stdin plus `AGT_EVENT_KIND`, `AGT_EVENT_STATUS`, `AGT_EVENT_HOST`, `AGT_SESSION_ID`, `AGT_WORKSPACE_ID`, `AGT_WINDOW_ID` and `AGT_SOCKET`; one process per line at a time with a 256-deep queue behind it. Both commands are app-global and refuse a target or `--window`.
 
 **config** - `config reload` - re-read the agterm-scoped `ghostty.conf` (prints the diagnostic count).
 
@@ -578,6 +584,15 @@ handing back a fresh shell wearing its name. Closing it here ends only this side
 never restored after a relaunch. Both run ssh non-interactively, so key-based auth must already work, and
 the far side needs `agtermctl` installed by the cask or the Help action: a machine merely running agterm
 has no CLI an ssh command can find. Every zmx command needs a running agterm.
+
+**terminfo** — `terminfo install DESTINATION [-p PORT] [-i FILE ...] [-J HOST] [-F FILE]` — install the
+bundled `xterm-ghostty` terminfo entry into a remote account's `~/.terminfo` over one interactive ssh
+connection, the fix for `less`/`vim` on that host warning that the terminal is not fully functional. Run
+once per host and account; nothing is cached and `ssh` itself is untouched. Local-only: no socket, no
+`--json`, no running agterm needed, and it exits with ssh's status. Only those four ssh options pass
+through; other connection settings belong in `~/.ssh/config` under a host alias, while the execution
+settings (no pty, stdin kept, plain session, no fork, no `RemoteCommand`) are the installer's and win
+over the config. The remote needs `tic` (ncurses) and says so when it is missing.
 
 **version** — `agtermctl version` — which agterm is serving this socket, as `result.app` (`version`, plus
 `commit` when the build recorded one). App-global: no target, no `--window`, no window need be open, so it

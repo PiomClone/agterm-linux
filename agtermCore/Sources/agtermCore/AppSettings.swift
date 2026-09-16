@@ -27,6 +27,7 @@ public enum DockBounce: String, Codable, Sendable, CaseIterable {
 public enum InterfaceElement: String, Codable, Sendable, CaseIterable {
     // title bar
     case sidebarToggle
+    case workspaceName
     case sessionName
     case windowName
     case sessionContext
@@ -53,10 +54,21 @@ public enum InterfaceElement: String, Codable, Sendable, CaseIterable {
         }
     }
 
+<<<<<<< HEAD
+||||||| 1cfc300a
+    /// Whether the element starts hidden, so its toggle reads off until the user opts in.
+    public var hiddenByDefault: Bool { self == .customCommands }
+
+=======
+    /// Whether the element starts hidden, so its toggle reads off until the user opts in.
+    public var hiddenByDefault: Bool { self == .customCommands || self == .workspaceName }
+
+>>>>>>> master
     /// The human-facing toggle label shown in the Interface settings tab.
     public var displayName: String {
         switch self {
         case .sidebarToggle: return "Sidebar toggle"
+        case .workspaceName: return "Workspace name"
         case .sessionName: return "Session name"
         case .windowName: return "Window name"
         case .sessionContext: return "Session context"

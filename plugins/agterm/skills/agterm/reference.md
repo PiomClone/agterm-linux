@@ -33,10 +33,11 @@ With no cursor, the first read subscribes from now: it returns an empty batch an
 tail, and the CLI prints only later events. The app keeps a non-destructive ring of the latest 4,096
 events for its current process run. Independent readers do not consume one another's events.
 
-The five event kinds and payloads are:
+The event kinds and payloads are:
 
-- `status`: `name`, normalized `status` (`idle`|`active`|`blocked`|`completed`), a `blink` boolean,
-  and optional `pane`, `color` and `shape` (the last two being the per-call `--color`/`--shape`
+- `status`: `name`, normalized `status` (`idle`|`active`|`blocked`|`completed`), `previous` (the
+  status before the write, equal to `status` when only blink, pane, color or shape changed), a `blink`
+  boolean, and optional `pane`, `color` and `shape` (the last two being the per-call `--color`/`--shape`
   overrides). An event fires whenever the whole indicator changes, not just the state name — so a
   change to `blink`, `pane`, `color` or `shape` alone is a real event you can watch, while re-asserting
   an identical indicator emits nothing. Clearing emits `idle`.
@@ -48,6 +49,14 @@ The five event kinds and payloads are:
 - `tree.changed`: an empty payload and the affected window id. Name, membership, and ordering changes
   are coalesced for 100 ms per window, as is a `session context` set or clear that changes the value.
   Read `tree --json` for the current snapshot.
+- `pane.split` / `pane.scratch`: session `name` and a `status` of `shown` or `hidden`, emitted only on a
+  real visibility change: showing or hiding the split or scratch, closing the split, the primary pane
+  exiting with a split promoted, or the scratch shell exiting. An axis change while shown emits nothing.
+- `remote.opened` / `remote.closed`: session `name` and the ssh destination of a local row created by
+  `zmx attach` as `host`, emitted beside `session.created` / `session.closed` for that session only. They describe the row's
+  presence in the local tree, never the ssh connection: undo re-emits `remote.opened`, and an ssh that
+  died leaves the row holding its exit line until it is closed. Closing a remote split pane alone emits
+  neither.
 
 Every event has `seq` (app-wide sequence), `ts` (Unix timestamp), `kind`, optional
 `window`/`workspace`/`session` ids, and `payload`. Human mode prints one compact line. `--json` emits
@@ -988,7 +997,7 @@ Invalid invocations error (rejected at the CLI and re-checked server-side): `--f
 
 ## pick
 
-`agtermctl pick [--prompt TEXT] [--query TEXT] [--allow-custom] [--follow] [--window W] [--no-block]`
+`agtermctl pick [--prompt TEXT] [--query TEXT] [--select ID] [--allow-custom] [--follow] [--window W] [--no-block]`
 reads choices from stdin and opens a native fuzzy picker in the target window. `pick` defaults to the open
 subcommand, so `agtermctl pick open` is not required. Stdin is read unconditionally, so a call that supplies
 no items needs `< /dev/null` or it blocks.
@@ -1004,11 +1013,15 @@ list it parsed, empty or not.
 
 The query matches item labels only; a subtitle is displayed but never searched, so consequence text on one
 row cannot filter out its safer neighbour. An empty query lists the items in the order the caller supplied
-them, so the first item is the one Return runs on open.
+them, so without `--select` the first item is the one Return runs on open.
 
 `--prompt` sets the query field's placeholder text. `--query` prefills it and filters on open, which ranks
 by match score and so does not preserve the supplied order; the seeded text opens selected, so the first
-keystroke replaces it rather than appending. `--allow-custom` adds a row for a nonmatching
+keystroke replaces it rather than appending. `--select ID` opens with that item highlighted and scrolled
+into view, so Return on an untouched picker runs it and Up/Down read relative to it; the id must name a
+supplied item (`pick select must name an item id` otherwise, an `--allow-custom` empty list included), and a
+`--query` that filters it out leaves the first visible row highlighted. The seed is consumed at open and
+has no tree read-back; the result's `id` and `index` report what was picked. `--allow-custom` adds a row for a nonmatching
 query and returns it as a custom result; with an empty item list that row is the only possible one, and it
 appears as soon as the query is nonblank, prefilled or typed; whitespace and newlines are trimmed first.
 A background `--window` target is not raised by default; `--follow` raises it. Only one picker can be
@@ -1130,8 +1143,9 @@ For agentic attention (waiting on input, or a finished result), prefer `session 
 and OSC 9/777. The two overlap, either can raise an "I need you" signal, but a notification is a
 one-shot banner and badge with no lasting state, while `session status` is a typed, persistent state
 (`active`/`blocked`/`completed`) that stays on the row until acted on, is more precise, and drives the
-attention list, the title-bar bell, and attention navigation (`session go --to next-attention`). Keep
-`notify` for a one-off nudge that needs no follow-up.
+attention list, the title-bar bell, and attention navigation (`session go --to next-attention`). The list
+and the bell span every open window; attention navigation steps within the window. Keep `notify` for a
+one-off nudge that needs no follow-up.
 
 ## font
 
@@ -1240,6 +1254,12 @@ so `{AGT_SESSION_NAME}` and `{AGT_SESSION_PWD}` are as untrusted as `{AGT_SELECT
 - `{AGT_PANE}` / `$AGT_PANE` — the pane the command fired from: `left` (main), `right` (split), or
   `scratch` (the session's scratch terminal). Feed it back as `session type --pane "$AGT_PANE"` to type
   into the very pane the shortcut was pressed in.
+- `{AGT_PANE_ID}` / `$AGT_PANE_ID` — that pane's stable token, the value its shell holds as
+  `AGTERM_PANE_ID`. `{AGT_PANE}` is the role at fire time and a swap or promotion changes it; the token
+  follows the terminal, so feed it to `--pane-id` (`session text` and `session status` take any pane;
+  `session restore`, `hud open` and `ask open` take a left or right token only, never the scratch) when
+  the command must find the same shell later. A chord fired inside an overlay carries the token of the
+  pane the overlay covers, the one `{AGT_PANE}` names. Empty for a launcher fired with no session.
 - Plus the other `$AGT_*` context vars the runner exports.
 
 Linux runs custom commands detached with stdin, stdout, and stderr connected to `/dev/null`.
@@ -1254,6 +1274,37 @@ Built-in action names for `map` include: `new_window`, `new_workspace`, `new_ses
 `first_session`, `last_session`, `previous_attention_session`, `next_attention_session`,
 `focus_left_pane`, `focus_right_pane`, `select_theme`). Editing the keymap from a terminal: open
 `keymap.conf` in `$EDITOR`, then `agtermctl keymap reload`.
+
+## hooks
+
+`hooks.conf`, beside `keymap.conf`, binds a shell line to an event kind: `on <kind> <shell...>`, one per
+line, blank and `#` lines ignored, the remainder after the kind passed to `/bin/sh -c` untouched.
+Several lines per kind are independent hooks; an identical kind+command line is skipped with a
+diagnostic. The script gets the event as one JSON object on stdin (the `events --json` shape) followed
+by a newline and EOF, plus `AGT_EVENT_KIND`, `AGT_EVENT_STATUS`, `AGT_EVENT_HOST`, `AGT_SESSION_ID`,
+`AGT_WORKSPACE_ID`, `AGT_WINDOW_ID` and `AGT_SOCKET`, each set explicitly and empty when the event lacks the field. It runs
+detached in the app's working directory with the widened `PATH` a custom command gets; pass
+`--socket "$AGT_SOCKET"` to any `agtermctl` call. One process per line at a time; further events queue
+in order up to 256, then the oldest is dropped and counted. No timeout. A non-zero exit, a failed spawn
+or an event that could not be handed to a running script banners once per hook until its next success
+or a reload; a script that ignores stdin is fine, only its exit status counts. A hook whose command
+emits another event of its own kind triggers itself again; the queue bounds concurrency, nothing detects
+the loop.
+
+`agtermctl hooks reload` — re-read and apply `hooks.conf`; returns `result.count` = the number of
+parse diagnostics (0 = clean). A hook whose line is unchanged keeps its running child, queue and
+counters, comments and reordering included; a removed line drops its queue and finishes its child.
+
+`agtermctl hooks list` — returns `result.hooks`:
+
+- `path` — the `hooks.conf` this came from.
+- `diagnostics[]` — `line` + `message` per parse problem.
+- `hooks[]` — one row per line in file order, then any removed line whose child still runs, marked
+  `retired: true`: `kind`, `command`, `line`, `runningPid` and `elapsedSeconds` while a child runs,
+  `pending` (events waiting behind it), `dropped` (events the bounded queue discarded), and
+  `lastFailure`, kept until the hook next succeeds (a reload keeps it).
+
+Both are app-global and refuse a target or `--window`.
 
 ## config
 
@@ -1462,6 +1513,34 @@ For a PER-SESSION, per-pane override that pins (or suppresses) what a pane resto
 `session restore` (in the session section above): it wins over the captured foreground, bypasses the
 denylist, and is what a `SessionStart` hook rewrites to reattach a non-idempotent command. `restore clear`
 here is app-global and touches only the captured commands, not those overrides.
+
+## terminfo
+
+`agtermctl terminfo install DESTINATION [-p PORT] [-i FILE ...] [-J HOST] [-F FILE]` — install the bundled
+`xterm-ghostty` terminfo entry into a remote account's `~/.terminfo`. Local-only: it never opens the
+control socket, takes no `--socket`, `--window` or `--json`, and needs no running agterm. It dumps the
+entry with `infocmp -x` from the database next to the running `agtermctl` (falling back to `TERMINFO`
+from the environment outside a bundle), then runs the remote `tic -x -o "$HOME/.terminfo" -` over one
+ssh connection with the source on stdin. Nothing is cached; run it once per host and account.
+
+- `DESTINATION` — as ssh takes it: host, `user@host`, or an alias from `~/.ssh/config`. Refused when it
+  starts with `-` or contains whitespace or a control character.
+- `-p`, `-i` (repeatable), `-J`, `-F` — passed through to ssh. No other ssh option passes; other
+  connection settings go in `~/.ssh/config`. The execution settings are the installer's and override the
+  config: `-T`, `StdinNull=no`, `SessionType=default`, `ForkAfterAuthentication=no`, `RemoteCommand=none`.
+- The connection is interactive: a password, passphrase or host-key prompt is answered on this terminal.
+  Do not run it from a hook or a non-interactive script unless key auth already works for the host.
+
+Human output on success is `installed xterm-ghostty on DESTINATION`. It exits with ssh's status (128 plus
+the signal when ssh was killed), and 64 for a usage error. Failures before the connection open none:
+
+- `no xterm-ghostty terminfo entry next to this agtermctl; looked in <dirs>` — no database found.
+- `infocmp exited N: <stderr>` — the local dump failed.
+- `could not start ssh: <call> failed with <reason>` — the spawn failed.
+- `agterm: tic is not installed on this host, install ncurses first` — printed by the remote and followed
+  by `ssh exited 3; xterm-ghostty was not installed`.
+- `ssh exited N; xterm-ghostty was not installed` — any other remote failure; ssh's own stderr above it
+  says what happened.
 
 ## version
 

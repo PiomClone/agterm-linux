@@ -20,6 +20,7 @@ struct agtermApp: App {
     @State private var undoCloseShortcut: UndoCloseShortcut
     @State private var globalHotkey: GlobalHotkey
     @State var settingsModel: SettingsModel
+    @State private var hookController: HookController
     @State private var controlServer: ControlServer
     @State var liveReset: LiveResetCoordinator
     @State private var customCommandRunner: CustomCommandRunner
@@ -111,6 +112,11 @@ struct agtermApp: App {
             library: library, settings: settingsModel, actions: actions,
             usage: CustomCommandUsageStore(directory: stateDirectory),
             socketProvider: { controlServer.resolvedSocketPath }))
+        // hooks.conf scripts: fed by the library's post-append observer, applied from the settings model.
+        let hookController = HookController(library: library, settings: settingsModel,
+                                            socketProvider: { controlServer.resolvedSocketPath })
+        controlServer.hookStatus = { hookController.scheduler.status }
+        _hookController = State(initialValue: hookController)
         // follows macOS light/dark via KVO on NSApp.effectiveAppearance; dependency-free, started in `.task`.
         _appearanceObserver = State(initialValue: SystemAppearanceObserver())
         // follows Reduce Motion / Reduce Transparency via NSWorkspace's accessibility-display notification,
@@ -204,6 +210,9 @@ struct agtermApp: App {
                         // hand the delegate the action hub and drain folders `open -a agterm /path` queued
                         // before the window store resolved.
                         appDelegate.actions = actions
+                        // hooks apply BEFORE the drain: a queued `open -a agterm /path` creates a session, and a
+                        // session.created hook must already be scheduled to see it (idempotent).
+                        hookController.start()
                         appDelegate.drainPendingOpenDirectories()
                         customCommandRunner.start()
                         // wire the keymap + runner into the action hub for the command palette's custom
@@ -228,6 +237,9 @@ struct agtermApp: App {
                         // before registration. launch window only: `hasReopened` is false until `reopenWindows()`.
                         if !library.hasReopened, !settingsModel.keymapDiagnostics.isEmpty {
                             NotificationManager.shared.notifyKeymapDiagnostics(count: settingsModel.keymapDiagnostics.count)
+                        }
+                        if !library.hasReopened, !settingsModel.hooksDiagnostics.isEmpty {
+                            NotificationManager.shared.notifyHooksDiagnostics(count: settingsModel.hooksDiagnostics.count)
                         }
                         // same for ghostty config diagnostics, recorded at boot by GhosttyApp.loadConfig
                         // (applicationDidFinishLaunching, before registration): same `hasReopened` gate.

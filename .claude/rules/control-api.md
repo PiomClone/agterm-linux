@@ -163,9 +163,15 @@ renumbering. Do not reintroduce a count anywhere.
 - `font.inc`, `font.dec`, `font.reset`
 - `window.new`, `.list`, `.select`, `.close`, `.rename`, `.delete`, `.resize`, `.move`, `.zoom`,
   `.fullscreen`, `.minimize`
-- `keymap.reload`, `keymap.list`, `config.reload`, `theme.set`, `theme.list`, `restore.capture`,
+- `keymap.reload`, `keymap.list`, `hooks.reload`, `hooks.list`, `config.reload`, `theme.set`, `theme.list`, `restore.capture`,
   `restore.clear`, `restore.mode`, `recent.clear`, `version`
-- `zmx.list`, `zmx.prune`, `zmx.kill`, `zmx.tree`, `zmx.attach`
+- `zmx.list`, `zmx.prune`, `zmx.kill`, `zmx.reset`, `zmx.tree`, `zmx.attach`
+
+`terminfo install` is a CLI-only command with no protocol counterpart, the one exemption from the
+protocol/dispatcher contract: it runs `infocmp` and `ssh` locally and never opens the socket, so there is
+nothing for the app to dispatch or read back. `TerminfoInstall` in `agtermCore` owns the argv and the
+pipeline; the CLI owns the typed option surface, deliberately narrower than ssh's so `-G`, `-N`, `-n` and
+`-f` cannot fake a success or hang the install.
 
 `debug.appearance` is a private `Command` case, absent from the list above, used only by `AppearanceFlipUITests`.
 It accepts light/dark, sets `NSApp.appearance`, posts `.agtermSystemAppearanceChanged`, echoes the effective
@@ -540,6 +546,14 @@ side, and reads `lastAppliedIsDark` when bare. Refuse it outside XCUITest; provi
   is set, which makes it a text prompt. Absent items return `pick.open requires items`; an empty list
   without `allowCustom` returns `pick.open requires at least one item`.
   Optional subtitle/prompt/query/custom/follow; `query` prefills the field so the picker opens filtered.
+  Optional `selection` (CLI `--select ID`, its own field because `ControlArgs.select` is the Bool behind
+  `session.type --select`) must name a supplied item, refused `pick select must name an item id`
+  otherwise, an `allowCustom` empty list included (without `allowCustom` the at-least-one-item guard
+  answers first). The palette seeds its highlight from it ONCE, against the first
+  filtered list, so a `query` prefill that hides the item leaves the first visible row; later query
+  edits keep the reset-to-zero behavior. Consumed at open like `query`, so it has no tree read-back: the
+  result's `id`/`index` report what was picked, and `ControlPickUITests` pins that a far-down row is
+  scrolled into view before Return.
   Reject duplicate IDs and control characters host-free; `prompt` and `query` stay unvalidated free text.
   One picker may be pending per window. Background remains background unless follow raises and publishes
   frontmost.
@@ -616,6 +630,16 @@ side, and reads `lastAppliedIsDark` when bare. Refuse it outside XCUITest; provi
   Host-free projection names arrow/return; represent AppKit globe as `fn+` even though grammar lacks it.
 - `config.reload` shares GUI/Edit-overlay reload and returns Ghostty diagnostic count. Keymap and config are
   app-global and take no window.
+- `hooks.reload` / `hooks.list` refuse a target or `--window` before any action. The user contract (file
+  format, stdin/env delivery, queue, failures, reload) lives in `site/docs.html#hooks` and the read-back in
+  `site/commands.html`; these are the implementation constraints. Hook identity is kind plus command text,
+  never the line number, so `HookScheduler.apply` keeps an unchanged entry's child, queue and counters.
+  Only process exit releases a hook's slot: a stdin delivery failure is recorded and bannered on the live
+  run and never starts a second child, and `HookProcessRunner` reports `onExit` only after the child has
+  terminated AND the `DispatchIO` cleanup handler has closed the write end. The scheduler's `onFailure`
+  sink is the only banner source, one per hook until success or reload. `WindowLibrary.onControlEvent`
+  fires after the ring append, so hooks and `events.read` see the same events; dispatch never waits on a
+  hook, which is what makes a hook's own same-socket `agtermctl` call safe.
 - `theme.set` operates on light and dark slots. Name/light aliases conflict; setting light preserves dark.
   Nil/empty means Ghostty built-in, while bare set clears both and disables sync. Dark enables sync,
   seeding missing light from current or Builtin Light; reserved `none` clears dark and sync but preserves
@@ -938,6 +962,12 @@ side, and reads `lastAppliedIsDark` when bare. Refuse it outside XCUITest; provi
   keymap custom command the user supplies. There is NO timer, notification or session-wide coalescing;
   returning false dispatches no app callback, so app code does not learn ssh exited until the keypress, and
   each pane holding and closing on its own is also right when one half of a split dies.
+- `remote.opened` / `remote.closed` are emitted by `emitSessionCreated` / `emitSessionClosed` themselves,
+  gated on `remoteHost`, never from `zmx.attach`: the attach inserts the row before ssh starts, and a
+  soft close emits `session.closed` while the pane is still alive for undo, whose `session.created` never
+  passes through the attach path. So the pair means row visibility only, every producer of those edges
+  gets it, and no kind claims the ssh connection's state, which the app cannot observe under the hold
+  prompt. A host-side pair (`client.attached` / `client.detached`) is the backlog item, not these kinds.
 - `Session.remoteHost` is immutable and set at construction, because `addSession` saves: a marker written
   afterwards would let one snapshot reach disk carrying the ssh command. `isPersistable` gates every
   producer — the launch snapshot, the Recent Closed session record, and a closed workspace's record, whose

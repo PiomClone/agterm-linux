@@ -77,6 +77,8 @@ public enum Command: String, Codable, Sendable {
     case windowMinimize = "window.minimize"
     case keymapReload = "keymap.reload"
     case keymapList = "keymap.list"
+    case hooksReload = "hooks.reload"
+    case hooksList = "hooks.list"
     case configReload = "config.reload"
     case themeSet = "theme.set"
     case themeList = "theme.list"
@@ -290,6 +292,9 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     public var query: String?
     /// Whether `pick.open` accepts the current query as a custom result.
     public var allowCustom: Bool?
+    /// The item id `pick.open` highlights on open; distinct from `select`, the Bool behind
+    /// `session.type --select`.
+    public var selection: String?
     /// buttons are the caller-ordered choices for ask.open.
     public var buttons: [ControlAskButton]?
     /// defaultButton identifies the initially highlighted ask button.
@@ -355,7 +360,7 @@ public struct ControlArgs: Codable, Sendable, Equatable {
                 command: String? = nil, wait: Bool? = nil, sizePercent: Int? = nil, full: Bool? = nil,
                 follow: Bool? = nil, message: String? = nil, detail: String? = nil, spinner: String? = nil,
                 items: [ControlPickItem]? = nil, prompt: String? = nil,
-                query: String? = nil, allowCustom: Bool? = nil,
+                query: String? = nil, allowCustom: Bool? = nil, selection: String? = nil,
                 buttons: [ControlAskButton]? = nil, defaultButton: String? = nil,
                 destructiveButton: String? = nil, style: String? = nil, align: String? = nil, window: String? = nil,
                 pane: String? = nil, paneID: String? = nil, to: String? = nil,
@@ -397,6 +402,7 @@ public struct ControlArgs: Codable, Sendable, Equatable {
         self.prompt = prompt
         self.query = query
         self.allowCustom = allowCustom
+        self.selection = selection
         self.buttons = buttons
         self.defaultButton = defaultButton
         self.style = style
@@ -512,6 +518,8 @@ public struct ControlResult: Codable, Sendable, Equatable {
     public var events: ControlEventBatch?
     /// The resolved keymap plus the live menu key equivalents, for `keymap.list`.
     public var keymap: ControlKeymap?
+    /// The hook definitions and their live state, for `hooks.list`.
+    public var hooks: ControlHooks?
     /// The current or terminal picker outcome for `pick.result`.
     public var pick: ControlPickResult?
     /// ask is the current or terminal dialog outcome for ask.result.
@@ -536,7 +544,7 @@ public struct ControlResult: Codable, Sendable, Equatable {
                 theme: String? = nil, themes: [String]? = nil, ratio: Double? = nil,
                 sidebarWidth: Double? = nil, pane: String? = nil,
                 sync: Bool? = nil, light: String? = nil, dark: String? = nil,
-                events: ControlEventBatch? = nil, keymap: ControlKeymap? = nil,
+                events: ControlEventBatch? = nil, keymap: ControlKeymap? = nil, hooks: ControlHooks? = nil,
                 pick: ControlPickResult? = nil, ask: ControlAskResult? = nil, cursor: ControlCursor? = nil,
                 app: AppIdentity? = nil, restore: ControlRestoreStatus? = nil,
                 zmx: ControlZmxInventory? = nil, remote: ControlRemoteTree? = nil,
@@ -565,6 +573,7 @@ public struct ControlResult: Codable, Sendable, Equatable {
         self.dark = dark
         self.events = events
         self.keymap = keymap
+        self.hooks = hooks
         self.pick = pick
         self.ask = ask
         self.cursor = cursor

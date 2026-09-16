@@ -104,6 +104,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     /// nil/omitted when none reported. The unprocessed `Session.oscTitle`, distinct from `name` (the derived
     /// sidebar label, which uses it as one fallback); a remote session's local `cwd` goes stale, this does not.
     public let title: String?
+    /// Whether this is the window's selected session. Selection within the window, not keyboard focus: it
+    /// stays `true` while another window is frontmost.
     public let active: Bool
     /// Whether the split is SHOWN side by side, the read side of `session.split on|off`. A split hidden with
     /// ⌘D reports `false` while its pane stays alive, so a caller asking "is there a second pane" must read

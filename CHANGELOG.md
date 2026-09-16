@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.30.0 - 2026-09-15
+
+### New Features
+
+- **event hooks.** `hooks.conf`, next to `keymap.conf`, runs a command for matching control events with one `on <kind> <command>` line per hook, so a script reacts to status changes, notifications, sessions and the tree without a subscriber process of its own. The command runs through `/bin/sh -c` with the event JSON on stdin and the event and its target in `AGT_*` environment variables; the docs list the kinds and variables. Events queue in order while a hook is still running, and `agtermctl hooks list` shows failures and dropped events. `status` events now carry `previous`, and two new kinds, `pane.split` and `pane.scratch`, fire when a split or scratch pane is shown or hidden. **File ▸ Edit Hooks…** opens the file in an overlay and reloads it on close, and **Reload Hooks** and `agtermctl hooks reload` reload it. A hook that emits an event of its own kind can keep triggering itself, and nothing detects that loop #607 @umputun
+- **remote.opened and remote.closed events.** A session created by `zmx attach` emits them beside `session.created` and `session.closed`, with the ssh destination as `host`, `AGT_EVENT_HOST` in a hook and `host=` on the human `agtermctl events` line. They follow the local row, not the ssh connection: a soft close emits `remote.closed`, undo emits `remote.opened`, and closing only the split emits neither #610 @umputun
+- **agtermctl terminfo install.** `agtermctl terminfo install DESTINATION` copies the bundled `xterm-ghostty` entry into the remote account's `~/.terminfo` over one ssh connection, the fix for `less`, `vim` or `apt` on that host warning that the terminal is not fully functional. It passes only `-p`, `-i`, `-J` and `-F` to ssh, shows ssh's own password and host-key prompts, and exits 3 when the host has no `tic`. Nothing runs automatically and `ssh` stays the real `ssh` #609 @umputun #605
+- **attention list across every open window.** ⌃⇧I and the title-bar bell list non-idle sessions from every open window in one blocked, active, completed order, with the window name in each row's subtitle once more than one window is open. Picking a session in another window raises that window first; a blocked or completed session reveals the pane that set its status. Rows for a closed or covered window, or a removed session, are disabled, and the bell popover scrolls past about ten rows. The Dock menu and ⌃⌥↑/↓ stay scoped to one window #596 @umputun
+- **workspace name in the title bar.** A **Workspace name** toggle in Settings ▸ Interface, off by default, puts the active session's workspace in front of the identity as `workspace — session — window`, cut to 24 characters, so the bar says where a session lives while the sidebar is collapsed #601 @umputun #598
+- **pick --select.** `agtermctl pick --select ID` opens the picker with that item highlighted and scrolled into view, so a picker of windows or sessions can start on the current one and Return on an untouched list stays put. A `--query` that filters the item out leaves the first visible row highlighted, and an id that names no supplied item refuses the open #597 @umputun
+- **AGT_PANE_ID for custom commands.** `{AGT_PANE_ID}` and `$AGT_PANE_ID` carry the stable token of the pane a command fired in, the value its shell holds as `AGTERM_PANE_ID`, so a command keeps addressing the same terminal with `--pane-id` after a swap or promotion changed what `AGT_PANE` reports. A chord pressed in an overlay gets the covered pane's token, and a launcher fired with no session gets an empty value #603 @umputun
+
+### Improved
+
+- the bundled zmx moves to v0.8.1. A Live session answers terminal identification queries again once the last terminal detaches, where the old build stopped answering after the first attach and a query sent before a responding terminal attached could time out. Scrollback rises to 10,000 lines. A Live session started by an older agterm keeps its running zmx, and with it the old behaviour, until that session is recreated; attaching to it still works #604 @umputun
+- `docs/troubleshooting.md` covers an Accessibility grant made for an older build, where tools are denied while Settings still shows agterm enabled, with the reset and re-grant steps. The bundled agent skill can check the stored grant against the running binary 566449f @umputun
+- two cookbook recipes. `window-switcher` jumps to a window by its number in library order, closed windows included, or picks one from a native picker showing each window's blocked and completed sessions #599 #600 @anadale. `long-commands-status` wraps a shell command in `agst`, which sets the session's status to active while it runs and to completed or blocked when it exits #608 @Rulexec
+
+### Bug Fixes
+
+- the Interface and Agent Status tabs in Settings overflowed their fixed frame and scrolled after 0.29.0 added controls to both. The window is taller and the Typing hint is gone #593 @umputun
+
 ## v0.29.1 - 2026-09-11
 
 ### Bug Fixes

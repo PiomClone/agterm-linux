@@ -15,6 +15,13 @@ C-boundary concurrency before changing the bridge.
   meaningful to drive.
 - For each hideable titlebar/sidebar element, ask whether it should join host-free `InterfaceElement` and
   Settings > Interface. Never add that preference without approval.
+- When adding a process that runs user commands or reparents a session, weigh its effect on macOS TCC
+  attribution per service, up front. The responsible process is not always TCC's authorization subject:
+  the #574 microphone test recorded `agterm-session-host` as responsible, `com.umputun.agterm` as the
+  subject, and access allowed. Check each service rather than assuming one answer covers all of them. A
+  passive `AXIsProcessTrusted` false can also be a stale grant, not a code bug: a stored grant may require
+  a specific old cdhash (an ad-hoc build's requirement is a bare cdhash), so verify the row's full
+  requirement against the running binary before suspecting attribution.
 - Start Swift work with the relevant skills: `swiftui-expert` for UI/AppKit/Observation/rendering,
   `swift-testing-expert` for tests, and `swift-concurrency` for actors, Sendable, async, and C callbacks.
 - “Show me” means build and launch a separate interactive Debug instance, not a screenshot. Use isolated
@@ -177,6 +184,9 @@ C-boundary concurrency before changing the bridge.
   `GHOSTTY_ACTION_RENDER`, so agterm handles no draw action. Never restore the rejected continuous 120Hz
   poll or use `assumeIsolated`. See [[libghostty]] before advancing `GHOSTTY_REV`.
 - `close_surface_cb` only recovers the view and dispatches; it never frees synchronously.
+- A libdispatch callback closure written inside a `@MainActor` method inherits main-actor isolation, and
+  libdispatch running it on another queue aborts under `dispatch_assert_queue`. Declare such closures
+  `@Sendable` explicitly (`HookProcessRunner`'s `DispatchIO` cleanup and write handlers).
 - The session-wide overlay slot holds either a caller's program or a HUD. Raw `overlayActive` answers only
   "the slot is occupied"; every layer asking "is a program covering this session" reads
   `Session.programOverlayActive` instead. Deck gates, focus routing, zoom, and scratch focus all turn on

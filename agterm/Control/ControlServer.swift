@@ -145,6 +145,17 @@ final class ControlServer {
     /// handshake, so this is what covers a remote agterm that never answers.
     static let remoteTreeDeadline: TimeInterval = 10
 
+    /// Writes one reply frame and reports whether all of it went out. Injectable so a hosted test can hold
+    /// or fail the `zmx.reset` reply and watch what the quit does.
+    typealias ResponseWriter = @Sendable (Int32, ControlResponse) -> Bool
+    nonisolated let responseWriter: ResponseWriter
+
+    /// The Live sessions reset's confirm path; nil refuses `zmx.reset` as unsupported.
+    var liveReset: LiveResetCoordinator?
+    /// The scheduler's rows for `hooks.list`, wired by `agtermApp` once the controller exists.
+    var hookStatus: () -> [ControlHookEntry] = { [] }
+    /// The last launch's reset outcome for the read-back; injectable so a hosted test stages one.
+    var liveResetOutcome: () -> LiveReset.Outcome? = { GhosttyApp.shared.liveResetOutcome }
     init(library: WindowLibrary, actions: AppActions, settingsModel: SettingsModel, identity: AppIdentity,
          launchRestoreMode: RestoreMode = GhosttyApp.shared.launchRestoreMode,
          zmxForegroundResolver: ZmxForegroundResolver? = nil, zmxClient: ZmxClient? = nil,
@@ -493,7 +504,8 @@ final class ControlServer {
                 .surfaceZoom,
                 .surfaceCursor,
                 .sessionStatus, .sessionFlag, .sessionContext, .sessionSeen, .sessionRestore, .notify,
-                .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .configReload, .themeSet, .themeList,
+                .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .hooksReload, .hooksList, .configReload,
+                .themeSet, .themeList,
                 .sidebar, .sidebarMode, .sidebarExpand, .sidebarCollapse, .sidebarWidth, .sessionType, .sessionCopy,
                 .sessionPaste, .sessionSelectAll,
                 .sessionSearch, .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize,

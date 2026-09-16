@@ -132,6 +132,11 @@ paths:
   why `CommandContext.Pane` deliberately cannot spell an overlay; its buffer is `session overlay copy`/
   `text`, owned by [[control-api]]. A single pane is always `left`. Primary exit promotes the
   split into the main slot, clears `isSplitPane`, and makes it addressable only as `left`.
+- `{AGT_PANE_ID}`/`$AGT_PANE_ID` is the stable token of the surface in that slot, `Session.paneToken(for:)`,
+  read from the slot rather than the firing surface because an overlay's own view carries no token (#602).
+  It is the same value `--pane-id` consumers resolve, so an overlay chord carries the token of the pane
+  it names, and a scratch chord the scratch's own. Empty in the sessionless context, and deliberately
+  not session-scoped so a launcher naming it still fires there.
 - `resolveBuiltinOverrides` is order-independent: fold last-wins candidates, resolve all final chords,
   then drop every overridden owner of each collision together. A drop reverts to the shipped default, so
   repeat to a fixpoint; distinct shipped defaults and strict candidate removal guarantee termination.
@@ -244,3 +249,6 @@ paths:
   optional fish, VISUAL precedence, rc sourcing, and quoting.
   Overlay close reloads only the recorded edit session. No control command is needed because scripts can
   compose `session overlay open "$EDITOR <path>" --size-percent 95`.
+- `hooks.conf` shares `ConfigPaths`, `KeymapDiagnostic` and the Edit/Reload UX, not the parser:
+  `parseHooksConf` keeps the shell remainder verbatim with no inline-comment stripping. Its contract is
+  in [[control-api]].
