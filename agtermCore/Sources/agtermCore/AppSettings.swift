@@ -257,6 +257,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// System sound played when a session enters `blocked` (resolved by `NSSound(named:)`), nil/empty for
     /// silent. A per-call `session.status --sound` overrides this.
     public var blockedStatusSoundName: String?
+    /// Raw `StatusReset`: which keystroke clears a blocked or completed glyph. nil = `firstKey`, resolved by
+    /// `effectiveStatusReset`.
+    public var statusReset: String?
     /// Whether a right-click pastes the clipboard (ghostty `right-click-action`); nil = on, since agterm
     /// forwards right-/middle-click to libghostty. agterm has no terminal context menu, so paste-or-off is
     /// the whole meaningful choice.
@@ -316,7 +319,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 restoreRunningCommand: Bool? = nil,
                 inheritGlobalGhosttyConfig: Bool? = nil, attentionButtonEnabled: Bool? = nil,
                 dockBounce: String? = nil, notificationSoundName: String? = nil,
-                blockedStatusSoundName: String? = nil, rightClickPaste: Bool? = nil,
+                blockedStatusSoundName: String? = nil, statusReset: String? = nil, rightClickPaste: Bool? = nil,
                 workspaceRowClickExpands: Bool? = nil,
                 newSessionDirectory: String? = nil, newSessionCustomDirectory: String? = nil,
                 confirmCloseSession: Bool? = nil, closeGraceUndoEnabled: Bool? = nil,
@@ -356,6 +359,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.dockBounce = dockBounce
         self.notificationSoundName = notificationSoundName
         self.blockedStatusSoundName = blockedStatusSoundName
+        self.statusReset = statusReset
         self.rightClickPaste = rightClickPaste
         self.workspaceRowClickExpands = workspaceRowClickExpands
         self.newSessionDirectory = newSessionDirectory

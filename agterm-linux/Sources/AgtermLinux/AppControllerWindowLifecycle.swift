@@ -34,7 +34,9 @@ extension AppController {
         if confirmedClose { return true }
         let counts = library.openCounts()
         guard counts.windows <= 1, counts.sessions > 0 else { return true }
-        let body = QuitPrompt.message(windows: counts.windows, sessions: counts.sessions)
+        let body = QuitPrompt.message(
+            windows: counts.windows, sessions: counts.sessions,
+            mode: linuxSettingsStore().load().effectiveRestoreMode)
         let dialog = OpaquePointer("Quit agterm?".withCString { h in body.withCString { b in adw_alert_dialog_new(h, b) } })
         attachControllerContext(to: dialog, windowID: windowID)
         "cancel".withCString { i in "Cancel".withCString { l in adw_alert_dialog_add_response(cast(dialog), i, l) } }

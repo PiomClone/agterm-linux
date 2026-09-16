@@ -226,6 +226,8 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
     // (the macOS path runs through applicationWillTerminate). g_application_quit emits "shutdown".
     _ = g_unix_signal_add(SIGTERM, onQuitSignal, nil)
     _ = g_unix_signal_add(SIGINT, onQuitSignal, nil)
+    // Set libadwaita to light mode.
+    adw_style_manager_set_color_scheme(adw_style_manager_get_default(), ADW_COLOR_SCHEME_FORCE_LIGHT)
     // Re-push the system light/dark scheme to live surfaces whenever it changes.
     connect(adw_style_manager_get_default(), "notify::dark",
             unsafeBitCast(onColorSchemeChanged, to: GCallback.self), nil)

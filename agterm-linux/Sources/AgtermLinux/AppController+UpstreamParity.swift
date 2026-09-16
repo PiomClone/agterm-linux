@@ -91,4 +91,8 @@ extension AppController {
         store.setWorkspaceExpanded(id, expanded: store.isCurrentWorkspaceCollapsed)
         rebuildSidebarKeepingKeyboard()
     }
+
+    func navigateWindow(_ direction: WorkspaceNavigation) {
+        _ = windowGo(direction: direction)
+    }
 }

@@ -109,6 +109,8 @@ extension AppController {
         case .reopenRecent: return { self.reopenRecentClosed() }
         case .undoClose: return { self.undoPendingClose() }
         case .clearStatus: return { self.clearActiveStatus() }
+        case .previousWindow: return { self.navigateWindow(.previous) }
+        case .nextWindow: return { self.navigateWindow(.next) }
         case .previousSession: return { self.navigate(.previous) }
         case .nextSession: return { self.navigate(.next) }
         case .previousAttentionSession: return { self.navigate(.previousAttention) }

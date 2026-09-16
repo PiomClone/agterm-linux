@@ -299,12 +299,12 @@ final class ControlServer: @unchecked Sendable {
             return routeOwningSurface(req.target) ?? .controller(gController)
         case .tree, .eventsRead, .workspaceNew, .workspaceGo, .quick, .quickType, .quickText, .dashboard,
              .sidebar, .sidebarMode, .sidebarExpand, .sidebarCollapse, .workspaceFilter,
-             .windowNew, .windowList, .windowSelect, .windowClose, .windowRename, .windowDelete,
+             .windowNew, .windowList, .windowSelect, .windowGo, .windowClose, .windowRename, .windowDelete,
              .windowResize, .windowMove, .windowZoom, .windowFullscreen, .windowMinimize,
              .keymapReload, .keymapList, .configReload, .themeSet, .themeList,
-             .pickOpen, .pickResult, .pickCancel, .sidebarWidth,
+             .pickOpen, .pickResult, .pickCancel, .askOpen, .askResult, .askCancel, .sidebarWidth,
              .restoreClear, .restoreCapture, .restoreMode, .recentClear, .version,
-             .zmxList, .zmxPrune, .zmxKill, .zmxTree, .zmxAttach, .debugAppearance:
+             .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .debugAppearance:
             return .controller(gController)
         }
     }

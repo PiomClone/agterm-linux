@@ -574,24 +574,23 @@ extension AppController: ControlActions {
             result: ControlResult(text: notes.joined(separator: "; ")))
     }
 
-    func font(_ target: String?, window: String?, pane: String?, action: String) -> ControlResponse {
+    func font(_ target: String?, window: String?, pane: StatusPane?, action: String) -> ControlResponse {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
         case .success(let id):
             let surface: GhosttySurface?
             switch pane {
-            case nil, "left": surface = surfaces[id]
-            case "right":
+            case nil, .left: surface = surfaces[id]
+            case .right:
                 guard let split = splitSurfaces[id] else {
                     return err("session has no split pane")
                 }
                 surface = split
-            case "scratch":
+            case .scratch:
                 guard let scratch = scratchSurfaces[id] else {
                     return err("session has no scratch terminal")
                 }
                 surface = scratch
-            case .some(let value): return err("invalid pane: \(value)")
             }
             guard let surface else { return err("session not realized") }
             surface.performBindingAction(action)
@@ -771,11 +770,10 @@ extension AppController: ControlActions {
         case .success(let id):
             guard let session = store.session(withID: id) else { return err("session not found") }
             switch options.pane {
-            case nil, "left": break
-            case "right" where !session.hasSplit: return err("session has no split pane")
-            case "scratch" where session.scratchSurface == nil: return err("session has no scratch terminal")
-            case "right", "scratch": break
-            case .some(let pane): return err("invalid pane: \(pane)")
+            case nil, .left: break
+            case .right where !session.hasSplit: return err("session has no split pane")
+            case .scratch where session.scratchSurface == nil: return err("session has no scratch terminal")
+            case .right, .scratch: break
             }
             if options.select {
                 selectSession(id, userInitiated: false)
@@ -784,10 +782,9 @@ extension AppController: ControlActions {
             for _ in 0..<12 {
                 while g_main_context_iteration(nil, 0) != 0 {}
                 let surface: GhosttySurface? = switch options.pane {
-                case nil, "left": surfaces[id]
-                case "right": splitSurfaces[id]
-                case "scratch": scratchSurfaces[id]
-                case .some: nil
+                case nil, .left: surfaces[id]
+                case .right: splitSurfaces[id]
+                case .scratch: scratchSurfaces[id]
                 }
                 if let surface, surface.inject(text: options.text) {
                     return ok(id)
@@ -809,8 +806,20 @@ extension AppController: ControlActions {
         }
     }
 
-    func pasteSession(_ target: String?, window: String?) -> ControlResponse {
-        performSessionBinding(target, action: "paste_from_clipboard")
+    func pasteSession(_ target: String?, window: String?, pane: StatusPane?) -> ControlResponse {
+        guard let pane else { return performSessionBinding(target, action: "paste_from_clipboard") }
+        switch resolveSessionResponse(target) {
+        case .failure(let response): return response
+        case .success(let id):
+            let surface: GhosttySurface? = switch pane {
+            case .left: surfaces[id]
+            case .right: splitSurfaces[id]
+            case .scratch: scratchSurfaces[id]
+            }
+            guard let surface, surface.isRealized else { return err("session not realized") }
+            surface.performBindingAction("paste_from_clipboard")
+            return ok(id)
+        }
     }
 
     func selectAllSession(_ target: String?, window: String?) -> ControlResponse {
@@ -968,10 +977,9 @@ extension AppController: ControlActions {
             let surface: GhosttySurface?
             switch options.pane {
             case nil: surface = store.session(withID: id)?.onScreenSurface as? GhosttySurface
-            case "left": surface = surfaces[id]
-            case "right": surface = splitSurfaces[id]
-            case "scratch": surface = scratchSurfaces[id]
-            default: surface = nil
+            case .left: surface = surfaces[id]
+            case .right: surface = splitSurfaces[id]
+            case .scratch: surface = scratchSurfaces[id]
             }
             guard let text = surface?.readScreenText(all: options.all, lines: options.lines) else {
                 return err("session not realized")
@@ -982,7 +990,7 @@ extension AppController: ControlActions {
 
     func clearRecentClosedItems() -> ControlResponse {
         let affected = gLibrary.recentClosedItems.count
-        guard gLibrary.clearRecentClosedItems() else { return err(RecentClearError.persistenceFailed) }
+        gLibrary.clearRecentClosedItems()
         return ControlResponse(ok: true, result: ControlResult(affected: affected))
     }
 

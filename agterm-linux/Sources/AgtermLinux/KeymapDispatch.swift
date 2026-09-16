@@ -419,6 +419,8 @@ extension AppController {
         case .reopenRecent: reopenRecentClosed()
         case .undoClose: undoPendingClose()
         case .clearStatus: clearActiveStatus()
+        case .previousWindow: navigateWindow(.previous)
+        case .nextWindow: navigateWindow(.next)
         case .increaseFontSize: focusedSurface()?.performBindingAction(FontBindingAction.increase)
         case .decreaseFontSize: focusedSurface()?.performBindingAction(FontBindingAction.decrease)
         case .resetFontSize: focusedSurface()?.performBindingAction(FontBindingAction.reset)

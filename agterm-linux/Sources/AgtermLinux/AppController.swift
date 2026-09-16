@@ -610,7 +610,10 @@ final class AppController {
     /// Typing clears blocked/completed status; Escape or bare Ctrl-C also clears active status.
     func clearAttentionStatus(_ id: UUID, pane: StatusPane, isInterrupt: Bool) {
         guard let session = store.session(withID: id),
-              session.agentIndicator.clearedBy(pane: pane, isInterrupt: isInterrupt) else { return }
+              session.agentIndicator.clearedBy(
+                pane: pane,
+                keystroke: isInterrupt ? .interrupt : .other,
+                reset: linuxSettingsStore().load().effectiveStatusReset) else { return }
         store.setAgentIndicator(AgentIndicator(), forSession: id)
         rebuildSidebar()
     }

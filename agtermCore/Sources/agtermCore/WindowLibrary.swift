@@ -83,7 +83,7 @@ public final class WindowLibrary {
 
     /// The state directory (AGTERM_STATE_DIR-aware): the index here, per-window files in `windows/`.
     @ObservationIgnored private let directory: URL
-    @ObservationIgnored private let recentClosedStore: RecentClosedStore
+    @ObservationIgnored let recentClosedStore: RecentClosedStore
     /// One bounded run-identified ring shared by every window store for this library/app lifetime.
     @ObservationIgnored private let controlEventRing: ControlEventRing
     @ObservationIgnored private let paneFinalizer: (([UUID]) -> Void)?
@@ -420,32 +420,6 @@ public final class WindowLibrary {
             log("stripCaptures failed: \(error)")
             return false
         }
-    }
-
-    @discardableResult
-    public func reopenRecentClosed(_ itemID: UUID, into targetStore: AppStore? = nil) -> Bool {
-        refreshRecentClosedItems()
-        guard let item = recentClosedItems.first(where: { $0.id == itemID }),
-              let store = targetStore ?? activeStore,
-              store.restoreRecentClosed(item)
-        else { return false }
-        recentClosedStore.remove(itemID)
-        refreshRecentClosedItems()
-        return true
-    }
-
-    @discardableResult
-    public func reopenLatestRecentClosed(into targetStore: AppStore? = nil) -> Bool {
-        refreshRecentClosedItems()
-        guard let item = recentClosedItems.first else { return false }
-        return reopenRecentClosed(item.id, into: targetStore)
-    }
-
-    @discardableResult
-    public func clearRecentClosedItems() -> Bool {
-        guard recentClosedStore.clear() else { return false }
-        refreshRecentClosedItems()
-        return true
     }
 
     /// Closes a window: drops its store and persists the index. The app-target caller tears down the
@@ -975,7 +949,7 @@ public final class WindowLibrary {
         }
     }
 
-    private func refreshRecentClosedItems() {
+    func refreshRecentClosedItems() {
         recentClosedItems = recentClosedStore.load()
     }
 

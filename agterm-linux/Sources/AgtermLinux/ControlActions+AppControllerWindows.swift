@@ -48,6 +48,17 @@ extension AppController {
         }
     }
 
+    func windowGo(direction: WorkspaceNavigation) -> ControlResponse {
+        let open = library.openIDs()
+        guard open.count > 1, let index = open.firstIndex(of: windowID) else {
+            return err("no other open window to navigate to")
+        }
+        let offset = direction == .next ? 1 : open.count - 1
+        let id = open[(index + offset) % open.count]
+        openWindow(id)
+        return ok(id)
+    }
+
     func windowClose(_ target: String?) async -> ControlResponse {
         windowCloseSync(target)
     }

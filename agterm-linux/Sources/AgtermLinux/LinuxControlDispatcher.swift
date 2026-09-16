@@ -38,7 +38,7 @@ struct LinuxControlDispatcher {
                 .themeSet, .themeList, .sidebar, .sidebarMode, .sidebarExpand,
                 .sidebarCollapse, .sidebarWidth, .restoreClear, .restoreCapture, .recentClear, .version:
             return dispatchAppCommand(request)
-        case .windowRename, .windowResize, .windowMove, .windowZoom, .windowFullscreen, .windowMinimize:
+        case .windowGo, .windowRename, .windowResize, .windowMove, .windowZoom, .windowFullscreen, .windowMinimize:
             return dispatchWindowCommand(request)
         case .pickOpen, .pickResult, .pickCancel:
             return dispatchPickCommand(request)
@@ -407,7 +407,11 @@ struct LinuxControlDispatcher {
         case .sessionCopy:
             return actions.copySessionSelection(request.target, window: request.args?.window)
         case .sessionPaste:
-            return actions.pasteSession(request.target, window: request.args?.window)
+            let pane = request.args?.pane.flatMap(StatusPane.init(controlName:))
+            guard request.args?.pane == nil || pane != nil else {
+                return ControlResponse(ok: false, error: "--pane must be left, right, or scratch")
+            }
+            return actions.pasteSession(request.target, window: request.args?.window, pane: pane)
         case .sessionSelectAll:
             return actions.selectAllSession(request.target, window: request.args?.window)
         case .surfaceZoom:
@@ -583,15 +587,19 @@ struct LinuxControlDispatcher {
     }
 
     private func dispatchAppCommand(_ request: ControlRequest) -> ControlResponse {
+        let pane = request.args?.pane.flatMap(StatusPane.init(controlName:))
+        if request.args?.pane != nil, pane == nil {
+            return ControlResponse(ok: false, error: "--pane must be left, right, or scratch")
+        }
         switch request.cmd {
         case .fontInc:
-            return actions.font(request.target, window: request.args?.window, pane: request.args?.pane,
+            return actions.font(request.target, window: request.args?.window, pane: pane,
                                 action: FontBindingAction.increase)
         case .fontDec:
-            return actions.font(request.target, window: request.args?.window, pane: request.args?.pane,
+            return actions.font(request.target, window: request.args?.window, pane: pane,
                                 action: FontBindingAction.decrease)
         case .fontReset:
-            return actions.font(request.target, window: request.args?.window, pane: request.args?.pane,
+            return actions.font(request.target, window: request.args?.window, pane: pane,
                                 action: FontBindingAction.reset)
         case .keymapReload:
             return actions.reloadKeymap()
@@ -706,8 +714,12 @@ struct LinuxControlDispatcher {
         if let lines, lines <= 0 {
             return ControlResponse(ok: false, error: "--lines must be greater than 0")
         }
+        let pane = request.args?.pane.flatMap(StatusPane.init(controlName:))
+        guard request.args?.pane == nil || pane != nil else {
+            return ControlResponse(ok: false, error: "--pane must be left, right, or scratch")
+        }
         return actions.readSessionText(request.target, window: request.args?.window,
-                                       options: ControlSessionTextOptions(pane: request.args?.pane,
+                                       options: ControlSessionTextOptions(pane: pane, paneID: request.args?.paneID,
                                                                           all: all,
                                                                           lines: lines))
     }
@@ -734,6 +746,11 @@ struct LinuxControlDispatcher {
 
     private func dispatchWindowCommand(_ request: ControlRequest) -> ControlResponse {
         switch request.cmd {
+        case .windowGo:
+            guard let direction = request.args?.to.flatMap(WorkspaceNavigation.init(wire:)) else {
+                return ControlResponse(ok: false, error: "window.go requires --to next|prev")
+            }
+            return actions.windowGo(direction: direction)
         case .windowRename:
             guard let name = request.args?.name?.linuxTrimmedOrNil else {
                 return ControlResponse(ok: false, error: "window.rename requires a name")
