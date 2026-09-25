@@ -61,12 +61,40 @@ final class ControlServer {
     private let cacheLock = NSLock()
     nonisolated(unsafe) private var cachedWindowNodes: [ControlWindowNode] = []
 
+    /// Live HUD auto-hide timers, one per session. `ControlServer+Hud` owns the logic; the state sits here
+    /// because an extension cannot hold it. Main-actor only.
+    var hudAutoHide: [UUID: HudAutoHide] = [:]
+    /// hudGeometryPending holds the sessions whose HUD body rewrite is queued for this main-actor turn.
+    var hudGeometryPending: Set<UUID> = []
+    /// The clock HUD expiry deadlines are stamped from.
+    var hudClock: () -> Date = Date.init
+
+    /// Presentation streams to attached viewers. `ControlServer+Presentation` owns the logic; the state sits
+    /// here because an extension cannot hold it. Main-actor only.
+    let presentationHub = PresentationHub(staleTimeout: 30)
+    var presentationStreams: [PresentationStream] = []
+    /// Remote overlay jobs this Mac handed to presenters.
+    let overlayJobs = OverlayJobs()
+    var overlayJobStreams: [String: OverlayJobStream] = [:]
+    /// Jobs cancelled between their claim and the adoption of the helper's connection.
+    var pendingJobCancels: Set<String> = []
+    var presentationHeartbeat: Task<Void, Never>?
+    /// How long an adopted stream may stay silent before its first hello.
+    var presentationHelloDeadline: TimeInterval = 10
+
+    /// This Mac as a VIEWER: one client per attached session. `ControlServer+RemotePresentation` owns the
+    /// logic. The transport is injectable so a hosted test needs no ssh.
+    var remoteClients: [UUID: RemotePresentationClient] = [:]
+    var remoteTransport: RemotePresentationTransport = RemotePresentationProcess()
+    var remoteTick: Task<Void, Never>?
+
     nonisolated private func cachedWindows() -> [ControlWindowNode] {
         cacheLock.lock(); defer { cacheLock.unlock() }
         return cachedWindowNodes
     }
 
     @MainActor func refreshWindowCache() {
+        attachPresentationHub()
         let nodes = buildWindowList()
         cacheLock.lock(); cachedWindowNodes = nodes; cacheLock.unlock()
     }
@@ -279,6 +307,8 @@ final class ControlServer {
         // outside the guard: the lock is taken in `init`, so an instance that never bound (path too long,
         // or a bind that failed) still holds one and would otherwise keep it for the whole process.
         defer { releaseOwnership() }
+        shutdownPresentationStreams()
+        stopRemotePresentations()
         guard listenFD >= 0 else { return }
         close(listenFD)
         listenFD = -1
@@ -296,7 +326,7 @@ final class ControlServer {
     /// same moment, and the kernel releases it when a force-quit kills the holder — which is the case the
     /// `unlink` in `start()` exists for.
     private func acquireOwnership() -> Bool {
-        let lockPath = socketPath + ".lock"
+        let lockPath = ControlResolve.ownershipLockPath(forSocket: socketPath)
         let fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
             log("control lock open(\(lockPath)) failed: \(String(cString: strerror(errno)))")
@@ -396,6 +426,32 @@ final class ControlServer {
         // stalls the main thread (surface teardown / re-render), wedging the accept loop against polls.
         if let cached = server.fastPathResponse(for: request) {
             writeResponse(conn, cached)
+            return
+        }
+
+        // a presentation stream outlives its request: the reply below is the last ordinary one, and an ok
+        // hands the descriptor to a stream owner so this thread goes straight back to accepting.
+        if request.cmd == .zmxPresent {
+            let response = runBlocking { await server.dispatch(request) }
+            guard server.responseWriter(conn, response), response.ok,
+                  let session = response.result?.id.flatMap(UUID.init(uuidString:)) else { return }
+            handedOff = true
+            runBlocking { await server.adoptPresentationStream(descriptor: conn, session: session) }
+            return
+        }
+
+        // a claimed job's helper keeps its connection the same way, and a claim whose reply never reached
+        // the helper leaves nobody to run the job
+        if request.cmd == .sessionOverlayJobRun {
+            let response = runBlocking { await server.dispatch(request) }
+            let written = server.responseWriter(conn, response)
+            guard response.ok, let job = response.result?.id else { return }
+            guard written else {
+                runBlocking { await server.overlayJobs.helperGone(job) }
+                return
+            }
+            handedOff = true
+            runBlocking { await server.adoptOverlayJobStream(descriptor: conn, job: job) }
             return
         }
 
@@ -500,13 +556,14 @@ final class ControlServer {
                 .workspaceNew, .workspaceSelect, .workspaceGo, .workspaceRename, .workspaceDelete, .workspaceMove,
                 .workspaceFocus,
                 .workspaceFilter, .workspaceCollapse, .workspaceExpand,
-                .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionScratch, .sessionFocus, .sessionResize,
-                .surfaceZoom,
+                .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionLead, .sessionScratch, .sessionFocus,
+                .sessionResize, .surfaceZoom,
                 .surfaceCursor,
                 .sessionStatus, .sessionFlag, .sessionContext, .sessionSeen, .sessionRestore, .notify,
                 .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .hooksReload, .hooksList, .configReload,
                 .themeSet, .themeList,
-                .sidebar, .sidebarMode, .sidebarExpand, .sidebarCollapse, .sidebarWidth, .sessionType, .sessionCopy,
+                .sidebar, .sidebarMode, .sidebarFlaggedLayout, .sidebarExpand, .sidebarCollapse, .sidebarWidth,
+                .sessionType, .sessionCopy,
                 .sessionPaste, .sessionSelectAll,
                 .sessionSearch, .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize,
                 .sessionOverlayResult, .sessionOverlayCopy, .sessionOverlayText,
@@ -515,7 +572,7 @@ final class ControlServer {
                 .windowClose, .windowRename, .windowDelete, .windowResize, .windowMove, .windowZoom,
                 .windowFullscreen, .windowMinimize,
                 .restoreClear, .restoreCapture, .restoreMode, .recentClear, .zmxList, .zmxPrune,
-                .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .dashboard, .version:
+                .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent, .sessionOverlayJobRun, .dashboard, .version:
             return ControlResponse(ok: false, error: "control dispatcher did not handle \(request.cmd.rawValue)")
         case .debugAppearance:
             return setDebugAppearance(args: request.args)
@@ -785,7 +842,10 @@ final class ControlServer {
                 case .untouched: return "untouched"
                 }
             },
-            app: identity
+            app: identity,
+            liveReset: liveResetReadback(),
+            // the mirror the sidebars render from, so the read-back names what is on screen.
+            flaggedLayout: GhosttyApp.shared.flaggedViewLayout
         )
     }
 

@@ -168,4 +168,11 @@ extension AppController {
     func paneHost(_ sessionID: UUID, pane: OverlayPane) -> OpaquePointer? {
         pane == .left ? primaryPaneHosts[sessionID] : splitPaneHosts[sessionID]
     }
+
+    func updateAllPaneDimming(windowOpacity: Double? = nil) {
+        for workspace in store.workspaces {
+            for session in workspace.sessions { updatePaneDim(session, windowOpacity: windowOpacity) }
+        }
+        updateCoverDimming(windowOpacity: windowOpacity)
+    }
 }

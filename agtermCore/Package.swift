@@ -38,7 +38,9 @@ package.targets += [
     .target(name: "SessionHostRuntime", dependencies: ["SessionHostTrampoline", "AgtermResponsibility", "agtermCore"]),
     .executableTarget(name: "agterm-session-host", dependencies: ["SessionHostRuntime"]),
     .executableTarget(name: "session-host-test-client"),
+    .executableTarget(name: "session-host-pty-probe"),
     .testTarget(name: "SessionHostRuntimeTests",
-                dependencies: ["SessionHostRuntime", "agterm-session-host", "session-host-test-client"]),
+                dependencies: ["SessionHostRuntime", "agterm-session-host", "session-host-test-client",
+                               "session-host-pty-probe"]),
 ]
 #endif

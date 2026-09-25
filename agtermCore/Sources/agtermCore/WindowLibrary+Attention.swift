@@ -31,4 +31,22 @@ extension WindowLibrary {
         let detail = "\(workspace) · \(entry.session.subtitleDetail)"
         return openIDs().count > 1 ? "\(entry.window.name) · \(detail)" : detail
     }
+
+    /// Window files on disk that the index does not list. A stale index short-circuits recovery, so these
+    /// are real panes whose daemons would otherwise read as unclaimed. Nil when the directory itself could
+    /// not be read, which is not the same answer as "no stray files".
+    func strayWindowFileIDs(indexed: Set<UUID>) -> [UUID]? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: windowsDirectory.path, isDirectory: &isDir),
+              isDir.boolValue,
+              let contents = try? FileManager.default.contentsOfDirectory(at: windowsDirectory,
+                                                                          includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        return contents
+            .filter { $0.pathExtension == "json" }
+            .compactMap { UUID(uuidString: $0.deletingPathExtension().lastPathComponent) }
+            .filter { !indexed.contains($0) }
+            .sorted { $0.uuidString < $1.uuidString }
+    }
 }

@@ -98,6 +98,54 @@ final class ZmxClientTests: XCTestCase {
         XCTAssertEqual(byCommand["kill"]?.map(\.mergesStderr), [true, true, true])
     }
 
+    func testScreenReadsTheDaemonsTerminalAndAFailureIsNeverABlankScreen() throws {
+        var invocations: [[String]] = []
+        let client = ZmxClient(executablePath: "/tmp/zmx", socketDirectory: "/tmp/zmx-dir") {
+            invocations.append($0.arguments)
+            return "7 101 33 2 9 0\n> draft\n"
+        }
+
+        let active = try XCTUnwrap(client.screen(name: "agterm-a", all: false))
+        _ = client.screen(name: "agterm-a", all: true)
+
+        XCTAssertEqual(invocations, [["screen", "agterm-a"], ["screen", "agterm-a", "--all"]])
+        XCTAssertEqual(active.columns, 101)
+        XCTAssertEqual(active.cursorColumn, 2)
+        XCTAssertEqual(active.text, "> draft\n")
+
+        let old = ZmxClient(executablePath: "/tmp/zmx", socketDirectory: "/tmp/zmx-dir") { _ in
+            throw ZmxClient.CommandError.failed(1, "error: screen failed for \"agterm-a\": Timeout")
+        }
+        XCTAssertNil(old.screen(name: "agterm-a", all: false), "a zmx without the query must not read as blank")
+        let garbled = ZmxClient(executablePath: "/tmp/zmx", socketDirectory: "/tmp/zmx-dir") { _ in "usage: zmx" }
+        XCTAssertNil(garbled.screen(name: "agterm-a", all: false))
+    }
+
+    func testTypeSendsTheExactBytesOnStdinAndReportsARejection() {
+        var invocations: [ZmxClient.Invocation] = []
+        let client = ZmxClient(executablePath: "/tmp/zmx", socketDirectory: "/tmp/zmx-dir") {
+            invocations.append($0)
+            return ""
+        }
+
+        XCTAssertTrue(client.type(name: "agterm-a", bytes: [0x0D]))
+
+        XCTAssertEqual(invocations.map(\.arguments), [["type", "agterm-a"]])
+        XCTAssertEqual(invocations.first?.input, Data([0x0D]), "a lone Return must reach zmx, not be trimmed away")
+
+        let full = ZmxClient(executablePath: "/tmp/zmx", socketDirectory: "/tmp/zmx-dir") { _ in
+            throw ZmxClient.CommandError.failed(1, "error: type rejected")
+        }
+        XCTAssertFalse(full.type(name: "agterm-a", bytes: [0x61]))
+    }
+
+    func testRunFeedsInputToTheChildsStdinAndClosesIt() throws {
+        let invocation = ZmxClient.Invocation(executablePath: "/bin/cat", arguments: [], environment: [:],
+                                              timeout: 5, mergesStderr: false, input: Data("typed\r".utf8))
+
+        XCTAssertEqual(try ZmxClient.run(invocation), "typed\r")
+    }
+
     func testRunAppendsStderrOnlyWhenTheInvocationAsksForIt() throws {
         func invocation(mergesStderr: Bool) -> ZmxClient.Invocation {
             ZmxClient.Invocation(executablePath: "/bin/sh", arguments: ["-c", "echo notice >&2; echo row"],
@@ -106,6 +154,43 @@ final class ZmxClientTests: XCTestCase {
 
         XCTAssertEqual(try ZmxClient.run(invocation(mergesStderr: false)), "row\n")
         XCTAssertEqual(try ZmxClient.run(invocation(mergesStderr: true)), "row\nnotice\n")
+    }
+
+    func testRunDrainsOutputLargerThanThePipeBufferBeforeTheProcessExits() throws {
+        let invocation = ZmxClient.Invocation(
+            executablePath: "/bin/sh",
+            arguments: ["-c", "head -c 200000 /dev/zero | tr '\\0' x; head -c 200000 /dev/zero | tr '\\0' y >&2"],
+            environment: [:], timeout: 5, mergesStderr: true)
+        let started = Date()
+
+        let output = try ZmxClient.run(invocation)
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertEqual(output.count, 400_000)
+        XCTAssertEqual(output.prefix(1), "x")
+        XCTAssertEqual(output.suffix(1), "y")
+    }
+
+    func testRunGivesUpOnAWriteEndHeldPastTheChildsExit() {
+        let invocation = ZmxClient.Invocation(
+            executablePath: "/bin/sh", arguments: ["-c", "sleep 30 & echo row"],
+            environment: [:], timeout: 5, mergesStderr: false)
+        let started = Date()
+
+        XCTAssertThrowsError(try ZmxClient.run(invocation)) { error in
+            guard case ZmxClient.CommandError.timedOut = error else { return XCTFail("\(error)") }
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), ZmxClient.terminationGrace + 1)
+    }
+
+    func testRunThrowsForAnExecutableThatCannotLaunch() {
+        let invocation = ZmxClient.Invocation(executablePath: "/nonexistent/zmx-\(UUID().uuidString)", arguments: ["list"],
+                                              environment: [:], timeout: 5, mergesStderr: false)
+
+        XCTAssertThrowsError(try ZmxClient.run(invocation)) { error in
+            if case ZmxClient.CommandError.timedOut = error { XCTFail("a failed launch must not wait out a deadline") }
+        }
     }
 
     func testLiveReapListsThenKillsOnlyUnclaimedZeroClientNames() {

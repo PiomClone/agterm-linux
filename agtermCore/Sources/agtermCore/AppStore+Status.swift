@@ -37,13 +37,13 @@ extension AppStore {
         return .applied
     }
 
-    /// Sets a session's agent status indicator (the sidebar status glyph) — the single mutation point for the
-    /// control channel's `session.status`. Stamps `statusChangedAt` on any non-idle status (the attention
-    /// list's newest-first sort key) and clears it on idle. Clears the session's `autoFollowConsumed` on a
-    /// transition INTO blocked, re-arming idle auto-follow for the fresh episode. No-op for an unknown id.
-    /// Not persisted (the indicator is ephemeral), so it never triggers a `save()`.
+    /// Sets a session's agent status indicator, the single mutation point for `session.status`. Stamps
+    /// `statusChangedAt` on every set, idle and repeated values included. A transition into blocked re-arms
+    /// idle auto-follow. No-op for an unknown id; never persisted.
     public func setAgentIndicator(_ indicator: AgentIndicator, forSession id: UUID) {
         guard let session = session(withID: id) else { return }
+        // any write through here is a local one until `applyRemoteStatus` says otherwise right after it
+        session.remotePresentation?.statusBridged = false
         let previous = session.agentIndicator
         let wasBlocked = session.agentIndicator.status == .blocked
         var indicator = indicator
@@ -55,9 +55,11 @@ extension AppStore {
         // surface down with it), so `!hasSplit` still covers every genuinely splitless session.
         indicator.statusPane = indicator.normalizedPane(hasSplit: session.hasSplit)
         session.agentIndicator = indicator
-        session.statusChangedAt = indicator.status == .idle ? nil : Date()
+        session.statusChangedAt = Date()
         // a re-asserted blocked-over-blocked is not a new episode and stays muted (Session.autoFollowConsumed).
         if !wasBlocked, indicator.status == .blocked { session.autoFollowConsumed = false }
+        // ahead of the unchanged guard: a repeated write restamps `statusChangedAt`, which a viewer orders by
+        presentationHub?.publish(.status(presentationStatus(of: session)), session: id)
         guard previous != indicator else { return }
         emitControlEvent(
             .status,

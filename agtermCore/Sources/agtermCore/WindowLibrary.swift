@@ -125,7 +125,7 @@ public final class WindowLibrary {
     private static let legacyFileName = "workspaces.json"
 
     private var indexURL: URL { directory.appendingPathComponent(Self.indexFileName) }
-    private var windowsDirectory: URL { directory.appendingPathComponent(Self.windowsSubdirectory, isDirectory: true) }
+    var windowsDirectory: URL { directory.appendingPathComponent(Self.windowsSubdirectory, isDirectory: true) }
 
     /// Preserves the pre-zmx initializer symbol for source and incremental-build compatibility.
     public convenience init(directory: URL = PersistenceStore.defaultDirectory,
@@ -473,7 +473,7 @@ public final class WindowLibrary {
         store.dropLaunchPanes(store.workspaces.flatMap(\.sessions))
         for workspace in store.workspaces {
             for session in workspace.sessions {
-                session.cancelPendingAsk()
+                store.releaseLeavingSession(session)
                 store.emitSessionClosed(session, workspace: workspace.id)
             }
         }
@@ -509,6 +509,8 @@ public final class WindowLibrary {
     /// persists. No-ops on the last window. Clears `frontmostWindowID` if it pointed at the removed one.
     public func removeWindow(_ id: UUID) {
         guard canRemoveWindow, let index = windows.firstIndex(where: { $0.id == id }) else { return }
+        // after the guard: a rejected delete of the last window must keep its live claim.
+        pendingClaim.removeAll { $0 == id }
         // before the pane inventory below, which reads `workspaces` and so cannot see a soft-closed
         // session; without this its daemon outlives the window with nothing left to finalize it
         stores[id]?.finalizeAllPendingCloses()
@@ -517,7 +519,7 @@ public final class WindowLibrary {
             store.dropLaunchPanes(store.workspaces.flatMap(\.sessions))
             for workspace in store.workspaces {
                 for session in workspace.sessions {
-                    session.cancelPendingAsk()
+                    store.releaseLeavingSession(session)
                     store.emitSessionClosed(session, workspace: workspace.id)
                 }
             }
@@ -536,7 +538,7 @@ public final class WindowLibrary {
         let sessionIDsToSweep: [UUID] = stores[id].map { $0.workspaces.flatMap(\.sessions).map(\.id) }
             ?? persistenceStore(for: id).load().workspaces.flatMap(\.sessions).map(\.id)
         for sessionID in sessionIDsToSweep {
-            WatermarkStorage.removeRenderedText(sessionID: sessionID, stateDir: directory)
+            WatermarkStorage.removeAllRenderedText(sessionID: sessionID, stateDir: directory)
         }
         stores[id] = nil
         openSetVersion += 1
@@ -967,22 +969,8 @@ public final class WindowLibrary {
         return ZmxClaimWalk(claims: claims, complete: complete)
     }
 
-    /// Window files on disk that the index does not list. A stale index short-circuits recovery, so these
-    /// are real panes whose daemons would otherwise read as unclaimed. Nil when the directory itself could
-    /// not be read, which is not the same answer as "no stray files".
-    private func strayWindowFileIDs(indexed: Set<UUID>) -> [UUID]? {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: windowsDirectory.path, isDirectory: &isDir),
-              isDir.boolValue,
-              let contents = try? FileManager.default.contentsOfDirectory(at: windowsDirectory,
-                                                                          includingPropertiesForKeys: nil) else {
-            return nil
-        }
-        return contents
-            .filter { $0.pathExtension == "json" }
-            .compactMap { UUID(uuidString: $0.deletingPathExtension().lastPathComponent) }
-            .filter { !indexed.contains($0) }
-            .sorted { $0.uuidString < $1.uuidString }
+    func refreshRecentClosedItems() {
+        recentClosedItems = recentClosedStore.load()
     }
 
     private func scheduleTreeChanged(for windowID: UUID) {
@@ -993,13 +981,5 @@ public final class WindowLibrary {
             let event = self.controlEventRing.append(ControlEventDraft(kind: .treeChanged, window: windowID.uuidString))
             self.onControlEvent?(event)
         }
-    }
-
-    func refreshRecentClosedItems() {
-        recentClosedItems = recentClosedStore.load()
-    }
-
-    private func log(_ message: @autoclosure () -> String) {
-        NSLog("agterm: %@", message())
     }
 }

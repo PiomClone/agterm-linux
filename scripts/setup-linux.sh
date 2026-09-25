@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PATCH="$ROOT/linux/patches/ghostty-embedded-opengl.patch"
 INPUT_HANDOFF_PATCH="$ROOT/linux/patches/ghostty-embedded-input-handoff.patch"
+CONDITIONAL_ENV_PATCH="$ROOT/linux/patches/ghostty-embedded-conditional-env.patch"
 RESOURCE_PATCH="$ROOT/linux/patches/ghostty-lib-resources.patch"
 VENDOR="$ROOT/agterm-linux/vendor/ghostty"
 VERIFY_CACHE="$ROOT/scripts/verify-linux-vendor-cache.sh"
@@ -69,6 +70,7 @@ if $need_ghostty; then
   echo "applying embedded-OpenGL patch..."
   git -C "$GHOSTTY_BUILD" apply "$PATCH"
   git -C "$GHOSTTY_BUILD" apply "$INPUT_HANDOFF_PATCH"
+  git -C "$GHOSTTY_BUILD" apply "$CONDITIONAL_ENV_PATCH"
   git -C "$GHOSTTY_BUILD" apply "$RESOURCE_PATCH"
   echo "building libghostty and generated terminfo source..."
   # Zig defaults to Debug, whose terminal integrity checks make sustained PTY output unusably slow.
@@ -98,6 +100,8 @@ if $need_ghostty; then
   cp "$TERMINFO_SOURCE" "$GHOSTTY_BUILD/src/terminfo/ghostty.terminfo"
   tic -x -o "$GHOSTTY_STAGE/share/terminfo" "$GHOSTTY_BUILD/src/terminfo/ghostty.terminfo"
 
+  sha256sum "$PATCH" "$INPUT_HANDOFF_PATCH" "$CONDITIONAL_ENV_PATCH" "$RESOURCE_PATCH" \
+    | sha256sum | awk '{print $1}' > "$GHOSTTY_STAGE/.agterm-ghostty-patches.sha256"
   "$VERIFY_CACHE" "$GHOSTTY_STAGE"
   rm -rf "$VENDOR"
   mkdir -p "$(dirname "$VENDOR")"

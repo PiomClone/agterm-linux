@@ -92,4 +92,8 @@ extension WindowLibrary {
     private func openStores() -> [AppStore] {
         openIDs().compactMap { store(for: $0) }
     }
+
+    func log(_ message: @autoclosure () -> String) {
+        NSLog("agterm: %@", message())
+    }
 }

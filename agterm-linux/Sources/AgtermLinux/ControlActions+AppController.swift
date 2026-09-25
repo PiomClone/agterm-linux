@@ -993,16 +993,4 @@ extension AppController: ControlActions {
         gLibrary.clearRecentClosedItems()
         return ControlResponse(ok: true, result: ControlResult(affected: affected))
     }
-
-    func clearRestoreCommands() -> ControlResponse {
-        for ctl in gWindows.values {
-            for session in ctl.store.workspaces.flatMap(\.sessions) {
-                session.foregroundCommand = nil
-                session.splitForegroundCommand = nil
-                session.clearPendingForegroundCommands()
-            }
-        }
-        gLibrary.saveAllOpen()
-        return ok()
-    }
 }

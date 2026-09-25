@@ -10,6 +10,11 @@ C-boundary concurrency before changing the bridge.
 
 - For nonstandard or risky UI requests, first explain the AppKit/SwiftUI cost and offer the standard
   alternative. Proceed if the user still prefers the custom behavior.
+- Judge any change that can leave a long-standing visual artifact by what the user is left looking at,
+  never by whether the mechanism is sound. A panel, badge, marker or overlay that outlives the thing it
+  describes is a defect however correct the code that posted it. Give it a way to clear itself, and put
+  that in the control API rather than in a private timer inside one caller, or every other caller ships
+  the same artifact.
 - For every new capability, propose useful control API/CLI coverage: protocol command and arguments,
   dispatch, `agtermctl`, read-back, and tests. Control-native features count; skip only chrome with nothing
   meaningful to drive.
@@ -62,7 +67,8 @@ C-boundary concurrency before changing the bridge.
   SwiftLint versions through `mise`; repository scripts remain the source of truth.
 - Swift 6 `agtermCore` uses complete concurrency checking and has no Xcode/libghostty dependency.
 - `scripts/setup.sh` builds pinned libghostty and zmx with Homebrew `zig@0.16` and Xcode's Metal Toolchain.
-  It is idempotent after artifacts exist.
+  It is idempotent after artifacts exist. zmx is the plain upstream pin plus `scripts/zmx-patches/`,
+  whose README says what each patch is for and how to regenerate one.
 - Commands:
   - `scripts/run.sh`: setup, generate, Debug build, launch.
   - `scripts/build.sh`: setup, generate, Release build.
@@ -77,6 +83,19 @@ C-boundary concurrency before changing the bridge.
   via `-only-testing:<Target>/<Class>/<test>`. Never re-run a whole XCUITest suite to verify a narrow
   change; `agtermUITests/ControlAPIUITests` alone is 82 methods and about 7.5 minutes, and tells you
   nothing the targeted run did not.
+- **An XCUITest run started from a shell inside a live agterm window can die at runner init** with
+  `Failed to initialize for UI testing ... Timed out while enabling automation mode` after 60s, before any
+  test case runs. The block is at runner initialization, so app code under test cannot reach it, and a
+  quiet retry fails identically - it is not a defect in the diff under test and not contention.
+  [Unverified] cause: TCC attributes the authorization to the responsible process,
+  `/Applications/agterm.app/Contents/MacOS/agterm-session-host` hosting that shell; when a deploy replaced
+  the app after that process launched, the running image stops matching the file and tccd logs
+  `IDENTITY_ATTRIBUTION: Failed to copy signing info for <pid> ... #-67034` (errSecCSStaticCodeChanged) in
+  the same window. The correlation is measured; the causal link to the timeout is not. Diagnose with
+  `log show --predicate 'subsystem == "com.apple.TCC"' --last 6m --style compact` plus
+  `ps -p <pid> -o lstart` against the binary's mtime. The fix is restarting agterm, which is Eugene's call
+  and never the agent's. Hosted `agtermTests` are unaffected; only the XCUITest runner needs the
+  automation grant.
 - For maintainer work, ask before splitting a touched long file and do not raise limits reflexively.
   Contributors need not refactor preexisting length; mention it without blocking or suggesting a limit bump.
 
@@ -88,11 +107,13 @@ C-boundary concurrency before changing the bridge.
   `.ghostty-build-stamp`, and `.zmx-build-stamp`. Symlink all six from the main checkout instead of rebuilding;
   use absolute targets for resources. Each stamp makes its staged artifacts count as current. They remain
   untracked and disappear with worktree removal.
-- Symlink an artifact set only while the main checkout's matching stamp equals that set's revision in the
-  worktree's `setup.sh`. When `GHOSTTY_REV` or `ZMX_REV` differs, remove that set's artifact and stamp
-  links before setup runs and let it build locally. `setup.sh` writes stamps through symlinks while
-  replacing linked artifacts with local files and directories, so a linked build leaves the main checkout
-  claiming a revision its artifacts were never built from.
+- Symlink an artifact set only while the main checkout's matching stamp equals what the worktree's
+  `setup.sh` would write for that set: the revision for ghostty, and `ZMX_REV`, `ZMX_TARGET` and the
+  digest of `scripts/zmx-patches/*.patch` for zmx, so a target or a patch change invalidates a set whose
+  revision still matches. When either differs, remove that
+  set's artifact and stamp links before setup runs and let it build locally. `setup.sh` writes stamps
+  through symlinks while replacing linked artifacts with local files and directories, so a linked build
+  leaves the main checkout claiming a build its artifacts never came from.
 - After merge, verify the PR merge commit on fetched `origin/master`, then remove the worktree without
   changing the main checkout's branch. Squash/rebase makes removal report unmerged commits; after
   verification, discard the worktree safely. Native removal may leave a renamed branch, which must be

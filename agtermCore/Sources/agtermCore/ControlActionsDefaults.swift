@@ -18,6 +18,10 @@ public extension ControlActions {
         ControlResponse(ok: false, error: ControlActionsUnsupported.message("ask.cancel"))
     }
 
+    func setFlaggedViewLayout(_: ControlFlaggedLayoutMode) -> ControlResponse {
+        ControlResponse(ok: false, error: ControlActionsUnsupported.message("sidebar.flagged-layout"))
+    }
+
     func reloadHooks() -> ControlResponse {
         ControlResponse(ok: false, error: ControlActionsUnsupported.message("hooks.reload"))
     }
@@ -50,6 +54,14 @@ public extension ControlActions {
         ControlResponse(ok: false, error: ControlActionsUnsupported.message("zmx.reset"))
     }
 
+    func openPresentation(session _: String) -> ControlResponse {
+        ControlResponse(ok: false, error: ControlActionsUnsupported.message("zmx.present"))
+    }
+
+    func claimOverlayJob(_: String) -> ControlResponse {
+        ControlResponse(ok: false, error: ControlActionsUnsupported.message("session.overlay.job.run"))
+    }
+
     func remoteTree(host _: String?) async -> ControlResponse {
         ControlResponse(ok: false, error: ControlActionsUnsupported.message("zmx.tree"))
     }
@@ -71,6 +83,10 @@ public extension ControlActions {
 
     func swapSessionPanes(_: String?, window _: String?) async -> ControlResponse {
         ControlResponse(ok: false, error: "session.swap is not supported by this host")
+    }
+
+    func takeSessionLead(_: String?, window _: String?, pane _: StatusPane?) -> ControlResponse {
+        ControlResponse(ok: false, error: "session.lead is not supported by this host")
     }
 
     /// Not `ControlActionsUnsupported.message`, which says "on this platform": the divider exists wherever

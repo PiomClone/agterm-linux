@@ -994,11 +994,4 @@ extension AppController {
     static func floatingFrameOpacity(quickVisible: Bool, dimmed: Double) -> Double {
         quickVisible ? dimmed : 1
     }
-
-    func updateAllPaneDimming(windowOpacity: Double? = nil) {
-        for workspace in store.workspaces {
-            for session in workspace.sessions { updatePaneDim(session, windowOpacity: windowOpacity) }
-        }
-        updateCoverDimming(windowOpacity: windowOpacity)
-    }
 }
