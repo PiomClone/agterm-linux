@@ -18,7 +18,7 @@ You are inside agterm (`AGTERM_ENABLED=1`). Use:
 - **A keybinding does not fire** — `agtermctl keymap list` shows the chord each action resolved to AND the
   key equivalents the menu bar is actually dispatching. If the action's `chord` looks right but no `menu`
   entry carries it (or a different item does), the keymap is fine and the menu is the problem: SwiftUI
-  rebuilds the menu only on the next app activation, so switch to another app and back, then relaunch if it
+  rebuilds the menu lazily (on activation or a key press), so switch to another app and back, then relaunch if it
   persists. Exceptions: `undo_close` (⌘Z) and `toggle_fullscreen` (⌃⌘F) are delivered by a key monitor
   rather than a menu item, so they never appear under `menu` and their absence there means nothing.
 - **Ghostty settings** - `agtermctl config reload` re-reads the ghostty config and prints the diagnostic
@@ -164,6 +164,10 @@ Check these in order:
   and recreates them under the host; agterm quits and reopens itself, captured commands start again where
   possible, and the notification afterwards says how many sessions were covered. A session whose old process
   could not be confirmed gone gets no command restarted and the reset can be run again.
+- **After an update, an attached session still needs a key press, or a zmx change seems missing.** A live
+  session keeps the zmx it was created with through app updates. `agtermctl zmx list` marks such rows
+  `outdated`; Agterm ▸ Reset Live Sessions… (or `agtermctl zmx reset --force`) recreates them on the current
+  zmx, with the same cost as any reset: running work stops and agent conversations need resuming.
 - **Switching modes ends detached live processes.** Selecting Fresh shells or Re-run commands and restarting
   reaps the live daemons in this state directory. An unavailable launch that still requests Live sessions
   preserves its claimed daemons for a later eligible launch.
@@ -280,8 +284,14 @@ prompt itself as an agterm bug.
 Install the hooks from Help ▸ Install Agent Status Hooks…. For shell-integrated agents, start a fresh shell
 so the installer-added `source` line takes effect. For Pi, restart it or run `/reload` so it loads
 `~/.pi/agent/extensions/agterm-status.ts`; the extension installs only after Pi has created `~/.pi/agent`.
-For OpenCode, restart it so it loads `~/.config/opencode/plugins/agterm-status.js`;
-the plugin installs only after OpenCode has created `~/.config/opencode`.
+For OpenCode, restart it to load `~/.config/opencode/plugins/agterm-status.js` (v1) or
+`~/.config/opencode/plugins/agterm-v2/tui.js` (v2).
+The installer detects the major via `opencode --version` in your interactive login shell; failed detection offers a manual choice.
+V1 uses `~/.config/opencode`. V2 uses the shell's `OPENCODE_CONFIG_DIR`, then `$XDG_CONFIG_HOME/opencode`, then `~/.config/opencode`.
+The selected directory must already exist. An empty `OPENCODE_CONFIG_DIR` skips v2 with a warning. So does an unavailable shell configuration when `~/.config/opencode` exists; without that directory OpenCode is skipped as not installed.
+Re-run it after switching major versions: v2 removes the marked v1 plugin in its selected directory; v1 leaves the v2 directory alone.
+User-owned or unreadable v1 files are preserved and reported in the install result.
+The v2 CLI plugin follows the selected session and its descendants, excluding background tabs and headless runs.
 The installed wrapper resolves the bundled `agtermctl` itself; a bare development build instead needs
 `agtermctl` on `PATH`. Moving or replacing agterm.app invalidates the path the installer baked in — the
 wrapper then falls back to `agtermctl` on `PATH`, and with nothing there the glyph silently stops
@@ -303,6 +313,22 @@ lives in, it leaked. Fix a poisoned tmux server without restarting it:
 then restart the affected panes/processes (a respawn is enough; existing processes keep their
 inherited copy). Prevent it: start daemons and session managers with the variables scrubbed
 (`env -u AGTERM_SESSION_ID … <cmd>`, full list in SKILL.md), or from a shell outside agterm.
+
+By default, Codex 0.160.1 CLI sessions share a background app-server daemon, started by the first
+`codex` that needs it, and the same leak follows. The server launches hooks using its inherited
+environment, so every daemon-backed session reports to the session that started the server, or to none
+when the server started outside agterm or that session has closed. Diagnose: run
+`ps eww <pid> | tr ' ' '\n' | grep AGTERM_SESSION_ID` on the app-server process carrying
+`--managed-daemon`. Scrubbing prevents wrong-session updates but does not restore status reporting, and
+agterm has no automatic mapping from the hook payload's Codex session id to the pane displaying it.
+Fix: run `codex --no-daemon`, which keeps the session and its hooks in its own process; that running
+session is unavailable for control through the shared server from the Codex desktop or mobile app.
+To make that the default for plain `codex`, run `codex features disable daemon_auto_start` once, then
+`codex app-server daemon stop`; later plain launches start no shared daemon and report to their own
+session. Disabling auto-start alone still joins a daemon that is already running, and stopping it
+disconnects the CLI sessions attached to it. A daemon-backed conversation can stay locked after its TUI
+exits: if `codex --no-daemon resume <id>` shows "This conversation is open in another app", stop the
+shared daemon and press R to retry.
 
 ### "Claude Code's question/permission prompt is unresponsive after switching apps"
 

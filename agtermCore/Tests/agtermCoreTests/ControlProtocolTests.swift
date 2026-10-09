@@ -170,6 +170,24 @@ struct ControlProtocolTests {
         #expect(try JSONDecoder().decode(ControlResult.self, from: Data(json.utf8)).cursor == nil)
     }
 
+    @Test func pageSubmitAndResultRoundTripAndOmitWhenNil() throws {
+        let submit = ControlRequest(cmd: .sessionOverlaySubmit, target: "s1", args: ControlArgs(pane: "right", value: ""))
+        #expect(try roundTrip(submit) == submit)
+        let read = ControlRequest(cmd: .sessionOverlayResult, args: ControlArgs(page: "D1B6A0F2-6E3B-4C11-9F1A-3E2B1C0D9A88"))
+        #expect(try roundTrip(read) == read)
+        let outcome = ControlHtmlPageOutcome(pageID: "p1", outcome: .submitted, value: "a\nb")
+        let carried = ControlResponse(ok: true, result: ControlResult(id: "s1", pageID: "p1", pageOutcome: outcome))
+        #expect(try roundTrip(carried) == carried)
+
+        let args = String(decoding: try JSONEncoder().encode(ControlArgs(pane: "right")), as: UTF8.self)
+        #expect(!args.contains("\"value\"") && !args.contains("\"page\""), "nil page fields must be omitted; got \(args)")
+        let result = String(decoding: try JSONEncoder().encode(ControlResult(id: "s1")), as: UTF8.self)
+        #expect(!result.contains("pageID") && !result.contains("pageOutcome"), "nil page results must be omitted; got \(result)")
+        let dismissed = String(decoding: try JSONEncoder().encode(ControlHtmlPageOutcome(pageID: "p1", outcome: .dismissed)),
+                               as: UTF8.self)
+        #expect(!dismissed.contains("\"value\""), "a dismissed page carries no value; got \(dismissed)")
+    }
+
     @Test func controlTreePickPendingOmitsWhenNil() throws {
         let tree = ControlTree(workspaces: [])
         let json = String(decoding: try JSONEncoder().encode(tree), as: UTF8.self)
@@ -1121,6 +1139,17 @@ struct ControlProtocolTests {
         #expect(hud.fontSize == nil)
     }
 
+    // an app deployed but not restarted still serves page nodes without the chromeless key to a newer CLI.
+    @Test func controlHtmlOverlayNodeFromAnOlderServerDecodesWithItsStrip() throws {
+        let raw = #"{"file":"/tmp/r.html","state":"loaded","javascript":false}"#
+
+        let node = try JSONDecoder().decode(ControlHtmlOverlayNode.self, from: Data(raw.utf8))
+
+        #expect(node.chromeless == false)
+        #expect(node.persistent == false)
+        #expect(node.file == "/tmp/r.html")
+    }
+
     @Test func treeSessionNodeToleratesMissingHud() throws {
         // a pre-`session.hud.open` server omits the key entirely, so it must decode as nil.
         let raw = #"{"id":"s1","name":"shell","cwd":"/tmp","active":true,"split":false,"# +
@@ -1926,6 +1955,24 @@ struct ControlProtocolTests {
         let decoded = try roundTrip(response)
         #expect(decoded == response)
         #expect(decoded.result?.liveReset?.pending == true)
+    }
+
+    @Test func liveResetStatusOmitsOutdatedUnlessSet() throws {
+        let plain = try JSONEncoder().encode(ControlLiveResetStatus(sessions: 2, panes: 3, pending: true))
+        #expect(!String(decoding: plain, as: UTF8.self).contains("outdated"))
+        let status = ControlLiveResetStatus(sessions: 2, panes: 3, pending: true, outdated: 1)
+        #expect(try JSONDecoder().decode(ControlLiveResetStatus.self, from: JSONEncoder().encode(status)) == status)
+    }
+
+    @Test func zmxEntryCarriesOutdatedOnlyWhenTrue() throws {
+        let row = ZmxInventoryRow(daemon: "agterm-a", state: .orphan, observation: .running, clients: 0, leaderPID: 1,
+                                  claim: nil, createdAt: Date(timeIntervalSince1970: 999))
+        let old = ControlZmxEntry(row: row, outdatedBefore: Date(timeIntervalSince1970: 1000))
+        #expect(old.outdated == true)
+        let current = ControlZmxEntry(row: row, outdatedBefore: Date(timeIntervalSince1970: 999))
+        #expect(current.outdated == nil)
+        #expect(!String(decoding: try JSONEncoder().encode(current), as: UTF8.self).contains("outdated"))
+        #expect(ControlZmxEntry(row: row).outdated == nil)
     }
 
     @Test func liveResetReadbackRoundTrips() throws {

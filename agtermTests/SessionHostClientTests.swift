@@ -127,6 +127,29 @@ final class SessionHostClientTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), expected)
     }
 
+    func testCleanupStopsADaemonZmxCannotKill() throws {
+        try XCTSkipUnless(Responsibility.system.isAvailable, "Required responsibility symbols are absent")
+        let fixture = try Fixture()
+        let pair: (daemon: Int32, leader: Int32)
+        do {
+            try fixture.startClient(name: fixture.names[0], terminal: true)
+            _ = try fixture.waitForLeaders(count: 1)
+            pair = try XCTUnwrap(fixture.daemonsAndLeaders().first)
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: fixture.zmx.path)
+        } catch {
+            fixture.cleanup()
+            throw error
+        }
+
+        fixture.cleanup()
+
+        let deadline = Date().addingTimeInterval(3)
+        while (kill(pair.daemon, 0) == 0 || kill(pair.leader, 0) == 0) && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        XCTAssertEqual(kill(pair.daemon, 0), -1)
+        XCTAssertEqual(kill(pair.leader, 0), -1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
+    }
+
     final class Fixture {
         let directory = URL(fileURLWithPath: "/tmp/shc-\(UUID().uuidString)")
         let names = ["agterm-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "agterm-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
@@ -136,6 +159,7 @@ final class SessionHostClientTests: XCTestCase {
         let environment: [String: String]
         var clients: [Int32] = []
         var terminals: [Int32] = []
+        private var terminalPeers: [Int32] = []
         private var evidenceDirectory: URL {
             URL(fileURLWithPath: "/tmp/agterm-session-host-evidence").appendingPathComponent(directory.lastPathComponent)
         }
@@ -169,12 +193,12 @@ final class SessionHostClientTests: XCTestCase {
             XCTAssertEqual(posix_spawn_file_actions_init(&actions), 0)
             defer { posix_spawn_file_actions_destroy(&actions) }
             var terminalFD: Int32 = -1
-            defer { if terminalFD >= 0 { close(terminalFD) } }
             if terminal {
                 var pty: Int32 = -1
                 var size = winsize(ws_row: 43, ws_col: 132, ws_xpixel: 0, ws_ypixel: 0)
                 guard openpty(&pty, &terminalFD, nil, nil, &size) == 0 else { throw POSIXError(.EIO) }
                 terminals.append(pty)
+                terminalPeers.append(terminalFD)
                 XCTAssertEqual(fcntl(pty, F_SETFD, FD_CLOEXEC), 0)
                 XCTAssertEqual(fcntl(terminalFD, F_SETFD, FD_CLOEXEC), 0)
             }
@@ -238,14 +262,17 @@ final class SessionHostClientTests: XCTestCase {
 
         func waitForLeaders(count: Int) throws -> [Int32] {
             let deadline = Date().addingTimeInterval(10)
+            var lastList = ""
             while Date() < deadline {
-                let records = try ZmxListParser.parse(runZmx(["list"]))
+                lastList = try runZmx(["list"])
+                let records = try ZmxListParser.parse(lastList)
                 if records.count == count {
                     let roots = records.compactMap { $0.leaderPID }.compactMap { Responsibility.system.responsibleProcess(of: $0) }
                     if roots.count == count { return roots }
                 }
                 Thread.sleep(forTimeInterval: 0.02)
             }
+            try? lastList.write(to: evidenceDirectory.appendingPathComponent("leaders-timeout.list"), atomically: true, encoding: .utf8)
             throw POSIXError(.ETIMEDOUT)
         }
 
@@ -262,9 +289,15 @@ final class SessionHostClientTests: XCTestCase {
         }
 
         func cleanup() {
+            // the fixture holds each pty's client side until here: the last close discards what is queued, and a
+            // client that failed has already exited.
+            for (index, fd) in terminals.enumerated() {
+                let output = drainTerminal(fd)
+                if !output.isEmpty { try? output.write(to: evidenceDirectory.appendingPathComponent("terminal-\(index).out")) }
+            }
             for pid in clients { kill(pid, SIGKILL); var status: Int32 = 0; _ = waitpid(pid, &status, 0) }
             for name in names { _ = try? runZmx(["kill", name, "--force"]) }
-            for fd in terminals { close(fd) }
+            for fd in terminals + terminalPeers { close(fd) }
             if let value = try? String(contentsOfFile: paths.pidfile, encoding: .utf8),
                let pid = Int32(value.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
                let actualPath = try? executablePath(pid), let physicalPath = realpath(executable.path, nil) {
@@ -280,7 +313,54 @@ final class SessionHostClientTests: XCTestCase {
                 XCTAssertNoThrow(try FileManager.default.copyItem(at: URL(fileURLWithPath: paths.log),
                                                                  to: evidenceDirectory.appendingPathComponent("host.log")))
             }
+            if let zmxDirectory = environment["ZMX_DIR"] {
+                try? FileManager.default.copyItem(at: URL(fileURLWithPath: zmxDirectory).appendingPathComponent("logs"),
+                                                  to: evidenceDirectory.appendingPathComponent("zmx-logs"))
+            }
+            let survivors = killOwnedProcesses()
+            XCTAssertEqual(survivors, [], "fixture processes outlived cleanup; \(directory.path) is kept")
+            guard survivors.isEmpty else { return }
             try? FileManager.default.removeItem(at: directory)
+        }
+
+        // a terminal client's stderr goes to its pty, so its exit reason exists nowhere else.
+        private func drainTerminal(_ fd: Int32) -> Data {
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+            var output = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while output.count < 65536 {
+                let count = read(fd, &buffer, buffer.count)
+                guard count > 0 else { break }
+                output.append(contentsOf: buffer.prefix(count))
+            }
+            return output
+        }
+
+        /// Leader pid of every daemon `zmx list` reports, paired with the daemon that is its parent.
+        func daemonsAndLeaders() throws -> [(daemon: Int32, leader: Int32)] {
+            try ZmxListParser.parse(runZmx(["list"])).compactMap { $0.leaderPID }.map { leader in
+                var info = proc_bsdinfo()
+                let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+                guard proc_pidinfo(leader, PROC_PIDTBSDINFO, 0, &info, size) == size else { throw POSIXError(.ESRCH) }
+                return (Int32(info.pbi_ppid), leader)
+            }
+        }
+
+        // `zmx kill` needs a daemon that answers, so a daemon it could not reach is found by its executable
+        // instead: only this fixture's own copies live under `directory`.
+        private func killOwnedProcesses() -> [Int32] {
+            guard let physical = realpath(directory.path, nil) else { return [] }
+            defer { free(physical) }
+            let root = String(cString: physical) + "/"
+            func owned() -> [Int32] {
+                var pids = [Int32](repeating: 0, count: Int(proc_listallpids(nil, 0)) + 64)
+                let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<Int32>.size))
+                return pids.prefix(Int(max(count, 0))).filter { pid in pid > 0 && (try? executablePath(pid))?.hasPrefix(root) == true }
+            }
+            for pid in owned() { kill(pid, SIGKILL) }
+            let deadline = Date().addingTimeInterval(3)
+            while !owned().isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            return owned().sorted()
         }
 
         private func executablePath(_ pid: Int32) throws -> String {

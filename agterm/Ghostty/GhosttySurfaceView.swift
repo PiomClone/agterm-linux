@@ -97,7 +97,9 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     /// every teardown path like `overlayCodeFile`, which both removes the temp file and is how the helper
     /// learns to stop. `session.hud.open` writes it AFTER the store call, so a replacement's teardown
     /// cannot delete the body the incoming HUD just wrote at the same per-session path.
-    var hudBodyFile: String?
+    var hudBodyFile: String? {
+        didSet { HudLinkClick.track(self, hudBodyFile != nil) }
+    }
 
     /// For an OVERLAY surface: its own solid `#rrggbb` background (`session.overlay.open --background-color`),
     /// nil for the theme background. Applied in `createSurface`, which the session-watermark path skips
@@ -138,6 +140,8 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     /// idle timer. Fires unconditionally, unlike `onUserInputClearsStatus`: ordinary typing in an idle
     /// session must count as activity or the user is yanked to a blocked session mid-type.
     var onUserInput: (() -> Void)?
+    /// Called after a size push and after a cell-size change; a HUD panel is measured from this surface.
+    var onGridChange: (() -> Void)?
 
     /// Called on the main actor with the current font size (points) when it changes (cmd +/-), so the app
     /// can persist it. Pane surfaces share a live-role-aware callback; scratch and overlays leave it unset.
@@ -183,9 +187,10 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
     /// unfocused (hollow) cursor, but AppKit first responder is per-window and does NOT resign when a window
     /// merely loses key, so key changes re-push `liveFocus`. Removed on teardown; `nonisolated(unsafe)`
     /// because the nonisolated `deinit` safety net reads them.
-    nonisolated(unsafe) private var focusObservers: [NSObjectProtocol] = []
+    nonisolated(unsafe) var focusObservers: [NSObjectProtocol] = []
     private var pendingSurfaceCreation = false
     var rendererVisibilityTask: Task<Void, Never>?
+    var windowVisibilityObservation: NSKeyValueObservation?
     var rendererVisible = true
     /// Sweeps the hidden layer's retained frame on a slow cadence; exits itself on reveal or teardown.
     var hiddenJanitorTask: Task<Void, Never>?
@@ -367,7 +372,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         wantsLayer = true
         setupTrackingArea()
         observeKeyWindowChanges()
-        observeWindowVisibilityChanges()
+        observeAccessibilityExposure()
         observeDisplayWake()
     }
 
@@ -417,26 +422,6 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
                         self.clearUnseenOnRefocus()
                     }
                 }
-            }
-            focusObservers.append(token)
-        }
-    }
-
-    /// Watch the transitions that move `window?.isVisible`, the `axExposed` term nothing else reports.
-    /// `deckVisible` is pure MODEL state, so miniaturizing the window — or hiding the app — leaves this pane
-    /// `deckVisible == true` while AppKit reports `isVisible == false`. Without these, `axExposed` went
-    /// true → false → true across a minimize/restore with no `.layoutChanged` posted at all.
-    /// `object: nil` like the key observers: the post recomputes from THIS view's own window, so another
-    /// window's notification costs one latch compare. Tokens join `focusObservers`, so teardown is unchanged.
-    private func observeWindowVisibilityChanges() {
-        let center = NotificationCenter.default
-        let names: [Notification.Name] = [
-            NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
-            NSApplication.didHideNotification, NSApplication.didUnhideNotification,
-        ]
-        for name in names {
-            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.postAccessibilityExposureChange() }
             }
             focusObservers.append(token)
         }
@@ -705,7 +690,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         }
         // an overlay surface with its own background color applies it here too — the overlay is sessionless,
         // so the watermark path above skips it.
-        if overlayBackgroundColorHex != nil { applyOverlayBackgroundColor() }
+        applyOverlayConfig()
 
         // the overlay grabs first responder itself (TerminalView's once-on-attach grab misses the deferred
         // overlay surface); a bounded run-loop retry beats the SwiftUI/AppKit responder race.
@@ -854,6 +839,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         isDestroyed = true
         focusObservers.forEach { NotificationCenter.default.removeObserver($0) }
         focusObservers = []
+        windowVisibilityObservation = nil
         if let surface { ghostty_surface_free(surface) }
         surface = nil
         // release the custom layer libghostty installed and this view still retains. The current pin clears
@@ -900,6 +886,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         onClearUnseen = nil
         onUserInputClearsStatus = nil
         onUserInput = nil
+        onGridChange = nil
         onFontSizeChange = nil
         onSearchStart = nil
         onSearchEnd = nil
@@ -940,6 +927,7 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         // only site that can clear the latch — below the guard it never ran, and the re-show then compared
         // equal and stayed silent too.
         postAccessibilityExposureChange()
+        observeWindowVisibility()
         updateRendererVisibility()
         guard let window else { return }
         if surface == nil {
@@ -996,5 +984,6 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
         // the split re-parent invalidates the Metal drawable, and neither a same-grid set_size nor the tick
         // (dirty surfaces only) repaints it — force one or the re-hosted pane stays blank over a live buffer.
         ghostty_surface_refresh(surface)
+        onGridChange?()
     }
 }

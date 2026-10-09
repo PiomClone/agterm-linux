@@ -29,6 +29,11 @@ paths:
   Default-off nil fields include attention button, Dock bounce, global config inheritance, close
   confirmation, auto-follow, hidden inactive sidebars, and interface hiding. `restoreMode` defaults to
   `none`; the legacy `restoreRunningCommand` boolean migrates to `rerun` or `none`.
+- `newSessionPlacement` (nil = `end`) applies only to New Session: `AppActions.newSession()` and the
+  workspace row's New Session and "+", through `AppActions.resolvedNewSessionIndex`. It inserts after the
+  selection only when that lives in the destination workspace. Open Directory, folder drops, and
+  `open -a agterm <dir>` keep appending; `session new` keeps its own `--after`/`--before` rules.
+  Deliberate control exemption, like `newSessionDirectory`: no command sets or reads it.
 - `sidebarFontSize` and `interfaceFontSize` are separate settings, both 9...20 default 13, read through
   `effectiveSidebarFontSize`/`effectiveInterfaceFontSize`. Neither falls back to the other: the sidebar
   is a density knob, the palette a readability one.
@@ -89,8 +94,9 @@ paths:
 - `.agtermAppearanceChanged` is required because terminal color is not observable; it updates
   `terminalColor`, quick-terminal backing, title/window appearance, and non-observable chrome mirrors.
 - Settings is a 540x680 six-tab SwiftUI scene with explicit selection defaulting General, preventing
-  `com_apple_SwiftUI_Settings_selectedTabIndex` persistence. General holds Mouse, Sessions, and Ghostty
-  Config. Appearance holds Terminal and Window. Interface groups `InterfaceElement`s two per row, plus
+  `com_apple_SwiftUI_Settings_selectedTabIndex` persistence. General holds Mouse and Sessions; the
+  global-Ghostty-config toggle and its hint close Sessions, since a third section made the tab scroll.
+  Appearance holds Terminal and Window. Interface groups `InterfaceElement`s two per row, plus
   Multiple Windows and the quick terminal's panel size, which sits there rather than under Appearance's
   Window because the panel belongs to no window.
   Notifications holds banner/badge/attention/bounce/sound. Agent Status holds colors/shapes, sound,
@@ -121,7 +127,8 @@ paths:
   blur is not pixel-identical to CGS blur. Reapply on key/main/fullscreen and appearance changes.
   `SystemAccessibilityObserver` bridges workspace accessibility changes to every window; SwiftUI's
   environment independently makes palettes/switcher opaque and changes the hint.
-- `configDirectory` resolution is explicit setting, else `<AGTERM_STATE_DIR>/config`, else
+- `configDirectory` resolution is explicit setting, else `<AGTERM_STATE_DIR>/config` unless that
+  directory is the `agterm-debug` sibling (`DebugStateDirectory.configStateDirectory`), else
   `~/.config/agterm`. It contains keymap, scoped Ghostty config, and restore denylist. Seed starter files
   only when absent. Keymap starter documents every action/default and token but rebinds nothing; reload
   posts `.agtermKeymapChanged`, never a surface config update.
@@ -144,13 +151,13 @@ paths:
   requested or active mode. Exit capture and `restore.capture` read the configured next-launch mode.
 - **Command replay is launch-scoped; capture runs at two exits and on demand.**
   `AppDelegate.captureForegroundCommands` runs at three points: `applicationWillTerminate` before
-  `saveAllOpen()`, the LAST window's `willClose` before its surface teardown, which precedes
+  `saveAllChecked()`, the LAST window's `willClose` before its surface teardown, which precedes
   `applicationWillTerminate` and is therefore the only point where a close-the-last-window exit's
   commands are still readable, and `restore.capture` on demand, which exists for the exit that reaches
   neither: a force quit, a crash, a hard reset, a power loss. A system shutdown/restart/logout is NOT in
   that set — since #447 it reaches `applicationWillTerminate` like any quit — so do not re-motivate the
   command with an OS update. The on-demand arm changes nothing else: it fills the same
-  slots, persists through the same `saveAllOpen`, and replay stays launch-only and one-shot.
+  slots, persists through `saveAllOpenChecked`, and replay stays launch-only and one-shot.
   The two automatic exit arms run when the configured mode is `rerun` or `live`. The on-demand arm remains
   rerun-only: it refuses when `none` or `live` is configured and names that mode. Deliberately unlike a
   `session.restore` pin, which saves future rerun policy with an explanatory note, because a pin outlives
@@ -259,13 +266,22 @@ paths:
   settings predate the flag never sees it. Decide it in `agtermApp.init()`: the first launch saves its own
   window within a second of the scene appearing, which would read back as prior state.
   `WelcomeAlert` suppresses itself under XCUITest unless `AGTERM_UITEST_SHOW_WELCOME` is set.
-- `flaggedViewLayout` is a raw `FlaggedViewLayout` (`flat`|`tree`), nil for the default `flat`, resolved by
+- `flaggedViewLayout` is a raw `FlaggedViewLayout` (`flat`|`plain`|`tree`), nil for the default `flat`, resolved by
   `effectiveFlaggedViewLayout` and mirrored to `GhosttyApp.flaggedViewLayout`. App-wide, never per window.
   Every sidebar Coordinator picks it up on `.agtermAppearanceChanged`, and only one showing the flagged view
   rebuilds. The picker sits at the bottom of the General tab's Sessions section: the Interface tab is exactly full at
   540x680, and one more row pushes the quick-terminal Size off the bottom. A grouped Form scrolls, so an
-  overflowing tab still reports every control hittable; `testFlaggedViewLayoutPickerPersists` compares the
-  tab's last line against the window frame instead.
+  overflowing tab still reports every control hittable, and its last text can sit inside the window while
+  the section's bottom inset does not; `assertGeneralTabFits` in `SettingsUITests` scrolls the tab and
+  requires the closing hint not to move.
   The control catalog carries it as `sidebar.flagged-layout` ([[control-api]]).
+- `linkOpenMode` is raw `LinkOpenMode`, nil = `browser`, read through `effectiveLinkOpenMode` at each link
+  click; nothing renders from it. Its picker sits in the General tab's Mouse section, and
+  `testLinkOpenModePickerPersists` runs the same fit check. The control catalog carries it as
+  `browser.links` ([[control-api]]).
+- `htmlOverlayZoom` is the one page zoom every HTML overlay shows at, nil = 1, stepped only by the font
+  commands through `SettingsModel.stepHtmlOverlayZoom`, which saves and mirrors to `HtmlOverlayRegistry`
+  without `persistAndApply`: nothing else renders it, so a keypress must not broadcast an appearance change.
+  No Settings control.
 - These settings are GUI-only unless the control catalog explicitly says otherwise. Do not add settings
   commands merely to mirror chrome; user actions already have control coverage.

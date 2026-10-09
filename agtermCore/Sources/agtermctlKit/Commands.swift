@@ -96,8 +96,8 @@ struct SurfaceTargetOptions: ParsableArguments {
 public enum AgtermctlCommandCatalog {
     public static var subcommands: [ParsableCommand.Type] {
         [Tree.self, Events.self, Workspace.self, Session.self, Surface.self, Dashboard.self, Window.self, Quick.self,
-         Sidebar.self, Notify.self, Font.self, Keymap.self, Hooks.self, Config.self, Theme.self, Pick.self, Ask.self, Restore.self, Recent.self,
-         Zmx.self, Terminfo.self, Version.self]
+         Sidebar.self, Notify.self, Font.self, Keymap.self, Hooks.self, Browser.self, Config.self, Theme.self, Pick.self, Ask.self, Restore.self, Recent.self,
+         Zmx.self, Terminfo.self, Clipboard.self, Version.self]
     }
 
     public static func rootConfiguration(
@@ -110,8 +110,8 @@ public enum AgtermctlCommandCatalog {
     }
 }
 
-/// The root `agtermctl` command. Subcommands mirror the control catalog 1:1, except `terminfo`, which runs
-/// locally and never opens the socket.
+/// Agtermctl is the root `agtermctl` command. Subcommands mirror the control catalog 1:1, except `terminfo` and
+/// `clipboard`, which run locally and never open the socket.
 public struct Agtermctl: ParsableCommand {
     public static let configuration = AgtermctlCommandCatalog.rootConfiguration()
 

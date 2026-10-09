@@ -33,6 +33,8 @@ final class GhosttyApp {
     /// Terminal foreground from the resolved config. The chrome (sidebar rows, title-bar text + buttons) uses
     /// it so non-terminal text tracks the theme, not the system label color. Nil when unread.
     private(set) var terminalForegroundColor: NSColor?
+    /// terminalPalette is the 16 ANSI colors of the resolved config as `#rrggbb`, by slot; empty when unread.
+    private(set) var terminalPalette: [String] = []
     /// Whether the active theme reads as dark, by perceived luminance of the WASHED sidebar background (theme
     /// background plus sidebar-tint wash) — the color the disclosure triangle sits on, so a strong tint pushing
     /// a near-threshold theme past the midpoint still classifies right. Pins AppKit-drawn chrome to the theme,
@@ -336,13 +338,9 @@ final class GhosttyApp {
         return dir.appendingPathComponent("ghostty-settings.conf")
     }
 
-    /// The config inputs resolved from `settings.json` in ONE read: the agterm-scoped `ghostty.conf` URL
-    /// (`<configDir>/ghostty.conf`, beside `keymap.conf`) and whether to inherit the GLOBAL
-    /// `~/.config/ghostty/config` (`inheritGlobalGhosttyConfig`, default off). Resolved once per config build
-    /// and threaded onward, so a reload reads `settings.json` at most once. Self-contained because
-    /// `loadConfig` runs before any `SettingsModel` exists (its init is the first touch of `GhosttyApp.shared`):
-    /// reads the persisted `configDirectory` + flag via `settingsStore()`, keymap precedence (explicit setting
-    /// → `AGTERM_STATE_DIR/config` → `~/.config/agterm`).
+    /// ConfigInputs is the agterm-scoped `ghostty.conf` URL and whether to inherit the global ghostty
+    /// config, resolved from one `settings.json` read per config build. It reads `settingsStore()` itself
+    /// because `loadConfig` runs before any `SettingsModel` exists; `ConfigPaths` owns the precedence.
     struct ConfigInputs {
         let scopedURL: URL
         let inheritGlobalConfig: Bool
@@ -355,7 +353,8 @@ final class GhosttyApp {
     private static func resolveConfigInputs(settings: AppSettings) -> ConfigInputs {
         let configDir = ConfigPaths.configDirectory(
             setting: settings.configDirectory,
-            stateDir: ProcessInfo.processInfo.environment["AGTERM_STATE_DIR"],
+            stateDir: DebugStateDirectory.configStateDirectory(environment: ProcessInfo.processInfo.environment,
+                                                               liveDirectory: PersistenceStore.defaultDirectory),
             home: FileManager.default.homeDirectoryForCurrentUser)
         return ConfigInputs(scopedURL: ConfigPaths.ghosttyConfigPath(configDirectory: configDir),
                             inheritGlobalConfig: settings.inheritGlobalGhosttyConfig ?? false)
@@ -420,6 +419,7 @@ final class GhosttyApp {
         lastConfigInputs = inputs
         terminalBackgroundColor = Self.color(from: config, key: "background")
         terminalForegroundColor = Self.color(from: config, key: "foreground")
+        terminalPalette = Self.palette(from: config)
         refreshSelectionColors(isDark: isDark)
     }
 
@@ -639,13 +639,13 @@ final class GhosttyApp {
             settingsConf.withCString { ghostty_config_load_file(cfg, $0) }
         }
 
-        // a per-surface overlay, loaded LAST so it wins over everything above; only `configWithOverlay` passes
-        // it, the app/global build leaves it nil.
+        ghostty_config_load_recursive_files(cfg)
+        // a per-surface overlay, loaded LAST so it wins over everything above, the `config-file` includes the
+        // line before expands too: one of those restating a key would otherwise outrank it. Only
+        // `configWithOverlay` passes it, the app/global build leaves it nil.
         if let extraOverlayPath, FileManager.default.fileExists(atPath: extraOverlayPath) {
             extraOverlayPath.withCString { ghostty_config_load_file(cfg, $0) }
         }
-
-        ghostty_config_load_recursive_files(cfg)
         forceUnsupportedShellFeaturesOff(cfg)
         clearStaticTitle(cfg)
         ghostty_config_finalize(cfg)
@@ -659,6 +659,15 @@ final class GhosttyApp {
             }
         }
         return cfg
+    }
+
+    private static func palette(from config: ghostty_config_t) -> [String] {
+        var palette = ghostty_config_palette_s()
+        let key = "palette"
+        guard key.withCString({ ghostty_config_get(config, &palette, $0, UInt(key.utf8.count)) }) else { return [] }
+        return withUnsafeBytes(of: palette.colors) { raw in
+            raw.bindMemory(to: ghostty_config_color_s.self).prefix(16).map { String(format: "#%02x%02x%02x", $0.r, $0.g, $0.b) }
+        }
     }
 
     /// A named color key (e.g. `background`, `foreground`) from the resolved config as an opaque `NSColor`,

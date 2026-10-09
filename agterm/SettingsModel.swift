@@ -75,6 +75,7 @@ final class SettingsModel {
         applyInterfaceElements()
         applyAutoHideSidebarInactiveWindows()
         applyFlaggedViewLayout()
+        applyHtmlOverlayZoom()
         ensureStarterKeymap()
         loadKeymap()
         ensureStarterHooks()
@@ -265,6 +266,14 @@ final class SettingsModel {
         persistAndApply()
     }
 
+    /// Persist where a clicked web link opens; `browser` is the nil case, keeping `settings.json` minimal. Not a
+    /// ghostty key and nothing renders from it: each click reads the setting.
+    func setLinkOpenMode(_ mode: LinkOpenMode) {
+        guard mode != settings.effectiveLinkOpenMode else { return }
+        settings.linkOpenMode = mode == .browser ? nil : mode.rawValue
+        persistAndApply()
+    }
+
     /// Show or hide one title-bar / sidebar-footer chrome element (an empty result maps back to nil so
     /// `settings.json` stays minimal). Not a ghostty key — it rides `.agtermAppearanceChanged`, so every
     /// window re-gates live. Mutates the RAW string set: `resolvedHiddenInterfaceElements` drops unknown
@@ -309,11 +318,21 @@ final class SettingsModel {
     func setNewSessionDirectory(_ value: String?) { settings.newSessionDirectory = value; try? settingsStore.save(settings) }
     /// Persist the fixed directory used when `newSessionDirectory` is `custom` (nil/empty falls back to home).
     func setNewSessionCustomDirectory(_ value: String?) { settings.newSessionCustomDirectory = value; try? settingsStore.save(settings) }
+    /// setNewSessionPlacement persists placement for future session creation; nil restores `end`.
+    func setNewSessionPlacement(_ value: String?) { settings.newSessionPlacement = value; try? settingsStore.save(settings) }
     /// Persist whether a GUI session close first asks for confirmation (nil = off). `AppActions` reads it on
     /// demand at close time, so it just saves.
     func setConfirmCloseSession(_ value: Bool?) { settings.confirmCloseSession = value; try? settingsStore.save(settings) }
     /// Persist whether GUI closes use the short undo grace period. nil = on; false = close immediately.
     func setCloseGraceUndoEnabled(_ value: Bool?) { settings.closeGraceUndoEnabled = value; try? settingsStore.save(settings) }
+    /// stepHtmlOverlayZoom moves every HTML page's zoom by a font binding action and persists it. Saves and
+    /// mirrors only: no chrome or config depends on it.
+    func stepHtmlOverlayZoom(_ action: String) {
+        guard let zoom = HtmlZoom.applying(fontAction: action, to: settings.effectiveHtmlOverlayZoom) else { return }
+        settings.htmlOverlayZoom = zoom == 1 ? nil : zoom
+        try? settingsStore.save(settings)
+        applyHtmlOverlayZoom()
+    }
     /// Persist that the first-run welcome has been shown, so it never appears again on this state directory.
     func setWelcomeShown(_ value: Bool?) { settings.welcomeShown = value; try? settingsStore.save(settings) }
     /// Persist the user-idle auto-follow timeout (nil = off) and push it into every open window's `AppStore`
@@ -431,6 +450,7 @@ final class SettingsModel {
         reloadKeymap()
         reloadHooks()
         reloadGhosttyConfig()
+        remotes.watch(remotesURL)
     }
 
     /// Re-read `hooks.conf` and post `.agtermHooksChanged` so the scheduler applies it; diagnostics surface as
@@ -441,6 +461,14 @@ final class SettingsModel {
         if !hooksDiagnostics.isEmpty {
             NotificationManager.shared.notifyHooksDiagnostics(count: hooksDiagnostics.count)
         }
+    }
+
+    /// remotesURL is the resolved `remotes.conf`, beside `keymap.conf`.
+    var remotesURL: URL { ConfigPaths.remotesPath(configDirectory: configDirectoryURL()) }
+
+    /// remotes follows `remotes.conf` on disk; File ▸ Attach Remote lists its entries.
+    @ObservationIgnored private(set) lazy var remotes = RemotesWatcher(url: remotesURL) {
+        NotificationManager.shared.notifyRemotesDiagnostics(count: $0)
     }
 
     /// The resolved `hooks.conf` path: `<config dir>/hooks.conf`, beside `keymap.conf`.
@@ -488,12 +516,13 @@ final class SettingsModel {
         }
     }
 
-    /// The resolved config directory: the explicit setting, else `AGTERM_STATE_DIR/config` (test
-    /// isolation), else `~/.config/agterm`. Both `keymap.conf` and `ghostty.conf` live here.
+    /// configDirectoryURL follows `ConfigPaths.configDirectory`'s precedence. Both `keymap.conf` and
+    /// `ghostty.conf` live here.
     private func configDirectoryURL() -> URL {
         ConfigPaths.configDirectory(
             setting: settings.configDirectory,
-            stateDir: ProcessInfo.processInfo.environment["AGTERM_STATE_DIR"],
+            stateDir: DebugStateDirectory.configStateDirectory(environment: ProcessInfo.processInfo.environment,
+                                                               liveDirectory: PersistenceStore.defaultDirectory),
             home: FileManager.default.homeDirectoryForCurrentUser)
     }
 
@@ -762,6 +791,10 @@ final class SettingsModel {
 
     private func applyFlaggedViewLayout() {
         GhosttyApp.shared.setFlaggedViewLayout(settings.effectiveFlaggedViewLayout)
+    }
+
+    private func applyHtmlOverlayZoom() {
+        HtmlOverlayRegistry.shared.setZoom(settings.effectiveHtmlOverlayZoom)
     }
 
     private func applyAutoHideSidebarInactiveWindows() {

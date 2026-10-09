@@ -4,11 +4,13 @@ public struct ControlSessionTypeOptions: Equatable, Sendable {
     /// The parsed pane, nil for the main one. The dispatcher owns the spelling, so the role and position
     /// aliases the CLI accepts resolve here rather than being matched again in the host.
     public let pane: StatusPane?
+    public let paneID: String?
 
-    public init(text: String, select: Bool, pane: StatusPane?) {
+    public init(text: String, select: Bool, pane: StatusPane?, paneID: String? = nil) {
         self.text = text
         self.select = select
         self.pane = pane
+        self.paneID = paneID
     }
 }
 
@@ -22,9 +24,17 @@ public struct ControlSessionOverlayOpenOptions: Equatable, Sendable {
     /// The pane to cover, nil for the session-wide overlay. A pane overlay is always full, so this and
     /// `sizePercent` are mutually exclusive (rejected in the dispatcher).
     public let pane: OverlayPane?
+    /// page is the file or web page to show instead of running `command`, which is then empty, as is `cwd`.
+    public let page: HtmlSource?
+    public let navigation: Bool
+    public let javascript: Bool
+    public let chromeless: Bool
+    public let persistent: Bool
+    public let browse: Bool
 
     public init(command: String, cwd: String?, wait: Bool, sizePercent: Int?, backgroundColor: String?,
-                follow: Bool = false, pane: OverlayPane? = nil) {
+                follow: Bool = false, pane: OverlayPane? = nil, page: HtmlSource? = nil, navigation: Bool = false,
+                javascript: Bool = false, chromeless: Bool = false, persistent: Bool = false, browse: Bool = false) {
         self.command = command
         self.cwd = cwd
         self.wait = wait
@@ -32,6 +42,12 @@ public struct ControlSessionOverlayOpenOptions: Equatable, Sendable {
         self.backgroundColor = backgroundColor
         self.follow = follow
         self.pane = pane
+        self.page = page
+        self.navigation = navigation
+        self.javascript = javascript
+        self.chromeless = chromeless
+        self.persistent = persistent
+        self.browse = browse
     }
 }
 
@@ -73,5 +89,42 @@ public struct ControlSessionOverlayTextOptions: Equatable, Sendable {
         self.pane = pane
         self.all = all
         self.lines = lines
+    }
+}
+
+/// ControlSessionRestartOptions is the parsed `session.restart` payload. At least one of `pane` and
+/// `paneID` is set; the host resolves them against the live slots.
+public struct ControlSessionRestartOptions: Equatable, Sendable {
+    /// maxCommandBytes bounds the shell line in UTF-8 bytes. It travels in the new shell's argv, inside
+    /// the session host's 64 KiB creation frame beside the pane's environment.
+    public static let maxCommandBytes = 4096
+
+    /// command is the shell line to run; nil replays the pane's foreground program instead.
+    public let command: String?
+    public let pane: StatusPane?
+    public let paneID: String?
+
+    public init(command: String?, pane: StatusPane?, paneID: String? = nil) {
+        self.command = command
+        self.pane = pane
+        self.paneID = paneID
+    }
+}
+
+/// ControlRestartReceipt is what a successful `session.restart` proves: the pane's shell was replaced.
+/// The pids are the daemon leaders, the pane's root shells, not the program the caller's line starts.
+public struct ControlRestartReceipt: Codable, Equatable, Sendable {
+    public let paneID: String
+    public let oldPid: Int32
+    public let newPid: Int32
+    /// replayedArgv is the foreground program a restart without a command asked the new shell to run;
+    /// nil when the caller supplied the line. It is what was requested, not proof the program started.
+    public let replayedArgv: [String]?
+
+    public init(paneID: String, oldPid: Int32, newPid: Int32, replayedArgv: [String]? = nil) {
+        self.paneID = paneID
+        self.oldPid = oldPid
+        self.newPid = newPid
+        self.replayedArgv = replayedArgv
     }
 }

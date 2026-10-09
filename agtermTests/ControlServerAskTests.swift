@@ -534,6 +534,33 @@ final class ControlServerAskTests: XCTestCase {
                        ControlSessionAsk(id: ask.id, remote: true))
     }
 
+    func testATerminalAskStaysHereWhileThisMacLeadsAPresentedSession() throws {
+        let session = try XCTUnwrap(library.activeStore?.activeSession)
+        let (sink, _) = try present(session)
+        _ = ZmxLeadBook.shared.apply(try XCTUnwrap(ZmxLeadNotice(title: "zmx-role;n:leader:2")), pane: session.paneIdentity)
+        let ask = makeTerminalAsk()
+
+        XCTAssertTrue(open(ask).ok)
+
+        XCTAssertEqual(session.askPending, ask)
+        XCTAssertFalse(session.askPresentedRemotely)
+        XCTAssertFalse(sink.bodies.contains { if case .askRequest = $0 { true } else { false } })
+    }
+
+    func testATargetedGuiAskStaysHereWhileThisMacLeadsAPresentedSession() throws {
+        let session = try XCTUnwrap(library.activeStore?.activeSession)
+        let controller = register(try XCTUnwrap(library.activeWindowID))
+        let (sink, _) = try present(session)
+        _ = ZmxLeadBook.shared.apply(try XCTUnwrap(ZmxLeadNotice(title: "zmx-role;n:leader:2")), pane: session.paneIdentity)
+        let ask = makeAsk()
+
+        XCTAssertTrue(open(ask, target: session.id.uuidString).ok)
+
+        XCTAssertEqual(controller.pendingAsk?.id, ask.id)
+        XCTAssertFalse(session.askPresentedRemotely)
+        XCTAssertFalse(sink.bodies.contains { if case .askRequest = $0 { true } else { false } })
+    }
+
     func testATargetedGuiAskWithAPresenterLeavesTheWindowSlotFree() throws {
         let session = try XCTUnwrap(library.activeStore?.activeSession)
         let controller = register(try XCTUnwrap(library.activeWindowID))
@@ -559,6 +586,40 @@ final class ControlServerAskTests: XCTestCase {
 
         XCTAssertEqual(server.askResult(ask.id, window: nil).result?.ask,
                        ControlAskResult(result: .answered, id: "yes", label: "Yes", index: 0))
+    }
+
+    func testACommandClickOnAnAskDrawnOverAHudPanelIsLeftToTheAsk() throws {
+        let store = try XCTUnwrap(library.activeStore)
+        let session = try XCTUnwrap(store.activeSession)
+        let windowID = try XCTUnwrap(library.activeWindowID)
+        let frame = NSRect(x: 0, y: 0, width: 200, height: 120)
+        let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.orderOut(nil) }
+        let panel = GhosttySurfaceView(workingDirectory: NSTemporaryDirectory())
+        panel.frame = frame
+        panel.viewOnly = true
+        panel.hudBodyFile = NSTemporaryDirectory() + "agterm-hud-\(UUID().uuidString)"
+        window.contentView?.addSubview(panel)
+        defer { panel.hudBodyFile = nil }
+        func click(_ type: NSEvent.EventType) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 50, y: 50), modifierFlags: .command,
+                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        XCTAssertTrue(HudLinkClick.consumes(try click(.leftMouseDown)), "with no ask the panel claims the click")
+        XCTAssertTrue(HudLinkClick.consumes(try click(.leftMouseUp)))
+
+        let ask = makeTerminalAsk()
+        XCTAssertTrue(open(ask).ok)
+        let catcher = AskKeyCatcher.KeyCatcherView(frame: frame)
+        catcher.sessionInput = SessionAskInput(session: session, store: store, actions: actions, windowID: windowID,
+                                               askID: ask.id, frame: frame)
+        window.contentView?.addSubview(catcher)
+        defer { catcher.removeFromSuperview() }
+        XCTAssertEqual(catcher.sessionInput?.visible, true)
+
+        XCTAssertFalse(HudLinkClick.consumes(try click(.leftMouseDown)))
     }
 
     func testLosingThePresenterDrawsATerminalAskHere() throws {
@@ -644,6 +705,10 @@ final class ControlServerAskTests: XCTestCase {
 
     @discardableResult
     private func present(_ session: Session) throws -> (PresenterSink, PresentationHub.SubscriberID) {
+        for pane in [session.paneIdentity] + [session.splitPaneIdentity].compactMap({ $0 }) {
+            ZmxLeadBook.shared.begin(ZmxLeadAttachment(nonce: "n", claim: true), pane: pane)
+            _ = ZmxLeadBook.shared.apply(try XCTUnwrap(ZmxLeadNotice(title: "zmx-role;n:follower:1")), pane: pane)
+        }
         server.attachPresentationHub()
         let sink = PresenterSink()
         let id = try server.presentationHub.subscribe(

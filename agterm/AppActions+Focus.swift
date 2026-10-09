@@ -162,16 +162,10 @@ extension AppActions {
         revealActiveBlockedPane(captured: indicator)
     }
 
-    /// Front and focus the window a recent-closed reopen restored into. The id is published here rather
-    /// than left to the key-window report, which `focusActiveSession` would otherwise outrun; publishing it
-    /// also has to save and post, because `WindowAccessor.reportFrontmost` gates both on the id having
-    /// changed and this assignment already made it equal.
+    /// revealRestoredWindow fronts the window a recent-closed reopen restored into. It publishes the id
+    /// itself, since `focusActiveSession` would outrun the key-window report.
     func revealRestoredWindow(_ id: WindowInfo.ID) {
-        if library.frontmostWindowID != id {
-            library.frontmostWindowID = id
-            library.saveIndex()
-            NotificationCenter.default.post(name: .agtermWindowFrontmostChanged, object: nil)
-        }
+        takeFrontmost(id)
         _ = WindowRegistry.shared.raise(id)
         focusActiveSession()
     }
@@ -191,7 +185,8 @@ extension AppActions {
         if palette?.mode != nil { return }
         if pickActive(for: library.activeWindowID) { return }
         if quickTerminal.holdsKey { return }
-        if let view = store?.activeSession?.topmostSurface as? GhosttySurfaceView, let window = view.window {
+        let pageCovers = store?.activeSession.map { HtmlOverlayRegistry.shared.focusCover(of: $0) } ?? false
+        if !pageCovers, let view = store?.activeSession?.topmostSurface as? GhosttySurfaceView, let window = view.window {
             guard !view.deferFocusToAsk() else { return }
             window.makeFirstResponder(view)
         }
@@ -245,7 +240,9 @@ extension AppActions {
         // the quick-terminal panel owns focus above EVERY window, not just this session's; its own hide
         // restores the session.
         if quickTerminal.holdsKey { return }
-        if let view = session.focusTarget(wantSplit: wantSplit) as? GhosttySurfaceView, let window = view.window {
+        let pageMayCover = session.coverOverlayActive || session.paneOverlayIsHtml(wantSplit ? .right : .left)
+        let pageCovers = pageMayCover && HtmlOverlayRegistry.shared.focusCover(of: session)
+        if !pageCovers, let view = session.focusTarget(wantSplit: wantSplit) as? GhosttySurfaceView, let window = view.window {
             guard !view.deferFocusToAsk() else { return }
             window.makeFirstResponder(view)
         }

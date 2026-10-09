@@ -12,8 +12,30 @@ import Glibc
 struct Keymap: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Keymap commands.",
-        subcommands: [Reload.self, List.self]
+        subcommands: [Reload.self, List.self, Run.self]
     )
+
+    struct Run: RequestCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Run one of your custom commands by name against a session.",
+            discussion: """
+            NAME is a custom command's name exactly as `keymap list` prints it. The command runs as it \
+            does from the palette, with the target session's focused pane, primary or split and never \
+            its scratch or an overlay, supplying the working directory, the selection and the context \
+            tokens. A name no command carries is refused.
+
+            The reply says the command started. It runs detached, so its exit status and output are not \
+            reported here; a command set to show a failure panel still shows it.
+            """
+        )
+        @Argument(help: "Custom command name, from `keymap list`.") var name: String
+        @OptionGroup var target: TargetOptions
+        @OptionGroup var options: ClientOptions
+
+        func makeRequest() throws -> ControlRequest {
+            ControlRequest(cmd: .keymapRun, target: target.target, args: options.withWindow(ControlArgs(name: name)))
+        }
+    }
 
     struct Reload: RequestCommand {
         static let configuration = CommandConfiguration(abstract: "Re-read and apply keymap.conf (prints the diagnostic count).")
@@ -67,6 +89,48 @@ struct Hooks: ParsableCommand {
         @OptionGroup var options: BasicOptions
 
         func makeRequest() throws -> ControlRequest { ControlRequest(cmd: .hooksList) }
+    }
+}
+
+// MARK: - browser
+
+struct Browser: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Saved browser storage of --persistent URL overlays, and where clicked links open.",
+        subcommands: [Clear.self, Links.self]
+    )
+
+    /// `agtermctl browser links [browser|overlay]`: no mode reads the setting. App-wide, so no `--window`.
+    struct Links: RequestCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Set or read where a clicked web link in a terminal opens (browser|overlay).",
+            discussion: "overlay opens http and https links in a full session web overlay with JavaScript, navigation "
+                + "buttons and the saved browser store; with no MODE the current one is printed. A link in a HUD, a link "
+                + "clicked while a HUD is up or the terminal is zoomed, and a link the overlay cannot show open in the browser."
+        )
+        @Argument(help: "Mode: browser or overlay. Omit to read the current mode.") var mode: String?
+        @OptionGroup var options: BasicOptions
+
+        func validate() throws {
+            guard let mode else { return }
+            guard LinkOpenMode(rawValue: mode) != nil else { throw ValidationError("mode must be browser or overlay") }
+        }
+
+        func makeRequest() throws -> ControlRequest {
+            ControlRequest(cmd: .browserLinks, args: mode.map { ControlArgs(mode: $0) })
+        }
+    }
+
+    struct Clear: RequestCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Remove every cookie and all site data the saved browser store holds.",
+            discussion: "Refused while a --persistent page is open, one in a just-closed session that can still be restored included: "
+                + "an open page writes its login back. Removing the local data does not sign you out on the server."
+        )
+        // one store serves every window, so no `--window`.
+        @OptionGroup var options: BasicOptions
+
+        func makeRequest() throws -> ControlRequest { ControlRequest(cmd: .browserClear) }
     }
 }
 
@@ -323,11 +387,14 @@ struct Surface: ParsableCommand {
             line is not empty; AT the prompt it establishes nothing, since the caret may have been moved \
             back over text that is still there.
             """)
+        @Option(name: .customLong("pane-id"), help: "Stable pane token ($AGTERM_PANE_ID). With it --target names the session ('active' or a session id), not a surface.")
+        var paneID: String?
         @OptionGroup var target: SurfaceTargetOptions
         @OptionGroup var options: ClientOptions
 
         func makeRequest() throws -> ControlRequest {
-            ControlRequest(cmd: .surfaceCursor, target: target.target, args: options.withWindow(ControlArgs()))
+            ControlRequest(cmd: .surfaceCursor, target: target.target,
+                           args: options.withWindow(ControlArgs(paneID: paneID)))
         }
     }
 
@@ -680,13 +747,13 @@ struct Sidebar: ParsableCommand {
     /// Sets how every window's flagged sidebar view arranges its sessions; app-wide, so no `--window`.
     struct FlaggedLayout: RequestCommand {
         static let configuration = CommandConfiguration(
-            commandName: "flagged-layout", abstract: "Flagged view layout (flat|tree|toggle).")
-        @Argument(help: "Layout: flat, tree, or toggle (default).") var layout: String = "toggle"
+            commandName: "flagged-layout", abstract: "Flagged view layout (flat|plain|tree|toggle).")
+        @Argument(help: "Layout: flat, plain (flat without workspace names), tree, or toggle (default).") var layout: String = "toggle"
         @OptionGroup var options: BasicOptions
 
         func validate() throws {
-            guard ["flat", "tree", "toggle"].contains(layout) else {
-                throw ValidationError("layout must be flat, tree, or toggle")
+            guard ["flat", "plain", "tree", "toggle"].contains(layout) else {
+                throw ValidationError("layout must be flat, plain, tree, or toggle")
             }
         }
 

@@ -116,7 +116,8 @@ final class AppActions {
     func newSession() {
         guard uiActionsEnabled else { return }
         guard let store, let workspaceID = store.currentWorkspaceID,
-              let session = store.addSession(toWorkspace: workspaceID, cwd: resolvedNewSessionCwd())
+              let session = store.addSession(toWorkspace: workspaceID, cwd: resolvedNewSessionCwd(),
+                                             at: resolvedNewSessionIndex(in: workspaceID, store: store))
         else { return }
         // note activity so the new session buys the full idle grace before auto-follow moves the selection.
         store.noteUserActivity()
@@ -131,6 +132,12 @@ final class AppActions {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let current = store?.activeSession.map { $0.localWorkingDirectory(reported: $0.focusedCwd, homeDirectory: home) }
         return settingsModel?.settings.resolveNewSessionCwd(currentSessionCwd: current, home: home) ?? home
+    }
+
+    /// resolvedNewSessionIndex applies the placement setting to the supplied store's tree; nil appends.
+    func resolvedNewSessionIndex(in workspaceID: UUID, store: AppStore) -> Int? {
+        store.newSessionInsertionIndex(inWorkspace: workspaceID,
+                                       placement: settingsModel?.settings.effectiveNewSessionPlacement ?? .end)
     }
 
     func openDirectory() {
@@ -376,6 +383,7 @@ final class AppActions {
 
     /// The session whose open overlay is the hooks editor, so its close reloads the hooks. Nil when none.
     var hooksEditOverlaySession: UUID?
+    weak var remoteAttacher: (any RemoteAttaching)?
 
     /// Open `hooks.conf` in the user's editor in a 95% overlay over the active session, exactly like
     /// `editKeymap`; exiting reloads the hooks.
@@ -858,14 +866,30 @@ final class AppActions {
 
     // NOT zoom-gated: font commands act on the FOCUSED surface — while zoomed that is the zoomed terminal —
     // and never touch hidden deck state, so ⌘+/⌘−/⌘0 keep working.
-    func increaseFontSize() {
-        focusedSurface()?.performBindingAction("increase_font_size:1")
+    func increaseFontSize() { resizeFont("increase_font_size:1") }
+    func decreaseFontSize() { resizeFont("decrease_font_size:1") }
+    func resetFontSize() { resizeFont("reset_font_size") }
+
+    // a page owning the keys zooms the pages instead: `focusedSurface()` would fall back to the terminal the
+    // page hides. An open dashboard hides every page, so it keeps the terminal behavior.
+    private func resizeFont(_ action: String) {
+        let session = frontmostDashboard?.isOpen == true ? nil : store?.activeSession
+        if Self.htmlPageOwnsKeys(responder: NSApp.keyWindow?.firstResponder, session: session) {
+            settingsModel?.stepHtmlOverlayZoom(action)
+            return
+        }
+        focusedSurface()?.performBindingAction(action)
     }
-    func decreaseFontSize() {
-        focusedSurface()?.performBindingAction("decrease_font_size:1")
-    }
-    func resetFontSize() {
-        focusedSurface()?.performBindingAction("reset_font_size")
+
+    /// htmlPageOwnsKeys is true when a page has focus, or covers `session` while focus sits outside every
+    /// terminal, as on the sidebar.
+    static func htmlPageOwnsKeys(responder: NSResponder?, session: Session?) -> Bool {
+        let view = responder as? NSView
+        if let view, sequence(first: view, next: \.superview).contains(where: { $0 is HtmlOverlayWebView }) {
+            return true
+        }
+        if view is GhosttySurfaceView { return false }
+        return session?.topmostHtmlOverlay != nil
     }
 
     // MARK: - Search (on the surface that opened it)
@@ -876,7 +900,7 @@ final class AppActions {
     /// searchable, else the active session's focused pane. Full overlay and quick terminal are unsearchable
     /// (blocked by `coverHidesActiveSession`); a FLOATING overlay leaves the pane visible, so it targets it.
     private func searchTarget() -> GhosttySurfaceView? {
-        if let session = store?.activeSession, session.scratchActive, !session.programOverlayActive {
+        if let session = store?.activeSession, session.scratchActive, !session.coverOverlayActive {
             return session.topmostSurface as? GhosttySurfaceView
         }
         // the focused pane hidden under its OWN overlay has no searchable target: the overlay is unsearchable

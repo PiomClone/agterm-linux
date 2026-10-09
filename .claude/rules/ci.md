@@ -16,6 +16,9 @@ paths:
   manifest path, and agreement among the three versions. A skill/manifest-only release preflight commit
   must run the four Swift jobs.
 - `test` runs `swift test --enable-code-coverage` in `agtermCore`, exports lcov, and uploads it.
+  It runs under `scripts/watchdog.sh`: past 600s the watchdog tries, within a 120s budget, to save the test
+  processes' tree, open files and stacks, kills the tree, and the `test-hang` artifact carries what it got.
+  A hang otherwise reaches only the job timeout, which records nothing.
   `coverage`, the only Swift-gated Linux job, downloads it for best-effort Coveralls.
   `lint` installs SwiftLint and runs `swiftlint lint --strict`; every warning fails.
 - `build` restores separate revision-keyed caches for libghostty and zmx, including each build stamp,
@@ -54,8 +57,8 @@ paths:
 - The cookbook job builds nothing. It compares the `cookbook/README.md` table and recipe directories in
   both directions; requires kebab-case directories, a `README.md` with all six exact
   (`grep -qxF`) headings, and shebangs for `.sh`/`.zsh`/`.fish`/`.py`; runs `shellcheck` on `.sh`; parses
-  `.zsh` with `zsh -n` and `.fish` with `fish --no-execute`; runs `ruff check` on `.py`; and executes every
-  `test_*.py` regression script directly. `shellcheck` is preinstalled. Install absent `zsh` and `fish`
+  `.zsh` with `zsh -n` and `.fish` with `fish --no-execute`; runs `ruff check` on `.py`; and runs every
+  `test_*.py` regression script through `python3`. `shellcheck` is preinstalled. Install absent `zsh` and `fish`
   together before the shell gates, and install `ruff` through `pipx` because the runner's python is
   externally managed.
 - Recipes are not shell-only. A language gains a gate by adding its extension to the shebang glob plus a

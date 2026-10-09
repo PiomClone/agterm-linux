@@ -321,6 +321,30 @@ agtermctl session overlay open "make test" --target "$AGTERM_SESSION_ID"   # thi
 agtermctl session overlay result --json   # errors "still running" until it exits, then result.exitCode
 ```
 
+## Ask for a choice with an HTML page, and switch sessions from one
+
+A page is a richer `pick`: write the rows, open it with `--block`, and read the answer. The page needs no
+JavaScript; agterm handles the `data-agterm` tags.
+
+```bash
+page=$(mktemp /tmp/branchesXXXXXX)
+{
+  echo '<title>Pick a branch</title>'
+  git for-each-ref --format='%(refname:short)' refs/heads | while read -r b; do
+    esc=$(printf '%s' "$b" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/"/\&quot;/g')
+    printf '<form data-agterm="session.overlay.submit"><input type="hidden" name="value" value="%s"><button>%s</button></form>\n' "$esc" "$esc"
+  done
+} > "$page"
+if out=$(agtermctl session overlay open --html "$page" --block --target "$AGTERM_SESSION_ID" --follow); then
+  branch=$(printf '%s' "$out" | jq -r .value)
+fi
+rm -f "$page"
+```
+
+Exit 2 means the user closed the page without choosing. For a switcher that stays current, open a page with
+`--js` that builds its rows from `agterm.request('tree')` and switches with
+`agterm.request('session.select', {target: id})`; rows written into a no-JS page are a snapshot.
+
 ## Read what the user highlighted inside an overlay
 
 `session copy` and `session text` address the pane the overlay COVERS, so a selection the user made in
@@ -471,8 +495,8 @@ agtermctl tree | jq .quickVisible                    # is it open right now?
 ## Flag a working set and view just the flagged sessions
 
 Flag a few sessions across workspaces, then flip the sidebar to the flagged view: one flat list with each
-row labeled `session : workspace`, or, under the tree layout, the flagged sessions nested under their
-workspace rows. The flag is durable (persisted per session); `sidebar mode` is per-window; the layout is
+row labeled `session : workspace` (or by session name alone under the `plain` layout), or, under the tree
+layout, the flagged sessions nested under their workspace rows. The flag is durable (persisted per session); `sidebar mode` is per-window; the layout is
 app-wide.
 
 ```bash
@@ -480,6 +504,7 @@ agtermctl session flag on --target "$AGTERM_SESSION_ID"   # flag this session
 agtermctl session flag on --target a1b2                   # flag another (any workspace)
 agtermctl sidebar mode flagged                            # show only the flagged sessions
 agtermctl sidebar flagged-layout tree                     # nest them under workspace rows, in every window
+agtermctl sidebar flagged-layout plain                    # or one flat list of session names, no workspace suffix
 agtermctl session go --to next                            # in flagged mode, nav steps the flagged set only
 agtermctl sidebar mode tree                               # back to the full tree
 agtermctl session flag clear                              # unflag everything in the window
@@ -637,6 +662,13 @@ agtermctl session text --lines 50              # the last 50 lines of the buffer
 agtermctl session text --pane right            # the split pane (errors if there is no split)
 agtermctl session text --pane-id "$AGTERM_PANE_ID" # this shell's terminal, even after a swap
 agtermctl session text --pane scratch --all    # the scratch terminal's full buffer, even while it's hidden
+# drive the split pane's terminal by its stable id, wherever a swap moves it; an empty id counts as no id
+# and reaches the default pane, so stop when the lookup finds none (no split, or the session is in another window)
+id=$(agtermctl tree --json | jq -er --arg s "$AGTERM_SESSION_ID" \
+  '.result.tree.workspaces[].sessions[] | select(.id == $s) | .surfaces[] | select(.kind == "right") | .paneID | select(. != null and . != "")') &&
+  agtermctl session text --pane-id "$id" --target "$AGTERM_SESSION_ID" --lines 5 &&
+  agtermctl surface cursor --pane-id "$id" --target "$AGTERM_SESSION_ID" &&
+  agtermctl session type $'make test\n' --pane-id "$id" --target "$AGTERM_SESSION_ID"
 # extract every URL from the full scrollback:
 agtermctl session text --all --json | jq -r '.result.text' | grep -oE 'https?://[^ ]+'
 ```
@@ -683,8 +715,9 @@ agtermctl events --json --kind status |
   head -n 1
 ```
 
-The pipeline ends after the match. A transport or cursor failure makes `agtermctl events` exit
-non-zero; preserve pipeline status in automation that must distinguish a match from a failed stream.
+The pipeline ends after the match. A cursor failure, or a transport failure the CLI does not retry,
+makes `agtermctl events` exit non-zero; preserve pipeline status in automation that must distinguish a
+match from a failed stream.
 
 ## Relay accepted notifications
 
@@ -788,6 +821,10 @@ surface=$(agtermctl tree --json |
     | .id')
 agtermctl surface zoom show --target "$surface"
 agtermctl surface zoom hide --target "$surface"
+
+# Look at the session under a running overlay and come back; the overlay keeps running meanwhile.
+# The explicit id matters: with an overlay open, a bare `surface zoom` zooms the overlay itself.
+agtermctl surface zoom toggle --target "surface:$sid:left"
 
 # Read the current zoom back (the zoomed surface's control id; null when nothing is zoomed).
 agtermctl tree --json | jq -r '.result.tree.zoomedSurface'
@@ -959,6 +996,17 @@ choice=$(printf '%s\n' "$branches" | agtermctl pick --prompt "Check out which br
 agtermctl session hud close --target "$me"
 ```
 
+In a split, keep the panel inside the calling agent's pane and follow that shell if pane roles change:
+
+```bash
+agtermctl session hud "gathering options…" --spinner --position bottom-right \
+  --pane "$AGTERM_PANE" --pane-id "$AGTERM_PANE_ID" --target "$AGTERM_SESSION_ID"
+```
+
+The stable pane ID wins when it resolves. `--pane` is the fallback for older or unknown IDs. The selected
+pane supplies the size, 80% cap, anchor, and 10% edge margin; `--sticky` drops the margin and, off center,
+lifts the WIDTH cap to 100. A hidden pane keeps its HUD and shows it again
+when restored; closing the pane closes its HUD.
 `session hud update` repaints in place, no re-spawn and no blink, and it replaces the whole spec: `--detail`,
 the spinner and `--text-color` are dropped unless repeated. `--spinner-style bar|braille|circle|blocks|dot` picks the look and
 turns the spinner on by itself (`dot` blinks instead of animating, for a panel up for minutes), and an
@@ -1137,7 +1185,7 @@ agtermctl keymap list --json \
 ```
 
 If those disagree, the keymap is fine and the menu is stale or the chord was taken: SwiftUI rebuilds the
-menu only on the next app activation, so switch away and back before concluding anything, and relaunch if
+menu lazily (on activation or a key press), so switch away and back before concluding anything, and relaunch if
 it persists.
 
 A menu entry with `"enabled": false` holds the chord but is inert — AppKit consumes the key and fires

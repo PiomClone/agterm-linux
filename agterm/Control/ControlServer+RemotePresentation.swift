@@ -111,17 +111,18 @@ extension ControlServer {
         }
     }
 
-    private func startRemoteTick() {
+    func startRemoteTick() {
         guard remoteTick == nil else { return }
         remoteTick = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self, !Task.isCancelled else { return }
-                guard !self.remoteClients.isEmpty else {
+                guard !self.remoteClients.isEmpty || !RemoteReconnectBook.shared.isEmpty else {
                     self.remoteTick = nil
                     return
                 }
                 for client in self.remoteClients.values { client.tick() }
+                self.tickReconnects()
             }
         }
     }
@@ -142,7 +143,8 @@ extension ControlServer {
         let spec = HudSpec(message: hud.spec.message, detail: hud.spec.detail, spinner: hud.spec.spinner,
                            backgroundColor: hud.spec.backgroundColor, textColor: hud.spec.textColor,
                            sizePercent: hud.spec.sizePercent, position: hud.spec.position,
-                           hideAfter: hud.remaining, markdown: hud.spec.markdown, fontSize: hud.spec.fontSize)
+                           hideAfter: hud.remaining, markdown: hud.spec.markdown, fontSize: hud.spec.fontSize,
+                           sticky: hud.spec.sticky, frame: hud.spec.frame)
         // resolved the same way for an open and an update: `hud.update` accepts a pane the deck does not
         // lay out, which would move a panel already shown session-wide onto a hidden pane and unmount it
         let pane = store.localPane(hud.pane, in: session).flatMap { session.rendersPane($0) ? $0 : nil }

@@ -11,7 +11,12 @@ import agtermCore
 /// `{"ok":false}` response (which is a valid decoded `ControlResponse`).
 struct SocketClientError: Error, CustomStringConvertible {
     let description: String
-    init(_ description: String) { self.description = description }
+    /// The errno of a failed `connect`, nil for every other failure.
+    let connectErrno: Int32?
+    init(_ description: String, connectErrno: Int32? = nil) {
+        self.description = description
+        self.connectErrno = connectErrno
+    }
 }
 
 /// A server response beside the bytes it arrived as. `--json` prints `raw` unchanged, so a field this
@@ -105,7 +110,8 @@ struct SocketClient {
             let failure = errno
             let message = String(cString: strerror(failure))
             close(fd)
-            throw SocketClientError("connect(\(path)) failed: \(message) — \(Self.hint(forConnect: failure, path: path))")
+            throw SocketClientError("connect(\(path)) failed: \(message) — \(Self.hint(forConnect: failure, path: path))",
+                                    connectErrno: failure)
         }
         return fd
     }
@@ -237,6 +243,15 @@ struct SocketClient {
         case .picked, .custom: .success
         case .pending: .failure
         case .cancelled: ExitCode(rawValue: 2)
+        }
+    }
+
+    /// pageExitCode matches pick: 0 answered, 2 dismissed; a one-shot read of a pending page is a failure.
+    static func pageExitCode(for outcome: ControlHtmlPageOutcomeState) -> ExitCode {
+        switch outcome {
+        case .submitted: .success
+        case .pending: .failure
+        case .dismissed: ExitCode(rawValue: 2)
         }
     }
 
@@ -382,7 +397,8 @@ struct SocketClient {
             owner = "\(shortID(sessionID)) \(path)\(pane)\(windowID)"
         }
         let state = entry.windowState.map { "\(entry.state) [\($0) window]" } ?? entry.state
-        return "\(entry.daemon)  \(state)  \(entry.observation)  \(clients)  \(owner)"
+        let observation = entry.outdated == true ? "\(entry.observation) outdated" : entry.observation
+        return "\(entry.daemon)  \(state)  \(observation)  \(clients)  \(owner)"
     }
 
     /// The prefix a caller pastes into `--target`/`--window`. Eight hex digits is not GUARANTEED unique,
@@ -444,12 +460,13 @@ struct SocketClient {
             let mark = action.overridden == true ? "*" : " "
             let name = action.action.padding(toLength: max(width, action.action.count), withPad: " ", startingAt: 0)
             let binds = ((action.chord.map { [$0] } ?? []) + (action.alternates ?? [])).joined(separator: "|")
-            lines.append("  \(mark) \(name)  \(binds.isEmpty ? "-" : binds)")
+            lines.append("  \(mark) \(name)  \(binds.isEmpty ? "-" : binds)\(action.repeats == true ? "  --repeat" : "")")
         }
         if !keymap.commands.isEmpty {
             lines.append(contentsOf: ["", "commands:"])
             lines.append(contentsOf: keymap.commands.map { command in
                 var row = "    \(command.name)  \(command.shortcut ?? "(palette only)")"
+                if command.repeats { row += "  --repeat" }
                 if command.errorHud {
                     row += "  --error-hud --error-position \(command.errorPosition.rawValue)"
                     if let pane = command.errorPane { row += " --error-pane \(pane.rawValue)" }

@@ -79,6 +79,26 @@ final class ControlServerRemotePresentationTests: XCTestCase {
         XCTAssertTrue(body(of: fix.session).contains("\u{1B}[1mdone\u{1B}[22m"))
     }
 
+    func testAMirroredHudKeepsStickyAndNoFrameOnOpenAndUpdate() throws {
+        let fix = try fixture()
+        let spec = HudSpec(message: "caption", sizePercent: 100, position: .topCenter, sticky: true, frame: false)
+
+        fix.server.showRemoteHud(PresentationHud(spec: spec, pane: nil, generation: 1, remaining: nil),
+                                 forSession: fix.session.id)
+
+        XCTAssertEqual(fix.session.hudSpec?.sticky, true)
+        XCTAssertEqual(fix.session.hudSpec?.frame, false)
+        XCTAssertEqual(fix.session.overlaySizePercent, 100)
+
+        let update = HudSpec(message: "next", sizePercent: 100, position: .topCenter, sticky: true, frame: false)
+        fix.server.showRemoteHud(PresentationHud(spec: update, pane: nil, generation: 2, remaining: nil),
+                                 forSession: fix.session.id)
+
+        XCTAssertEqual(fix.session.hudSpec?.message, "next")
+        XCTAssertEqual(fix.session.hudSpec?.sticky, true)
+        XCTAssertEqual(fix.session.hudSpec?.frame, false)
+    }
+
     func testAnOriginReopenAtAnotherFontRecreatesTheReplicaAtIt() throws {
         let fix = try fixture()
         fix.server.showRemoteHud(PresentationHud(spec: HudSpec(message: "a", hideAfter: 600, fontSize: 12), pane: nil,
@@ -564,6 +584,11 @@ final class ControlServerRemotePresentationTests: XCTestCase {
     func testAnAskAndAnOverlayJobHandedToTheViewerCompleteOnTheOrigin() throws {
         let pair = try bridgedPair()
         let (server, origin, viewer) = (pair.server, pair.origin, pair.viewer)
+        let attachment = ZmxLeadAttachment(claim: false)
+        ZmxLeadBook.shared.begin(attachment, pane: origin.paneIdentity)
+        let notice = try XCTUnwrap(ZmxLeadNotice(title: "zmx-role;\(attachment.nonce):follower:1"))
+        _ = ZmxLeadBook.shared.apply(notice, pane: origin.paneIdentity)
+        defer { ZmxLeadBook.shared.forget(pane: origin.paneIdentity) }
         let ask = PendingAsk(id: UUID().uuidString, title: "deploy?",
                              buttons: [ControlAskButton(id: "yes", label: "Yes"), ControlAskButton(id: "no", label: "No")])
 

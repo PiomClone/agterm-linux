@@ -35,6 +35,16 @@ struct ConfigPathsTests {
         #expect(ConfigPaths.hooksPath(configDirectory: dir).path == "/Users/test/.config/agterm/hooks.conf")
     }
 
+    @Test(arguments: [
+        ("/custom/dir", nil, "/custom/dir/remotes.conf"),
+        (nil, "/tmp/agt-state", "/tmp/agt-state/config/remotes.conf"),
+        (nil, nil, "/Users/test/.config/agterm/remotes.conf"),
+    ] as [(String?, String?, String)])
+    func remotesPathFollowsTheResolvedConfigDirectory(setting: String?, stateDir: String?, expected: String) {
+        let dir = ConfigPaths.configDirectory(setting: setting, stateDir: stateDir, home: URL(fileURLWithPath: "/Users/test"))
+        #expect(ConfigPaths.remotesPath(configDirectory: dir).path == expected)
+    }
+
     @Test func starterHooksConfIsCommentedListsKindsAndParsesToNothing() {
         let starter = ConfigPaths.starterHooksConf()
         #expect(starter.contains("on <kind> <shell...>"))
@@ -58,8 +68,8 @@ struct ConfigPathsTests {
     @Test func starterKeymapConfIsCommentedAndListsActions() {
         let starter = ConfigPaths.starterKeymapConf()
         #expect(starter.contains("agterm keymap — a kitty-flavored config"))
-        #expect(starter.contains("map <chord> <action>"))
-        #expect(starter.contains("command \"<name>\" [chord] <shell...>"))
+        #expect(starter.contains("map <chord> [--repeat] <action>"))
+        #expect(starter.contains("command \"<name>\" [chord] [--repeat] <shell...>"))
         #expect(starter.contains("single chord OR a leader like `ctrl+a>g`"))
         #expect(starter.contains("command \"Open in Zed\"  cmd+shift+e  open -a Zed \"$AGT_SESSION_PWD\""))
         #expect(starter.contains("command \"Lazygit\"      ctrl+a>g     agtermctl session overlay open 'zsh -lc lazygit' --target \"$AGT_SESSION_ID\" --socket \"$AGT_SOCKET\""))

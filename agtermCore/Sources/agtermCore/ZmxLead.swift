@@ -148,7 +148,7 @@ public final class ZmxLeadBook {
     /// to learn that a fresh attach replaced the surface.
     public private(set) var attachments = 0
 
-    public init() {}
+    init() {}
 
     /// Starts over for `pane`: reports of its previous attachment no longer match and are dropped.
     public func begin(_ attachment: ZmxLeadAttachment, pane: UUID, reattaching: Bool = false) {
@@ -173,6 +173,12 @@ public final class ZmxLeadBook {
 }
 
 extension Session {
+    /// Remote presentation requires the target pane, or every existing pane, to follow on this Mac.
+    func followsRemotely(paneIdentity: UUID?) -> Bool {
+        let panes = paneIdentity.map { [$0] } ?? ([self.paneIdentity] + [splitPaneIdentity].compactMap { $0 })
+        return panes.allSatisfy { ZmxLeadBook.shared.role(pane: $0) == .follower }
+    }
+
     /// The identity of the pane behind a surface slot, nil for the ephemeral ones, which have no daemon.
     public func paneIdentity(for surface: TerminalZoomSurface) -> UUID? {
         switch surface {

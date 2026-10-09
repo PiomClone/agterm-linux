@@ -1,5 +1,115 @@
 # Changelog
 
+## v0.36.0 - 2026-10-09
+
+### New Features
+
+- **Open terminal links in a session overlay.** Settings ▸ General ▸ Open links in chooses where a command-clicked web link opens: the browser, still the default, or a full web overlay over its session with JavaScript, navigation buttons and saved logins. `agtermctl browser links [browser|overlay]` sets or prints it, and `tree` reports `linkOpenMode`. A link still opens in the browser when it sits in a HUD, a program overlay or the quick terminal, when the session's overlay slot is taken or its window has a zoomed terminal, and for plain http to a qualified host name outside `.local`. `session overlay open --url URL --browse` lets a URL page follow links, forms and redirects to other sites, and reads back as `htmlOverlays[].browse` #708 @umputun
+- **Attach Remote from the File menu.** `remotes.conf` in the config directory lists one remote per line as `destination [label...]`, and File ▸ Attach Remote… attaches a session from one of them with no custom command. With several remotes it asks which Mac first, then shows the session picker. A HUD over the starting session shows the ssh waits and a failure. `attach_remote` is a built-in keymap action on ⌘⇧R, in the command palette too. A keymap that already binds that chord keeps it. The file is watched, so an edit updates the menu without a reload #710 @umputun
+- **Sticky and frameless HUD panels.** `session hud --sticky` puts the panel flush against the edge or corner `--position` names and lets `--size-percent` reach 100 there. `--no-frame` drops the border, the rounded corners and the blank row above and below the text. Together they make a caption pinned to an edge. Both read back as `hud.sticky` and `hud.frame` #709 @umputun
+- **Links in a markdown HUD.** A `[label](url)` link in `session hud --markdown` renders as its underlined label and opens on command-click, the same gesture as a link in the terminal. Web, mail and ftp links open, a local `file://` link is revealed in Finder. The link used to show its label only #707 @umputun
+- `agtermctl clipboard set [TEXT]` copies text, or stdin when there is no argument, to the clipboard of every terminal showing the pane it runs in. In a session attached from another Mac `pbcopy` fills the clipboard of the Mac the program runs on; this one reaches the Mac you sit at. It needs a main or split pane started under Live sessions, and each terminal applies its own `clipboard-write` setting #722 @umputun
+- the flagged view gets a third layout, `plain`: the flat list with the session name alone, without the `: workspace` suffix. It is "Flat list, names only" in Settings ▸ General ▸ Flagged view layout and `agtermctl sidebar flagged-layout plain` from the CLI. `flat` stays the default, and `flagged-layout toggle` still switches between `tree` and `flat` #718 @umputun
+- a page opened with `--js` closes its overlay when it calls `window.close()`, and `session overlay result --page` reports `dismissed`. A URL page had no way to end itself. **Behavior change:** such a page can dismiss its overlay without a prompt #704 @umputun #702
+
+### Improved
+
+- `session restart (--pane-id ID | --pane left|right)` with no `--command` runs the pane's foreground program again, in the directory it is running in. It is refused with nothing changed when a shell holds the pane, when the program cannot be read (`sudo`, `top`) or when it is listed in `restore-denylist.conf`. Environment assignments, redirections and the rest of a pipeline are not replayed. The reply carries the argv as `restart.replayedArgv`. **Behavior change:** the call without `--command` used to fail with `session.restart requires a command` #701 @umputun
+- a HUD keeps its height when the window grows, and a markdown panel on a narrowed pane gains the wrapped row where it used to cut text with `… N more`. Markdown wraps at the panel's own width; it used to wrap at 60 columns in a narrower pane and cut each row #707 #709 @umputun
+
+### Bug Fixes
+
+- a Claude Code session read `active` for about six seconds after a permission prompt opened, and never turned `blocked` while keys were pressed in the prompt. The installed hooks now set `blocked` as the prompt opens, and Esc or Ctrl-C in the prompt clears it when Status reset is On Enter. Re-run Help ▸ Install Agent Status Hooks… to update an existing install #721 @umputun #720
+- with several event subscribers a short stall in the app made the control socket refuse connections, so status hooks and scripts failed with `Connection refused`. The socket now queues up to 128 waiting clients, where it queued 8 #717 @p4elkin #715
+- `agtermctl events` exited on a refused connection and lost every event emitted until its restart. Once it holds a cursor it retries with a backoff from 250 ms to 4 s and reads on from the same cursor, and exits after about 30 seconds of refusals #716 @p4elkin #715
+- ctrl+j and ctrl+k did not move the selection in the palettes and `agtermctl pick` on a non-Latin keyboard layout such as Cyrillic #705 @umputun
+- a custom command started in a session whose directory was removed failed with `The file "name" doesn't exist.` It now says `session directory <path> no longer exists` 312987af @umputun
+- the sidebar's remote icon stayed a crossed-out cloud after the connection to the other Mac came up #710 @umputun
+- a custom `window-padding-y` could cut HUD text, and a `config-file` include that restated a key outranked a session background or a HUD's font size #709 @umputun
+
+## v0.35.1 - 2026-10-05
+
+### Improved
+
+- **Restart the program in one pane.** `session restart --command LINE (--pane-id ID | --pane left|right)` ends one Live pane's shell and its foreground program, then starts a new login shell in the same pane that runs LINE and stays interactive. The pane keeps its place, its stable id and its `AGTERM_*` environment, and nothing is typed into it. The reply carries the old and new shell pids. It works on a hidden split, in a background window and with the display asleep. Non-live, remote and scratch panes are refused #699 @umputun
+
+### Bug Fixes
+
+- the command a Live pane was created with (`session new --command`) kept running after the pane or its session was closed. Ending a pane's shell now sends a hangup to its foreground job, the way closing a terminal does. Background jobs, including nohup and disowned ones, are left alone #699 @umputun
+
+## v0.35.0 - 2026-10-04
+
+### New Features
+
+- **Address a pane by its stable id.** `session type` and `surface cursor` take `--pane-id`, the token a shell sees as `$AGTERM_PANE_ID`, and `tree --json` lists it as `surfaces[].paneID`. A script can read a pane, check its caret and type into it by that id, and the id keeps naming the same terminal after `session swap` or a split-pane promotion. `session text` and `session type` report the pane they acted on as `result.pane`. **Behavior change:** `session text --pane-id` with an unknown id and no `--pane` used to read the on-screen pane and answer ok. It now fails with `unknown pane id: <id>`, as `session type` and `surface cursor` do #698 @umputun
+- **OpenCode 2 agent status.** Help ▸ Install Agent Status Hooks installs a separate plugin for OpenCode 2, by default at `~/.config/opencode/plugins/agterm-v2/tui.js` with `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME` honored, and the OpenCode 1 plugin stays as it was. The installer detects the major version; when it cannot, it offers a choice if an OpenCode config exists and skips otherwise. Each client reports its selected session and that session's subagents to its own pane #658 @LerikP #696 @umputun #637
+- **Saved logins for URL overlays.** `session overlay open --url URL --persistent` keeps cookies, `localStorage` and IndexedDB in one saved store shared by every persistent page, so a login survives closing the overlay and restarting the app. `browser clear` removes the saved data and is refused while a persistent page is open. `tree` reads `persistent` back on each `htmlOverlays` node. A login that leaves the page's origin (OAuth, SSO, a popup) still fails #689 @umputun
+- **`--repeat` for leader sequences**, like tmux `bind -r`. With `map ctrl+a>ctrl+l --repeat next_session` and `map ctrl+a>ctrl+h --repeat previous_session`, ⌃A ⌃L ⌃L ⌃H walks two sessions down and one back, and holding the tail repeats it. Any other key ends the window and is handled as usual. `keymap list` reports `repeats` #666 @dderg #682 @umputun
+- **Page titles and chromeless pages in HTML overlays.** The strip over a page shows its `<title>` dimmed after the file name or URL origin. `session overlay open --html FILE --chromeless` hides the strip, so a small page can look like a native view; it is refused with `--url` and `--navigation`. A `--js` page that cancels every keydown can no longer swallow ⌘W #678 @umputun
+- `keymap run NAME [--target T] [--window W]` runs a custom command from `keymap.conf` against the addressed session, as the palette does for the active one. The reply means the process started #694 @umputun
+- `zmx screen NAME [--all|--lines N]` reads the screen of a Live session's daemon by the name `zmx list` prints, including one whose window is closed. It attaches nothing and changes no pane's size #694 @umputun
+- a `session.selected` event fires on every selection change and carries the session that lost the selection as `previous` #694 @umputun
+- ctrl+j and ctrl+k move the selection down and up in the palettes and in `agtermctl pick`, next to the arrow keys, and ctrl+k no longer deletes to the end of the query there #695 @umputun
+
+### Improved
+
+- a remote pane whose network goes away ends within about 15 seconds and shows the reconnect bar, where it used to freeze until the TCP timeout. The attach adds `ServerAliveInterval=5` and `ServerAliveCountMax=2` unless the user's ssh config sets a nonzero interval. A pane whose ssh joins an existing `ControlMaster` connection keeps that connection's settings #683 @wildsurfer
+- panes waiting to reconnect and dropped presentation streams retry at once when the Mac wakes or the network returns, and their backoff starts over. A Mac that slept all night no longer waits up to five minutes per pane #687 @wildsurfer
+- a pane waiting to reconnect shows why its last attempt failed, as one line along its bottom edge, and `tree` carries the same reason and the retry count as `reconnect` on the surface node. A refused key or a changed host key no longer looks like an offline host #694 @umputun
+
+### Bug Fixes
+
+- `session type` and `quick type` with a trailing newline could leave a line of about 100 characters or more sitting unsubmitted in Claude Code, which read the Return as part of a paste. The final Return now follows the text after 10 ms. Returns inside a multi-line payload are not spaced, and one very long line can still be read as a paste #681 @umputun #679
+- a `map` onto a stock macOS menu shortcut could list the action as bound while the stock command fired: `map cmd+opt+w focus_workspace` asked to close the window. A built-in now takes the shortcut from the stock item and gives it back when released #680 @umputun
+- halving a wide window in one step left one pane of a left/right split at zero width. The stored ratio is now applied again when the split's length changes #692 @umputun #691
+- an HTML overlay page that was not on screen took file drops aimed at the pane under the cursor, and the drop was lost #685 @umputun #677
+- a dashboard cell showed the shell under a full session overlay or the pane's own overlay. It now shows a cover naming the page or program that hides the pane #690 @umputun #688
+- the Codex status hook reported a finished turn as blocked when its final message quoted a footer hint such as `"? for shortcuts"` #684 @umputun
+- a minimized, ordered-out or app-hidden window kept the GPU surfaces of its panes. They are released while the window is hidden and return when it is shown #694 @umputun
+- after a Live restore of an idle Claude Code session a black block sat between the logo and its title. A daemon already running keeps the old behavior until it is recreated #694 @umputun
+- a failed `windows.json` write could drop a new window from the next restore after a crash. The write is retried on the next successful save and at exit, and `tree` reports `indexUnsaved` while it is outstanding #694 @umputun
+- with auto-hide of inactive sidebars on, a window restored by Reopen from the quick terminal over another app came up with its sidebar collapsed #694 @umputun
+- an overlay program ran `~/.profile` first when the `sh` on PATH is dash or zsh, because the wrapper started as a login shell. It now runs `/bin/sh` as a non-login shell #694 @umputun
+
+## v0.34.0 - 2026-09-30
+
+### New Features
+
+- **HTML pages that drive agterm.** A page opened with `session overlay open --html` can run control commands. A button or form tagged `data-agterm="<command>"` sends that request with the page's JavaScript off, and a `--js` page also gets `agterm.request(cmd, {target, args})`, which resolves with the reply. A command left without a target acts on the page's own session, window or pane. A page can also answer the script that opened it: `session.overlay.submit` records a value and closes the page, and `session overlay open --html FILE --block` waits and prints the outcome, exiting 0 when answered and 2 when the page closes unanswered. `session overlay result --page ID` reads an outcome after the page is gone, and `session overlay submit --value TEXT` answers a page from the CLI. The open reply carries `pageID`, which `tree` reports as `htmlOverlays[].id`. URL pages and frames get no bridge, and commands that stream are refused #672 @umputun
+- **Remote panes reconnect after ssh loses the connection.** A pane attached with `zmx attach` used to end for good when ssh exited 255. It now keeps its last screen, shows a bar naming the host, and attaches again once the host answers, retried on the stream's backoff. Any key retries at once and ⌘W still closes the session. A changed host key or a removed key also exits 255, so such a pane keeps saying it is reconnecting without showing ssh's reason #655 @wildsurfer
+- Settings ▸ General ▸ Sessions gains **New sessions are added**: at the end of the workspace, as before, or right after the current session. It covers New Session from the menu, palette, keymap, Dock, sidebar footer and a workspace row's New Session and +. Open Directory, folder drops and `open -a` keep appending #665 @airs0urce
+
+### Bug Fixes
+
+- ⌘+, ⌘- and ⌘0 over an HTML overlay resized the terminal hidden under the page. They now zoom the page, and so does `font inc|dec|reset` when a page covers the addressed terminal. The zoom is one app-wide value that persists across pages and reads back as `tree`'s `htmlOverlays[].zoom` #670 @umputun
+- a Control-click on a sidebar row selected or toggled it instead of opening its context menu, and on a workspace row's + it created a session. Both now open the row menu #669 @umputun #668
+- reloading an HTML overlay whose first load never finished did nothing, so a failed page stayed failed. Reload now loads the source again ec925f62 @umputun
+
+## v0.33.1 - 2026-09-28
+
+### Improved
+
+- **Show in Finder and Copy Link in HTML overlays.** With `--navigation`, a file page's bar gains Show in Finder, which reveals the currently displayed file in Finder, including a sibling page reached by navigation, and a URL page's bar gains Copy Link, which copies the current address with its query and fragment. `session overlay navigate finder` reveals the file from a script. Copy Link has no control command, since the socket never writes the clipboard; scripts read the current address from `tree`'s `htmlOverlays[].page` #663 @umputun
+- a new cookbook recipe, `html-doc-overlay`, gives Claude Code an `/agdoc` skill that builds a static HTML page about the issue, PR, plan, change or topic in hand from one of three templates and opens it in an overlay. The cookbook contribution rules now accept skill-only and README-only recipes, and the bundled agent skill asks for `--socket "$AGTERM_SOCKET"` when it is set and names `--window` for reading an HTML overlay back #662 @umputun
+
+## v0.33.0 - 2026-09-27
+
+### New Features
+
+- **HTML pages in overlays.** `session overlay open --html FILE` and `--url URL` show a generated report, chart or explainer, or a running dev server, in the session-wide, floating or per-pane overlay slots. A bar above the page names its file or origin and carries the close button, `--navigation` adds back, forward, reload and open in browser, and `overlay reload` and `overlay navigate back|forward|browser` drive it from the CLI. `tree` reads back the page metadata and load state. A page runs no JavaScript of its own unless opened with `--js`, a local file gets no file access beyond the directory `--cwd DIR` grants, and a browser open started by the page asks first. File pages follow the terminal theme through CSS variables for background, foreground and the 16 ANSI colors, and the bundled skill teaches agents to build explainers and reports on them. A page renders on the serving Mac, and opening one is refused while another Mac presents the session #659 @umputun
+
+### Improved
+
+- Ctrl-Tab and the recent and attention popovers read an attached session exactly like a local one, since it reports its cwd on the other Mac. Those rows now lead with the sidebar's cloud glyph and put the host ahead of the directory, e.g. `system · 192.168.1.33 · ~/.dot-files` #650 @umputun
+- **Reset Live Sessions** also selects panes whose zmx daemon predates the bundled zmx, such as daemons started before 0.32.0 that miss the attach-time lead claim. Live sessions keep their daemons through app updates, and the reset used to select only orphaned and app-attributed panes. The dialog, `zmx.reset`'s `outdated` count and an `outdated` flag on `zmx list` rows say which sessions that covers. As with any reset, running work in them stops #650 @umputun
+
+### Bug Fixes
+
+- a new session overlay or ask went to the attached Mac holding the presenter role even when the origin led the pane. After taking a pane's lead back on the origin, a `--block` overlay ran there but drew on the other Mac's screen, so nothing showed locally and the caller waited until a manual close. The handover now also requires the origin's pane to be a follower, and one already handed over stays where it is when the lead changes #661 @umputun
+- the Claude status hook silenced the pane's own agent when a compiled launcher started the real `claude` without `exec`, because every `claude` pid in the chain counted as a separate agent. A consecutive run of one agent name now counts once. Re-run **Help ▸ Install Agent Status Hooks** to pick it up #651 @TrevorBurnham #649
+- a remote session's pane showed nothing when ssh ended, never its `disconnected, exit N` line. libghostty runs a pane command through `exec`, which replaced the shell with ssh and dropped the rest of the wrapper #654 @wildsurfer
+- the `two-agent-chat` cookbook recipe refused every send to codex-cli 0.157, which draws two footer rows under its composer, and withheld the submit when the lower row was a right-aligned notice #656 3f066932 @umputun #652 #657
+
 ## v0.32.0 - 2026-09-24
 
 ### New Features

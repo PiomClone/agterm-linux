@@ -64,12 +64,19 @@ public struct PaneOverlay: Equatable, Sendable {
     public var wait: Bool
     /// Set on a viewer when the overlay shows a job running on its origin.
     public var replica: OverlayReplica?
+    /// html is the page this overlay shows instead of running `command`, which is then empty and never read.
+    public var html: HtmlOverlay?
 
     public init(command: String, cwd: String? = nil, backgroundColor: String? = nil, wait: Bool = false) {
         self.command = command
         self.cwd = cwd
         self.backgroundColor = backgroundColor
         self.wait = wait
+    }
+
+    public init(html: HtmlOverlay, backgroundColor: String? = nil) {
+        self.init(command: "", backgroundColor: backgroundColor)
+        self.html = html
     }
 }
 
@@ -281,11 +288,9 @@ public final class Session: Identifiable {
     /// is later shown, and the exit capture writes it back untouched until then.
     @ObservationIgnored public var pendingSplitForegroundCommand: [String]?
 
-    /// Whether the session-wide overlay slot is OCCUPIED, by either of its two occupants: a caller's PROGRAM
-    /// (`session.overlay.open`, which covers the session and owns first responder) or a passive HUD message
-    /// (`session.hud.open`, which covers nothing). Raw, so it answers only "occupied" — ask
-    /// `programOverlayActive` or `hudActive` for which, and never this, wherever the answer decides focus,
-    /// coverage, or input. Control-channel only and ephemeral; the detail pane shows and hides it.
+    /// overlayActive says the session-wide slot is occupied, by a covering program or page or by a passive HUD.
+    /// Where focus, coverage or input is decided, ask `coverOverlayActive`, `programOverlayActive` or
+    /// `hudActive` instead. Ephemeral and control-channel only.
     public var overlayActive: Bool = false
 
     /// The overlay's surface, created on open and torn down when its `overlayCommand` exits or the control
@@ -312,19 +317,26 @@ public final class Session: Identifiable {
     /// `session.overlay.result`; in-memory only.
     @ObservationIgnored public var overlayExitCode: Int?
 
+    /// htmlOverlay is the page the session-wide slot shows instead of a program; see `HtmlOverlay`.
+    public var htmlOverlay: HtmlOverlay?
+
     /// The percent of the pane an opaque framed panel occupies with the session still VISIBLE behind it; nil
     /// is the full-pane program overlay, which hides it and draws translucent. 1...100 for a floating PROGRAM
     /// overlay, which takes it on BOTH axes and is always centered; a HUD shares the field for its WIDTH
-    /// only, bounded by `HudLayout.clampSizePercent` and placed by its own `HudSpec.position`, and sizes its
-    /// height through `hudHeightPercent`. Cleared on close, never persisted.
+    /// only, bounded by `HudLayout.clampSizePercent(_:for:)` and placed by its own `HudSpec.position`, and
+    /// sizes its height through `hudHeightPoints`. Cleared on close, never persisted.
     public var overlaySizePercent: Int?
 
     /// The percent of the pane's HEIGHT a HUD panel occupies, measured from its message rather than set by
     /// the caller (`HudLayout.heightPercent`); nil for an empty slot and for a program overlay, which takes
     /// `overlaySizePercent` on both axes. A HUD is two or three lines of text, so sharing one percent across
-    /// both axes made every panel as tall as it was wide. Observed — the deck reads it to frame the panel.
-    /// Cleared with the rest of the HUD state, never persisted.
+    /// both axes made every panel as tall as it was wide. The read-back, and what the deck frames with
+    /// when no points were measured. Cleared with the rest of the HUD state, never persisted.
     public var hudHeightPercent: Int?
+
+    /// The height a HUD panel is laid out at, in points and already capped; nil over an unmeasured pane,
+    /// which falls back to `hudHeightPercent`. Cleared with the rest of the HUD state, never persisted.
+    public var hudHeightPoints: Double?
 
     /// hudFontSize is the point size the live HUD's surface was created at: the caller's `HudSpec.fontSize`
     /// or the session's size at open. Measuring reads it, so a session zoom after open cannot change the
@@ -475,6 +487,7 @@ public final class Session: Identifiable {
         hudPaneIdentity = nil
         hudFile = nil
         hudHeightPercent = nil
+        hudHeightPoints = nil
         hudFontSize = nil
         hudExpiresAt = nil
         hudResizedWidthPercent = nil
@@ -485,6 +498,8 @@ public final class Session: Identifiable {
 
     /// What this Mac keeps about a session attached from another one; nil for a local session.
     @ObservationIgnored public internal(set) var remotePresentation: RemotePresentationState?
+    /// remoteConnectionRevision changes with the connection, so an observer of `remoteConnection` is told.
+    var remoteConnectionRevision = 0
 
     /// Tells attached viewers the panel is gone. Set when the HUD is published, so a panel whose body was
     /// never written, and so never published, withdraws nothing.
@@ -493,9 +508,9 @@ public final class Session: Identifiable {
     /// When the app hides the published panel, nil for a persistent one.
     @ObservationIgnored var hudExpiresAt: Date?
 
-    /// The width an `overlay.resize` forced on the published panel, until the next open or update resolves
-    /// the size from its own spec. A viewer sizes from its own pane, so only a forced width travels.
-    @ObservationIgnored var hudResizedWidthPercent: Int?
+    /// The width an `overlay.resize` forced on the panel, until the next open or update resolves the size
+    /// from its own spec. A viewer sizes from its own pane, so only a forced width travels.
+    @ObservationIgnored public internal(set) var hudResizedWidthPercent: Int?
 
     /// Counts publications of the panel. Frame order is what keeps a stale close off a later panel; a
     /// viewer does not read this.
@@ -505,26 +520,20 @@ public final class Session: Identifiable {
     /// that drops a HUD already routes through that one method, which is why the hook hangs there.
     public var onHudDiscarded: (() -> Void)?
 
-    /// onHudGeometryChange tells the app the live HUD panel's measured size changed, so it can rewrite the
-    /// grid in the body header; `discardHudBody` clears it with the rest of the HUD state.
+    /// onHudGeometryChange tells the app the bounds the live HUD is laid out in, or its surface's grid,
+    /// changed, so it can measure the panel again; `discardHudBody` clears it with the rest of the HUD state.
     @ObservationIgnored public var onHudGeometryChange: (() -> Void)?
 
-    /// Whether the overlay slot holds a HUD rather than a caller's program. The one predicate separating the
-    /// two occupants, so the deck's passivity exemptions and the program-overlay questions below cannot
-    /// disagree about which is up.
+    /// hudActive says the slot holds a passive HUD; the one predicate separating it from the covers.
     public var hudActive: Bool { overlayActive && hudSpec != nil }
 
-    /// Whether the overlay slot runs a CALLER'S PROGRAM, either coverage variant. The deck's "a session-wide
-    /// cover is up" question: a program overlay owns first responder and mutes the panes under it, a HUD does
-    /// neither, so every passivity exemption reads this rather than the raw slot state.
-    public var programOverlayActive: Bool { overlayActive && !hudActive }
+    /// programOverlayActive: the slot runs a CALLER'S PROGRAM, either coverage variant, the terminal-surface
+    /// question. Neither a HUD nor a page counts; "a session-wide cover owns input" is `coverOverlayActive`.
+    public var programOverlayActive: Bool { overlayActive && !hudActive && htmlOverlay == nil }
 
-    /// Whether a FULL-coverage PROGRAM overlay is up: `overlayActive` with no size percent. It hides
-    /// everything beneath — the pane(s) AND a shown scratch — so its translucent background reveals the
-    /// window backing, never a covered surface: under window translucency every surface renders fully
-    /// transparent, so anything left visible below would bleed through. A floating (sized) overlay is not a
-    /// cover. `!hudActive` keeps it a question about a running program even if a HUD ever reaches the slot
-    /// without a size percent; a HUD covers nothing and must never hide the session behind it.
+    /// fullOverlayActive says a program or page covers the whole session, with no size percent. It hides the
+    /// panes and a shown scratch, since under window translucency anything left visible would bleed through.
+    /// A HUD never counts, whatever its size.
     public var fullOverlayActive: Bool { overlayActive && !hudActive && overlaySizePercent == nil }
 
     /// The left pane's overlay, covering that pane only and leaving the sibling live; nil means none is up,
@@ -630,6 +639,13 @@ public final class Session: Identifiable {
     public var subtitleDetail: String {
         if let title = focusedOscTitle?.trimmedOrNil, title != displayName { return title }
         return focusedCwd
+    }
+
+    /// `subtitleDetail` led by `remoteHost` for a session attached from another Mac. An attached session
+    /// reports its cwd on that Mac, so without the host its row reads exactly like a local one.
+    public var switcherDetail: String {
+        guard let remoteHost else { return subtitleDetail }
+        return "\(remoteHost) · \(subtitleDetail)"
     }
 
     /// The live `currentCwd` once a PWD report arrived, else `initialCwd`. Always the PRIMARY pane's, never
@@ -758,7 +774,8 @@ public final class Session: Identifiable {
     /// RETIRED overlay's command, cwd, and colors.
     public func dropUnrealizedPaneOverlays() {
         for pane in OverlayPane.allCases
-        where paneOverlay(pane) != nil && paneOverlaySurface(pane)?.isRealized != true && !paneOverlayHosted(pane) {
+        where paneOverlay(pane) != nil && !paneOverlayIsHtml(pane) && paneOverlaySurface(pane)?.isRealized != true
+            && !paneOverlayHosted(pane) {
             teardownPaneOverlay(pane)
         }
     }
@@ -778,6 +795,7 @@ public final class Session: Identifiable {
     /// the surface's store-capturing callbacks, breaking the store/session/surface/closure cycle.
     public func teardownPaneOverlay(_ pane: OverlayPane) {
         let replica = paneOverlay(pane)?.replica
+        HtmlOverlayReleases.shared.release(paneOverlay(pane)?.html)
         paneOverlaySurface(pane)?.teardown()
         setPaneOverlay(nil, pane: pane)
         setPaneOverlaySurface(nil, pane: pane)
@@ -799,7 +817,7 @@ public final class Session: Identifiable {
     }
 
     /// Frees BOTH pane overlays; the whole-session form of `teardownPaneOverlay(_:)`, called wherever the
-    /// session is discarded alongside the `overlaySurface?.teardown()` for the session-wide overlay.
+    /// session is discarded alongside `teardownOverlaySlot()` for the session-wide slot.
     public func teardownPaneOverlays() {
         OverlayPane.allCases.forEach { teardownPaneOverlay($0) }
     }
@@ -830,6 +848,21 @@ public final class Session: Identifiable {
         if splitSurface?.paneToken == token { return .right }
         if scratchSurface?.paneToken == token { return .scratch }
         return nil
+    }
+
+    /// PaneAddress is the outcome of resolving a command's `--pane-id` and `--pane` pair.
+    public enum PaneAddress: Equatable, Sendable {
+        /// pane is nil when neither selector was given and the command's own default applies.
+        case pane(StatusPane?)
+        case unknownToken(String)
+    }
+
+    /// paneAddress resolves `token` against the live slots, then falls back to `pane`. An empty token
+    /// counts as absent; an unknown one with no `pane` beside it is refused.
+    public func paneAddress(token: String?, pane: StatusPane?) -> PaneAddress {
+        guard let token, !token.isEmpty else { return .pane(pane) }
+        guard let resolved = paneRole(forToken: token) ?? pane else { return .unknownToken(token) }
+        return .pane(resolved)
     }
 
     /// Takes the pane's PENDING restore-command override, clearing it so a second surface for the same pane
@@ -910,6 +943,7 @@ public final class Session: Identifiable {
     /// helper would take first responder off the session the message is about — the deck's exemptions one
     /// layer down.
     public var topmostSurface: (any TerminalSurface)? {
+        if htmlOverlayActive { return nil }
         if programOverlayActive { return overlaySurface }
         if scratchActive { return scratchSurface }
         if let pane = focusedOverlayPane { return paneOverlaySurface(pane) }
@@ -922,7 +956,7 @@ public final class Session: Identifiable {
     /// for a covering pane overlay whose surface has not realized yet, leaving the retry to re-resolve.
     /// A HUD is no cover, so the requested pane stays reachable while one is up.
     public func focusTarget(wantSplit: Bool) -> (any TerminalSurface)? {
-        if programOverlayActive || scratchActive { return topmostSurface }
+        if coverOverlayActive || scratchActive { return topmostSurface }
         let pane: OverlayPane = wantSplit ? .right : .left
         if paneOverlay(pane) != nil { return paneOverlaySurface(pane) }
         return wantSplit ? splitSurface : surface
@@ -933,7 +967,7 @@ public final class Session: Identifiable {
     /// scratch, not the pane beneath. A program overlay routes via `topmostSurface`; this stays
     /// pane-vs-scratch, like `searchTarget`, and a HUD leaves the scratch on screen underneath it.
     public var onScreenSurface: (any TerminalSurface)? {
-        scratchActive && !programOverlayActive ? topmostSurface : activeSurface
+        scratchActive && !coverOverlayActive ? topmostSurface : activeSurface
     }
 
     /// The match counter for the search bar and `session.search`: empty before a query runs, `"no matches"` at
@@ -955,14 +989,5 @@ public final class Session: Identifiable {
         searchTotal = nil
         searchSelected = nil
         searchSurface = nil
-    }
-}
-
-extension String {
-    /// Trimmed of surrounding whitespace and newlines, nil if empty — the one normalizer for the
-    /// rename/displayName "blank after trim" rule.
-    var trimmedOrNil: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }

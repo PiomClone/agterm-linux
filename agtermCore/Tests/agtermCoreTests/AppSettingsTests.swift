@@ -506,6 +506,32 @@ struct AppSettingsTests {
         #expect(legacy.effectiveFlaggedViewLayout == .flat)
     }
 
+    @Test func linkOpenModeDefaultsToBrowserResolvesTolerantlyAndIsNotAGhosttyKey() throws {
+        #expect(AppSettings().effectiveLinkOpenMode == .browser)
+        #expect(AppSettings(linkOpenMode: "overlay").ghosttyConfigLines() == AppSettings().ghosttyConfigLines())
+        for mode in LinkOpenMode.allCases {
+            let settings = AppSettings(linkOpenMode: mode.rawValue)
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            #expect(decoded.linkOpenMode == mode.rawValue)
+            #expect(decoded.effectiveLinkOpenMode == mode)
+        }
+        #expect(AppSettings(linkOpenMode: "tab").effectiveLinkOpenMode == .browser)
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data(#"{ "fontSize": 16 }"#.utf8))
+        #expect(legacy.linkOpenMode == nil)
+        #expect(legacy.effectiveLinkOpenMode == .browser)
+    }
+
+    @Test func htmlOverlayZoomDefaultsToActualSizeRoundTripsAndIsNotAGhosttyKey() throws {
+        #expect(AppSettings().effectiveHtmlOverlayZoom == 1)
+        #expect(AppSettings(htmlOverlayZoom: 1.5).ghosttyConfigLines() == AppSettings().ghosttyConfigLines())
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(AppSettings(htmlOverlayZoom: 1.25)))
+        #expect(decoded.htmlOverlayZoom == 1.25)
+        #expect(decoded.effectiveHtmlOverlayZoom == 1.25)
+        #expect(AppSettings(htmlOverlayZoom: 40).effectiveHtmlOverlayZoom == 3)
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data(#"{ "fontSize": 16 }"#.utf8))
+        #expect(legacy.effectiveHtmlOverlayZoom == 1)
+    }
+
     @Test func rightClickPasteDefaultsOnAndIsAGhosttyKey() throws {
         // UNLIKE the app-level flags this IS a ghostty key — the toggle owns it, always emitted.
         #expect(AppSettings().rightClickPaste == nil)
@@ -594,6 +620,17 @@ struct AppSettingsTests {
             .resolveNewSessionCwd(currentSessionCwd: "/proj", home: "/home") == "/home")
         #expect(AppSettings(newSessionDirectory: "custom", newSessionCustomDirectory: "")
             .resolveNewSessionCwd(currentSessionCwd: "/proj", home: "/home") == "/home")
+    }
+
+    @Test func newSessionPlacementRoundTripsAndDefaultsToEnd() throws {
+        let original = AppSettings(newSessionPlacement: "afterCurrent")
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(original))
+        #expect(decoded == original)
+        #expect(decoded.effectiveNewSessionPlacement == .afterCurrent)
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data(#"{ "fontSize": 16 }"#.utf8))
+        #expect(legacy.effectiveNewSessionPlacement == .end)
+        #expect(AppSettings(newSessionPlacement: "future").effectiveNewSessionPlacement == .end)
+        #expect(original.ghosttyConfigLines() == AppSettings().ghosttyConfigLines())
     }
 
     @Test func autoFollowAttentionUnknownDecodesToOff() {

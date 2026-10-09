@@ -12,8 +12,17 @@ extension ControlServer: ControlActions {
         case .failure(let response):
             return response
         case .success(let (store, id)):
-            return await injectText(options.text, into: id, store: store, select: options.select,
-                                    pane: options.pane)
+            let session = store.session(withID: id)
+            let pane: StatusPane?
+            switch session?.paneAddress(token: options.paneID, pane: options.pane) ?? .pane(options.pane) {
+            case .unknownToken(let token): return Self.unknownPaneID(token)
+            case .pane(let resolved): pane = resolved
+            }
+            let token = options.paneID.flatMap { session?.paneRole(forToken: $0) == nil ? nil : $0 }
+            var response = await injectText(options.text, into: id, store: store, select: options.select,
+                                            pane: pane, token: token)
+            if response.ok, response.result?.pane == nil { response.result?.pane = (pane ?? .left).rawValue }
+            return response
         }
     }
 
@@ -28,6 +37,9 @@ extension ControlServer: ControlActions {
     func openSessionOverlay(_ target: String?, window: String?,
                             options: ControlSessionOverlayOpenOptions) -> ControlResponse {
         resolver.resolveSession(target, window: window) { store, id in
+            if let page = options.page {
+                return openHtmlOverlay(in: store, sessionID: id, page: page, options: options)
+            }
             if let response = openRemoteOverlay(in: store, sessionID: id, options: options) { return response }
             if store.session(withID: id)?.remoteOverlays.slot(options.pane) != nil {
                 return ControlResponse(ok: false, error: options.pane == nil ? "overlay already open" : PaneOverlayError.alreadyOpen)
@@ -49,6 +61,79 @@ extension ControlServer: ControlActions {
             // needs an implicit select — this is `--follow`, a no-op when the target is already active.
             if options.follow {
                 store.selectSession(id)
+            }
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+        }
+    }
+
+    /// openLinkOverlay shows a clicked link as a browsing page over its session and says whether it did.
+    /// A HUD on the session and a zoomed terminal in its window both refuse it up front: the store would
+    /// accept the page, closing the HUD for good in one case and showing nothing in the other.
+    func openLinkOverlay(_ url: URL, session id: UUID) -> Bool {
+        guard let session = library.store(forSession: id)?.session(withID: id), !session.hudActive else { return false }
+        if let windowID = library.windowID(forSession: id),
+           TerminalZoomRegistry.shared.controller(for: windowID)?.target != nil { return false }
+        let options = ControlSessionOverlayOpenOptions(command: "", cwd: nil, wait: false, sizePercent: nil,
+                                                       backgroundColor: nil, page: .url(url), navigation: true,
+                                                       javascript: true, persistent: true, browse: true)
+        return openSessionOverlay(id.uuidString, window: nil, options: options).ok
+    }
+
+    // a page never takes the remote program-job path: the store refuses it while a presenter owns the session
+    private func openHtmlOverlay(in store: AppStore, sessionID id: UUID, page: HtmlSource,
+                                 options: ControlSessionOverlayOpenOptions) -> ControlResponse {
+        if store.session(withID: id)?.remoteOverlays.slot(options.pane) != nil {
+            return ControlResponse(ok: false, error: options.pane == nil ? "overlay already open" : PaneOverlayError.alreadyOpen)
+        }
+        if options.persistent, let failure = HtmlOverlayRegistry.shared.persistentStoreFailure() {
+            return ControlResponse(ok: false, error: "session.overlay.open: \(failure)")
+        }
+        let overlay = HtmlOverlay(source: page, navigation: options.navigation, javascript: options.javascript,
+                                  chromeless: options.chromeless, persistent: options.persistent, browse: options.browse)
+        if let failure = store.openHtmlOverlay(id, pane: options.pane, overlay: overlay,
+                                               sizePercent: options.sizePercent, backgroundColor: options.backgroundColor) {
+            return ControlResponse(ok: false, error: failure.message(pane: options.pane))
+        }
+        // a page exists only once a view asks for it; built here, an accepted persistent page already
+        // counts as open to browser.clear, which would otherwise leave it failed for good
+        if options.persistent {
+            _ = HtmlOverlayRegistry.shared.page(for: overlay, store: store, backgroundColor: options.backgroundColor)
+        }
+        if options.follow { store.selectSession(id) }
+        return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, pageID: overlay.id.uuidString))
+    }
+
+    func submitSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?, value: String) -> ControlResponse {
+        resolver.resolveSession(target, window: window) { store, id in
+            if let failure = store.submitHtmlOverlay(id, pane: pane, value: value) {
+                return ControlResponse(ok: false, error: failure.message)
+            }
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+        }
+    }
+
+    func reloadSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?, current: Bool) -> ControlResponse {
+        resolver.resolveSession(target, window: window) { store, id in
+            if let failure = HtmlOverlayRegistry.shared.reload(sessionID: id, pane: pane,
+                                                               target: current ? .current : .original, store: store) {
+                return ControlResponse(ok: false, error: failure.message)
+            }
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+        }
+    }
+
+    func navigateSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?,
+                                navigation: HtmlNavigation) -> ControlResponse {
+        resolver.resolveSession(target, window: window) { store, id in
+            if let failure = store.htmlOverlayCommandFailure(id, pane: pane) {
+                return ControlResponse(ok: false, error: failure.message)
+            }
+            let session = store.session(withID: id)
+            guard let page = pane.map({ session?.paneOverlay($0)?.html }) ?? session?.htmlOverlay else {
+                return ControlResponse(ok: false, error: OverlayHtmlError.notHtml)
+            }
+            if let error = HtmlOverlayRegistry.shared.navigate(page.id, navigation) {
+                return ControlResponse(ok: false, error: error)
             }
             return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
         }
@@ -76,12 +161,9 @@ extension ControlServer: ControlActions {
     }
 
     /// A HUD resizes through the same slot and field as any floating panel, but never to FULL, which would
-    /// make the message cover the session it is about. The percent reaches its WIDTH only — its height stays
-    /// measured from the message, and the text wraps at `HudLayout.maxColumns` rather than at the panel, so
-    /// a resize cannot change how many rows it needs. A resized HUD also gets its body rewritten: the helper
-    /// centers on the grid in that file's header, so a new panel with the old header would paint the message
-    /// off-center until the next `session.hud.update`. A refused rewrite puts the size back rather than
-    /// leave the two disagreeing.
+    /// make the message cover the session it is about. The percent sets its WIDTH; `refreshHud` then
+    /// measures the height that width needs and rewrites the body, since the helper centers on the grid in
+    /// that file's header. A refused rewrite puts the size back rather than leave the two disagreeing.
     func resizeSessionOverlay(_ target: String?, window: String?, sizePercent: Int?) -> ControlResponse {
         resolver.resolveSession(target, window: window) { store, id in
             if let resized = store.resizeRemoteOverlay(id, sizePercent: sizePercent) {
@@ -93,14 +175,15 @@ extension ControlServer: ControlActions {
             if sizePercent == nil, hud {
                 return ControlResponse(ok: false, error: OverlayHudError.fullResize)
             }
-            let previousSize = session?.overlaySizePercent
+            let previousSize = session?.hudPanelSize
+            let previousForcedWidth = session?.hudResizedWidthPercent
             guard store.resizeOverlay(id, sizePercent: sizePercent) else {
                 return ControlResponse(ok: false, error: "no overlay")
             }
-            if hud, let session,
-               !self.writeHudBody(session, pane: self.paneMetrics(for: session, pane: session.hudTargetPane,
-                                                                  fontSize: self.liveHudFontSize(session))) {
-                store.resizeOverlay(id, sizePercent: previousSize)
+            if hud, let session, !self.refreshHud(session) {
+                if let previousSize {
+                    store.setHudSize(id, size: previousSize, forcedWidthPercent: previousForcedWidth)
+                }
                 return ControlResponse(ok: false, error: OverlayHudError.writeFailed)
             }
             if hud { store.publishHudResize(forSession: id, now: self.hudClock()) }
@@ -115,6 +198,9 @@ extension ControlServer: ControlActions {
             }
             if let slot = session.remoteOverlays.slot(pane), !slot.ended {
                 return ControlResponse(ok: false, error: OverlayResultError.stillRunning)
+            }
+            if session.htmlCovers(pane) {
+                return ControlResponse(ok: false, error: OverlayHtmlError.noResult)
             }
             let (running, exitCode) = pane.map { (session.paneOverlay($0) != nil, session.paneOverlayExitCode($0)) }
                 ?? (session.programOverlayActive, session.overlayExitCode)
@@ -489,15 +575,9 @@ extension ControlServer: ControlActions {
                 return ControlResponse(ok: false, error: "no such session: \(target ?? "active")")
             }
             let pane: StatusPane
-            // an EMPTY token (an older shell exporting no `AGTERM_PANE_ID`) counts as absent: the plain
-            // `--pane`/main-pane path, not an error.
-            if let token = update.paneID, !token.isEmpty {
-                guard let resolved = session.paneRole(forToken: token) ?? update.pane else {
-                    return ControlResponse(ok: false, error: "unknown pane id: \(token)")
-                }
-                pane = resolved
-            } else {
-                pane = update.pane ?? .left
+            switch session.paneAddress(token: update.paneID, pane: update.pane) {
+            case .unknownToken(let token): return Self.unknownPaneID(token)
+            case .pane(let resolved): pane = resolved ?? .left
             }
             guard pane != .scratch else {
                 return ControlResponse(ok: false, error: "the scratch terminal is never restored")

@@ -121,8 +121,8 @@ targets:
         # Debug/dev builds get a DISTINCT bundle id. XCUITest terminates any running instance of the
         # app-under-test's bundle id before launching, so a shared id would kill the deployed Release
         # app the user runs daily. Release keeps the real id (com.umputun.agterm) — only Debug is
-        # isolated. (State/socket are path-based, not bundle-id-derived, so dev/test launches must still
-        # set AGTERM_STATE_DIR to avoid touching the real app-support state.)
+        # isolated. State/socket are path-based, not bundle-id-derived: a Debug launch without
+        # AGTERM_STATE_DIR adopts its own agterm-debug directory (DebugStateDirectory).
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.umputun.agterm.debug
           # Debug alone needs the three hardened-runtime exceptions; see the header of the file.
@@ -152,11 +152,16 @@ targets:
           license_dest="$CODESIGNING_FOLDER_PATH/Contents/Resources/zmx/LICENSE"
           [ -x "$zmx_src" ] || { echo "staged zmx not found at $zmx_src" >&2; exit 1; }
           [ -f "$license_src" ] || { echo "zmx license not found at $license_src" >&2; exit 1; }
+          # the build id the app compares against its state directory's record to date a zmx change
+          stamp_src="$SRCROOT/.zmx-build-stamp"
+          stamp_dest="$CODESIGNING_FOLDER_PATH/Contents/Resources/zmx/BUILD"
+          [ -f "$stamp_src" ] || { echo "zmx build stamp not found at $stamp_src" >&2; exit 1; }
           mkdir -p "$(dirname "$cli_dest")" "$(dirname "$license_dest")"
           cp -f "$src" "$cli_dest"
           cp -f "$host_src" "$host_dest"
           cp -f "$zmx_src" "$zmx_dest"
           cp -f "$license_src" "$license_dest"
+          cp -f "$stamp_src" "$stamp_dest"
           # ad-hoc sign the helpers + re-seal the app (Debug/normal builds). Developer ID signing for
           # releases is done authoritatively by scripts/release.sh AFTER xcodebuild returns (so it
           # can't be clobbered by Xcode's own final code-sign, which also adds the required timestamp).
@@ -221,6 +226,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.umputun.agtermTests
         GENERATE_INFOPLIST_FILE: YES
+        # XCTest instantiates it at bundle load; it makes every hosted window transparent.
+        INFOPLIST_KEY_NSPrincipalClass: HostedWindowHider
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/agterm.app/Contents/MacOS/agterm"
         BUNDLE_LOADER: "$(TEST_HOST)"
         CODE_SIGN_IDENTITY: "-"

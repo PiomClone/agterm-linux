@@ -11,12 +11,20 @@ public enum ToolbarMode: String, Codable, Sendable, CaseIterable {
     case hidden
 }
 
-/// How the sidebar's flagged view arranges its sessions: `flat` is one list labelled `session : workspace`,
-/// `tree` nests them under their workspace rows. App-wide, not per window. Raw-stored, resolved by
-/// `effectiveFlaggedViewLayout`.
+/// FlaggedViewLayout arranges the sidebar's flagged view: `flat` is one list labelled `session : workspace`,
+/// `plain` the same list labelled by session name alone, `tree` nests them under their workspace rows.
+/// App-wide, not per window. Raw-stored, resolved by `effectiveFlaggedViewLayout`.
 public enum FlaggedViewLayout: String, Codable, Sendable, CaseIterable {
     case flat
+    case plain
     case tree
+}
+
+/// Where a clicked web link from terminal output opens: the system `browser`, or a session web `overlay`.
+/// App-wide. Raw-stored, resolved by `effectiveLinkOpenMode`.
+public enum LinkOpenMode: String, Codable, Sendable, CaseIterable {
+    case browser
+    case overlay
 }
 
 /// How a delivered notification bounces the Dock icon (`requestUserAttention`): `off`, `once` (one
@@ -114,6 +122,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case home
         case currentSession
         case custom
+    }
+
+    /// NewSessionPlacement controls workspace insertion; an unset setting defaults to `end`.
+    public enum NewSessionPlacement: String, CaseIterable, Sendable {
+        case end
+        case afterCurrent
     }
 
     /// The terminal cursor shape, carrying ghostty's own `cursor-style` values as raw names. There is no
@@ -288,6 +302,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var newSessionDirectory: String?
     /// The fixed directory used when `newSessionDirectory` is `custom`; nil/empty falls back to home.
     public var newSessionCustomDirectory: String?
+    /// newSessionPlacement stores a `NewSessionPlacement` raw value; nil means `end`.
+    public var newSessionPlacement: String?
     /// Whether a GUI session close (⌘W, the File/palette Close Session, the sidebar row's Close) confirms
     /// first; nil = off. Read on demand; the control channel's `session.close` never prompts.
     public var confirmCloseSession: Bool?
@@ -321,6 +337,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Raw `FlaggedViewLayout` for the sidebar's flagged view; nil = flat. Resolved by
     /// `effectiveFlaggedViewLayout`.
     public var flaggedViewLayout: String?
+    /// Raw `LinkOpenMode`; nil = browser. Resolved by `effectiveLinkOpenMode`.
+    public var linkOpenMode: String?
+    /// htmlOverlayZoom is the page zoom every HTML overlay shows at, nil for actual size; read it through
+    /// `effectiveHtmlOverlayZoom`.
+    public var htmlOverlayZoom: Double?
     /// Whether the first-launch pointer at the Help menu extras has been shown; nil/false = not yet.
     /// Written once, by the launch that shows it. See `FirstRunWelcome`.
     public var welcomeShown: Bool?
@@ -343,13 +364,15 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 blockedStatusSoundName: String? = nil, statusReset: String? = nil, rightClickPaste: Bool? = nil,
                 workspaceRowClickExpands: Bool? = nil,
                 newSessionDirectory: String? = nil, newSessionCustomDirectory: String? = nil,
+                newSessionPlacement: String? = nil,
                 confirmCloseSession: Bool? = nil, closeGraceUndoEnabled: Bool? = nil,
                 autoFollowAttention: String? = nil,
                 autoFollowStayOnActive: Bool? = nil, sidebarFontSize: Double? = nil,
                 interfaceFontSize: Double? = nil, quickTerminalSizePercent: Int? = nil,
                 hiddenInterfaceElements: [String]? = nil, shownInterfaceElements: [String]? = nil,
                 autoHideSidebarInactiveWindows: Bool? = nil, flaggedViewLayout: String? = nil,
-                welcomeShown: Bool? = nil) {
+                linkOpenMode: String? = nil,
+                htmlOverlayZoom: Double? = nil, welcomeShown: Bool? = nil) {
         self.fontFamily = fontFamily
         self.fontSize = fontSize
         self.theme = theme
@@ -386,6 +409,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.workspaceRowClickExpands = workspaceRowClickExpands
         self.newSessionDirectory = newSessionDirectory
         self.newSessionCustomDirectory = newSessionCustomDirectory
+        self.newSessionPlacement = newSessionPlacement
         self.confirmCloseSession = confirmCloseSession
         self.closeGraceUndoEnabled = closeGraceUndoEnabled
         self.autoFollowAttention = autoFollowAttention
@@ -397,6 +421,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.shownInterfaceElements = shownInterfaceElements
         self.autoHideSidebarInactiveWindows = autoHideSidebarInactiveWindows
         self.flaggedViewLayout = flaggedViewLayout
+        self.linkOpenMode = linkOpenMode
+        self.htmlOverlayZoom = htmlOverlayZoom
         self.welcomeShown = welcomeShown
     }
 
@@ -437,6 +463,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
         flaggedViewLayout.flatMap(FlaggedViewLayout.init(rawValue:)) ?? .flat
     }
 
+    /// The resolved link-open mode: the explicit `linkOpenMode` when a KNOWN raw value, else `browser`.
+    public var effectiveLinkOpenMode: LinkOpenMode {
+        linkOpenMode.flatMap(LinkOpenMode.init(rawValue:)) ?? .browser
+    }
+
+    /// effectiveHtmlOverlayZoom is `htmlOverlayZoom` bounded to `HtmlZoom`'s range, the only read of the setting.
+    public var effectiveHtmlOverlayZoom: Double { HtmlZoom.resolve(htmlOverlayZoom) }
+
     /// The resolved status-reset mode: the explicit `statusReset` when a KNOWN raw value, else `firstKey`.
     public var effectiveStatusReset: StatusReset {
         statusReset.flatMap(StatusReset.init(rawValue:)) ?? .firstKey
@@ -446,6 +480,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// single read point.
     public var effectiveDockBounce: DockBounce {
         dockBounce.flatMap(DockBounce.init(rawValue:)) ?? .off
+    }
+
+    public var effectiveNewSessionPlacement: NewSessionPlacement {
+        newSessionPlacement.flatMap(NewSessionPlacement.init(rawValue:)) ?? .end
     }
 
     /// The resolved cursor shape, or nil when unset OR when the stored raw name is one this version does

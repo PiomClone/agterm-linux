@@ -233,6 +233,14 @@ struct SessionTests {
         #expect(session.subtitleDetail == "/Users/user")
     }
 
+    @Test func switcherDetailLeadsWithHostOnlyForRemoteSession() {
+        let local = Session(initialCwd: "/Users/user/dev/foo")
+        #expect(local.switcherDetail == "/Users/user/dev/foo")
+        let remote = Session(initialCwd: "/Users/user", remoteHost: "192.168.1.33")
+        remote.currentCwd = "/Users/user/.dot-files"
+        #expect(remote.switcherDetail == "192.168.1.33 · /Users/user/.dot-files")
+    }
+
     @Test func subtitleDetailUsesCwdForPlainLocalSession() {
         let session = Session(initialCwd: "/Users/user/dev/foo")
         #expect(session.subtitleDetail == "/Users/user/dev/foo")
@@ -593,6 +601,25 @@ struct SessionTests {
         // no match — the caller then falls back to the baked --pane role.
         #expect(session.paneRole(forToken: "") == nil)
         #expect(session.paneRole(forToken: "no-such-tok") == nil)
+    }
+
+    @Test(arguments: [
+        ("split-tok", StatusPane.left, Session.PaneAddress.pane(.right)),
+        ("split-tok", nil, .pane(.right)),
+        ("gone", .scratch, .pane(.scratch)),
+        ("gone", nil, .unknownToken("gone")),
+        ("", .right, .pane(.right)),
+        ("", nil, .pane(nil)),
+        (nil, .left, .pane(.left)),
+        (nil, nil, .pane(nil)),
+    ] as [(String?, StatusPane?, Session.PaneAddress)])
+    func paneAddressPrefersALiveTokenAndRefusesAnUnknownOneGivenAlone(token: String?, pane: StatusPane?,
+                                                                      expected: Session.PaneAddress) {
+        let session = Session(initialCwd: "/repo")
+        session.surface = FakeSurface(paneToken: "main-tok")
+        session.splitSurface = FakeSurface(paneToken: "split-tok")
+
+        #expect(session.paneAddress(token: token, pane: pane) == expected)
     }
 
     @Test func paneTokenForPaneReadsTheSlotAndEmptiesWithIt() {

@@ -101,7 +101,7 @@ struct WorkspaceSidebar: NSViewRepresentable {
         _ = store.workspaces.map {
             ($0.id, $0.name, $0.unseenCount, $0.sessions.map {
                 ($0.id, $0.displayName, $0.hasSplit, $0.splitAxis, $0.unseenCount, $0.agentIndicator, $0.flagged,
-                 $0.remotePresentation?.connection)
+                 $0.remoteConnection)
             })
         }
         _ = store.selectedSessionID
@@ -753,6 +753,7 @@ struct WorkspaceSidebar: NSViewRepresentable {
             if renameController.isEditing { return }
             let window = outlineView?.window
             if let window, window.firstResponder is NSText { return }
+            if let session = store.activeSession, HtmlOverlayRegistry.shared.focusCover(of: session) { return }
             if let window, let surface = store.activeSession?.topmostSurface as? GhosttySurfaceView, surface.window === window {
                 guard !surface.deferFocusToAsk() else { return }
                 window.makeFirstResponder(surface)
@@ -868,7 +869,13 @@ final class SidebarOutlineView: NSOutlineView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
+        // NSTableView treats Control-click as a plain click and ignores a left-button event handed to
+        // rightMouseDown, so the secondary-click convention has to open the menu here.
+        if event.modifierFlags.contains(.control) {
+            if let menu = menu(for: event) { NSMenu.popUpContextMenu(menu, with: event, for: self) }
+        } else {
+            super.mouseDown(with: event)
+        }
         // after the click is handled, hand keyboard focus back to the terminal; row selection persists
         // (model state), only first responder moves. Skipped mid-rename by the coordinator.
         (delegate as? WorkspaceSidebar.Coordinator)?.focusActiveTerminal()

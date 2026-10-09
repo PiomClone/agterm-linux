@@ -18,19 +18,39 @@ public struct ControlSurfaceNode: Codable, Sendable, Equatable {
     /// does not lead is covered and its reads come from the daemon. Nil until the pane's zmx reports a
     /// role, which a zmx or an origin without explicit leadership never does.
     public let lead: ZmxLeadRole?
+    /// reconnect is present while this pane's ssh lost its connection and the app waits to attach it
+    /// again, omitted otherwise.
+    public let reconnect: ControlReconnect?
+    /// paneID is the token `--pane-id` resolves, omitted for a slot whose surface carries none.
+    public let paneID: String?
 
     public init(id: String, kind: String, active: Bool, visible: Bool) {
         self.init(id: id, kind: kind, active: active, visible: visible, backedByZmx: nil)
     }
 
     public init(id: String, kind: String, active: Bool, visible: Bool, backedByZmx: Bool?,
-                lead: ZmxLeadRole? = nil) {
+                lead: ZmxLeadRole? = nil, reconnect: ControlReconnect? = nil, paneID: String? = nil) {
         self.id = id
         self.kind = kind
         self.active = active
         self.visible = visible
         self.backedByZmx = backedByZmx
         self.lead = lead
+        self.reconnect = reconnect
+        self.paneID = paneID
+    }
+}
+
+/// ControlReconnect is a remote pane's wait to be attached again. `failures` is the backoff streak: probes
+/// of its host that failed in a row, plus one for a link that dropped again soon after attaching.
+/// A key on the pane, a wake or a network change starts it over. `reason` is what ssh said on the last failed probe, omitted when it said nothing.
+public struct ControlReconnect: Codable, Sendable, Equatable {
+    public let failures: Int
+    public let reason: String?
+
+    public init(failures: Int, reason: String?) {
+        self.failures = failures
+        self.reason = reason
     }
 }
 
@@ -55,7 +75,7 @@ public struct ControlHudNode: Codable, Sendable, Equatable {
     public let textColor: String?
     /// The EFFECTIVE share of the pane's WIDTH the panel occupies — the app's measurement, or the caller's
     /// `sizePercent` override, either way bounded by `HudLayout.clampSizePercent`, so a requested 100 reads
-    /// back as the maximum a HUD may take. Reported here because the node's `overlaySizePercent` stays
+    /// back as the maximum that panel may take: 100 for a sticky one off center, 80 otherwise. Reported here because the node's `overlaySizePercent` stays
     /// omitted for a HUD. Optional because it projects the slot's optional percent, but no supported path
     /// leaves a live HUD sizeless: `openHud` always sets one and `overlay.resize --full` is refused.
     public let sizePercent: Int?
@@ -78,14 +98,23 @@ public struct ControlHudNode: Codable, Sendable, Equatable {
     public let markdown: Bool
     /// fontSize is the caller's requested point size, nil/omitted when the panel inherits the session's.
     public let fontSize: Double?
+    /// sticky reports a panel flush against its edge or corner. Always present; an absent key decodes as
+    /// false.
+    public let sticky: Bool
+    /// frame reports whether the panel draws its border, rounding and blank rows. Always present; an absent
+    /// key decodes as true.
+    public let frame: Bool
 
     public init(message: String, detail: String? = nil, spinner: String = HudSpinner.noneName,
                 backgroundColor: String? = nil, textColor: String? = nil,
                 sizePercent: Int? = nil, heightPercent: Int? = nil, position: String,
-                pane: String? = nil, hideAfter: Double = 0, markdown: Bool = false, fontSize: Double? = nil) {
+                pane: String? = nil, hideAfter: Double = 0, markdown: Bool = false, fontSize: Double? = nil,
+                sticky: Bool = false, frame: Bool = true) {
         self.hideAfter = hideAfter
         self.markdown = markdown
         self.fontSize = fontSize
+        self.sticky = sticky
+        self.frame = frame
         self.message = message
         self.detail = detail
         self.spinner = spinner
@@ -99,7 +128,7 @@ public struct ControlHudNode: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case message, detail, spinner, backgroundColor, textColor, sizePercent, heightPercent, position, pane
-        case hideAfter, markdown, fontSize
+        case hideAfter, markdown, fontSize, sticky, frame
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +145,8 @@ public struct ControlHudNode: Codable, Sendable, Equatable {
         hideAfter = try c.decode(Double.self, forKey: .hideAfter)
         markdown = try c.decodeIfPresent(Bool.self, forKey: .markdown) ?? false
         fontSize = try c.decodeIfPresent(Double.self, forKey: .fontSize)
+        sticky = try c.decodeIfPresent(Bool.self, forKey: .sticky) ?? false
+        frame = try c.decodeIfPresent(Bool.self, forKey: .frame) ?? true
     }
 }
 
@@ -303,6 +334,9 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     /// Overlay slots a viewer presenting this session holds, on the origin; omitted when none is held. Such
     /// an overlay covers nothing here, so `overlay` and `paneOverlays` leave it out.
     public let remoteOverlays: [ControlRemoteOverlayNode]?
+    /// htmlOverlays lists the pages in this session's overlay slots, session-wide first then left and right;
+    /// omitted when none is open. `overlay` and `paneOverlays` report their slots as covered too.
+    public let htmlOverlays: [ControlHtmlOverlayNode]?
 
     public init(id: String, name: String, cwd: String, title: String? = nil, active: Bool, split: Bool,
                 hasSplit: Bool? = nil, backedByZmx: Bool?, splitAxis: String? = nil,
@@ -321,7 +355,7 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
                 context: String? = nil, remoteHost: String? = nil, splitCwd: String? = nil,
                 liveAttribution: String? = nil, splitLiveAttribution: String? = nil,
                 presentation: ControlPresentationNode? = nil, presenters: ControlPresentersNode? = nil,
-                remoteOverlays: [ControlRemoteOverlayNode]? = nil) {
+                remoteOverlays: [ControlRemoteOverlayNode]? = nil, htmlOverlays: [ControlHtmlOverlayNode]? = nil) {
         self.id = id
         self.name = name
         self.cwd = cwd
@@ -370,10 +404,98 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
         self.presentation = presentation
         self.presenters = presenters
         self.remoteOverlays = remoteOverlays
+        self.htmlOverlays = htmlOverlays
     }
 }
 
-/// An overlay slot of an origin session held by the viewer presenting it, as `tree` reports it.
+/// ControlHtmlOverlayNode is one HTML page in an overlay slot. `file` or `url` is what was opened and what
+/// `session.overlay.reload` loads; `page` is where the user has navigated since, nil until the first load.
+public struct ControlHtmlOverlayNode: Codable, Sendable, Equatable {
+    /// pane is the pane role, omitted for the session-wide slot.
+    public let pane: String?
+    /// file and url name the source; exactly one is set.
+    public let file: String?
+    /// cwd is a file page's read grant, omitted when it has none.
+    public let cwd: String?
+    public let url: String?
+    /// state is `loading`, `loaded` or `failed`.
+    public let state: String
+    public let error: String?
+    /// page, title and the history flags are omitted until the web view first reports them.
+    public let page: String?
+    public let title: String?
+    public let canGoBack: Bool?
+    public let canGoForward: Bool?
+    /// navigation is true when the toolbar is shown, omitted otherwise.
+    public let navigation: Bool?
+    /// javascript says whether the page may run its own scripts.
+    public let javascript: Bool
+    /// chromeless says whether the page shows without its identity strip. Always present; an absent key
+    /// decodes as false, since an older running server omits it.
+    public let chromeless: Bool
+    /// persistent says whether the page uses the saved browser store. Always present; an absent key decodes
+    /// as false, since an older running server omits it.
+    public let persistent: Bool
+    /// browse says whether the page's main frame may leave its first origin. Always present; an absent key
+    /// decodes as false, since an older running server omits it.
+    public let browse: Bool
+    /// zoom is the page zoom factor, 1 at actual size. One app-wide value, so every page reports the same.
+    public let zoom: Double?
+    /// id is the page's identity, the one `session.overlay.result --page` reads; an older server omits it.
+    public let id: String?
+
+    public init(pane: String?, file: String? = nil, cwd: String? = nil, url: String? = nil, state: String,
+                error: String?, page: String? = nil, title: String? = nil, canGoBack: Bool? = nil,
+                canGoForward: Bool? = nil, navigation: Bool? = nil, javascript: Bool = false, chromeless: Bool = false,
+                zoom: Double? = nil, id: String? = nil, persistent: Bool = false, browse: Bool = false) {
+        self.id = id
+        self.pane = pane
+        self.file = file
+        self.cwd = cwd
+        self.url = url
+        self.state = state
+        self.error = error
+        self.page = page
+        self.title = title
+        self.canGoBack = canGoBack
+        self.canGoForward = canGoForward
+        self.navigation = navigation
+        self.javascript = javascript
+        self.chromeless = chromeless
+        self.persistent = persistent
+        self.browse = browse
+        self.zoom = zoom
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pane, file, cwd, url, state, error, page, title, canGoBack, canGoForward, navigation, javascript
+        case chromeless, persistent, browse, zoom, id
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pane = try c.decodeIfPresent(String.self, forKey: .pane)
+        file = try c.decodeIfPresent(String.self, forKey: .file)
+        cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+        url = try c.decodeIfPresent(String.self, forKey: .url)
+        state = try c.decode(String.self, forKey: .state)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        page = try c.decodeIfPresent(String.self, forKey: .page)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        canGoBack = try c.decodeIfPresent(Bool.self, forKey: .canGoBack)
+        canGoForward = try c.decodeIfPresent(Bool.self, forKey: .canGoForward)
+        navigation = try c.decodeIfPresent(Bool.self, forKey: .navigation)
+        javascript = try c.decode(Bool.self, forKey: .javascript)
+        chromeless = try c.decodeIfPresent(Bool.self, forKey: .chromeless) ?? false
+        persistent = try c.decodeIfPresent(Bool.self, forKey: .persistent) ?? false
+        browse = try c.decodeIfPresent(Bool.self, forKey: .browse) ?? false
+        zoom = try c.decodeIfPresent(Double.self, forKey: .zoom)
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+    }
+}
+
+/// ControlRemoteOverlayNode is an overlay slot of an origin session held by the viewer presenting it, as
+/// `tree` reports it.
 public struct ControlRemoteOverlayNode: Codable, Sendable, Equatable {
     /// The pane role, omitted for the session-wide slot.
     public let pane: String?
@@ -473,11 +595,15 @@ public struct ControlTree: Codable, Sendable, Equatable {
     /// write-only `sidebar.mode`. `tree`-only, as every field below is: a GUI toggle bypasses the command
     /// path, so a cached `window.list` copy would go stale.
     public let sidebarMode: String?
-    /// How the flagged view arranges its sessions — `FlaggedViewLayout.rawValue` (`flat` | `tree`). APP-WIDE,
+    /// How the flagged view arranges its sessions — `FlaggedViewLayout.rawValue` (`flat` | `plain` | `tree`). APP-WIDE,
     /// so every window's `tree` reports the same value, and reported under the ordinary tree too, where it
     /// is dormant. The read side of `sidebar.flagged-layout` and a term of the workspace-row visibility
     /// predicate on `ControlWorkspaceNode.focused`.
     public let sidebarFlaggedLayout: String?
+    /// Where a clicked web link from terminal output opens: `LinkOpenMode.rawValue` (`browser` | `overlay`),
+    /// the effective value, so the default reads `browser`. APP-WIDE, the read side of `browser.links`; nil
+    /// in a host-produced tree and from an older server.
+    public let linkOpenMode: String?
     /// The projected window's sidebar divider position in points - the read side of `sidebar.width`, and the
     /// only place it is reported. LIVE and `tree`-only, like every field below and like `sidebarMode`: the
     /// tree is the live per-window read surface, and nothing needs width discovery ACROSS windows, which is
@@ -526,6 +652,9 @@ public struct ControlTree: Codable, Sendable, Equatable {
     /// The Live sessions reset state: app-global like `app`, omitted when nothing is pending and no launch
     /// has consumed a marker. The read side of `zmx.reset`.
     public let liveReset: ControlLiveResetReadback?
+    /// indexUnsaved is true while the last `windows.json` write failed, omitted otherwise. App-global like
+    /// `app`.
+    public let indexUnsaved: Bool?
 
     public init(workspaces: [ControlWorkspaceNode], idleMs: Int? = nil, autoFollowMs: Int? = nil,
                 sidebarVisible: Bool? = nil, sidebarMode: String? = nil, sidebarFlaggedLayout: String? = nil,
@@ -534,9 +663,12 @@ public struct ControlTree: Codable, Sendable, Equatable {
                 zoomedSurface: String? = nil, dashboardMembers: [String]? = nil,
                 dashboardHighlighted: String? = nil, dashboardFontSize: Double? = nil,
                 dashboardFontMode: String? = nil, pickPending: String? = nil, askPending: String? = nil,
-                app: AppIdentity? = nil, liveReset: ControlLiveResetReadback? = nil) {
+                app: AppIdentity? = nil, liveReset: ControlLiveResetReadback? = nil,
+                indexUnsaved: Bool? = nil, linkOpenMode: String? = nil) {
         self.workspaces = workspaces
+        self.linkOpenMode = linkOpenMode
         self.liveReset = liveReset
+        self.indexUnsaved = indexUnsaved
         self.idleMs = idleMs
         self.autoFollowMs = autoFollowMs
         self.sidebarVisible = sidebarVisible

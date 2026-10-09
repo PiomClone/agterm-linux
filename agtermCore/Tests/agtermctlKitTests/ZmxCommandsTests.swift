@@ -100,6 +100,22 @@ struct ZmxCommandsTests {
                 "silence reads the same as a failed read")
     }
 
+    @Test func screenSendsTheDaemonNameAndExtent() throws {
+        let plain = try Zmx.Screen.parse(["agterm-a"]).makeRequest()
+        #expect(plain.cmd == .zmxScreen)
+        #expect(plain.target == nil)
+        #expect(plain.args?.name == "agterm-a")
+        #expect(plain.args?.all == nil)
+
+        #expect(try Zmx.Screen.parse(["agterm-a", "--all"]).makeRequest().args?.all == true)
+        #expect(try Zmx.Screen.parse(["agterm-a", "--lines", "20"]).makeRequest().args?.lines == 20)
+    }
+
+    @Test(arguments: [["agterm-a", "--all", "--lines", "3"], ["agterm-a", "--lines", "0"], []])
+    func screenRefusesABadExtentOrAMissingName(arguments: [String]) {
+        #expect(throws: (any Error).self) { try Zmx.Screen.parse(arguments) }
+    }
+
     @Test func listAndPruneSendTheirCommandWithNothingToResolve() throws {
         let list = try Zmx.List.parse([])
         #expect(try list.makeRequest().cmd == .zmxList)
@@ -174,6 +190,23 @@ struct ZmxCommandsTests {
         // kill resolves by id, never by name, and a closed row may not appear in `tree` at all
         #expect(rendered.contains(String(claim.sessionID.uuidString.prefix(8))))
         #expect(rendered.contains("win \(claim.windowID.uuidString.prefix(8))"))
+    }
+
+    @Test func aDaemonCreatedBeforeTheCutoffIsMarkedOutdated() throws {
+        let old = UUID(), current = UUID()
+        let output = """
+        name=\(ZmxSupport.daemonName(for: old))\tpid=10\tclients=1\tcreated=999\tcwd=/tmp
+        name=\(ZmxSupport.daemonName(for: current))\tpid=11\tclients=1\tcreated=1000\tcwd=/tmp
+        """
+        let result = ZmxInventory.join(observed: try ZmxListParser.parse(output), claims: [], inventoryComplete: false)
+        let status = ControlRestoreStatus(configured: .live, requestedAtLaunch: .live, active: .live, unavailableReason: nil)
+        let inventory = ControlZmxInventory(restore: status, result: result, outdatedBefore: Date(timeIntervalSince1970: 1000))
+
+        let flags = Dictionary(uniqueKeysWithValues: inventory.entries.map { ($0.daemon, $0.outdated) })
+        #expect(flags == [ZmxSupport.daemonName(for: old): true, ZmxSupport.daemonName(for: current): Bool?.none])
+        let rendered = SocketClient.formatZmx(inventory).split(separator: "\n")
+        #expect(rendered.contains { $0.hasPrefix(ZmxSupport.daemonName(for: old)) && $0.contains("running outdated") })
+        #expect(rendered.contains { $0.hasPrefix(ZmxSupport.daemonName(for: current)) && !$0.contains("outdated") })
     }
 
     @Test func anIncompleteInventorySaysSoBeforeItsRows() {
