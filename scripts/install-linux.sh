@@ -49,9 +49,13 @@ cp -R "$APP_RESOURCES/." "$BIN_DIR/agterm-linux_AgtermLinux.resources/"
 # xterm-ghostty + gets shell-integration without a system ghostty package. The app's resolver checks
 # ~/.local/share/agterm/ghostty; libghostty derives TERMINFO from the sibling terminfo dir.
 VENDOR_SHARE="agterm-linux/vendor/ghostty/share"
+RES_DIR="$HOME/.local/share/agterm"
+mkdir -p "$RES_DIR"
+git describe --tags --always 2>/dev/null | sed 's/^v//' > "$RES_DIR/VERSION" || echo "0.32.0" > "$RES_DIR/VERSION"
+git rev-parse HEAD 2>/dev/null > "$RES_DIR/COMMIT" || true
+
 if [ -d "$VENDOR_SHARE/ghostty/shell-integration" ]; then
-  RES_DIR="$HOME/.local/share/agterm"
-  rm -rf "$RES_DIR/ghostty" "$RES_DIR/terminfo"; mkdir -p "$RES_DIR"
+  rm -rf "$RES_DIR/ghostty" "$RES_DIR/terminfo"
   cp -R "$VENDOR_SHARE/ghostty"  "$RES_DIR/ghostty"
   # terminfo may be absent if the build couldn't stage it (the app then falls back to a system terminfo).
   [ -d "$VENDOR_SHARE/terminfo" ] && cp -R "$VENDOR_SHARE/terminfo" "$RES_DIR/terminfo"
