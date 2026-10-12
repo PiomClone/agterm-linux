@@ -63,8 +63,11 @@ public enum TerminalClipboard {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderr
         try process.run()
-        // a zmx that exits before reading everything must surface as its status, not kill this process
+        #if canImport(Darwin)
         _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        #else
+        signal(SIGPIPE, SIG_IGN)
+        #endif
         try? stdin.fileHandleForWriting.write(contentsOf: sequence)
         try? stdin.fileHandleForWriting.close()
         let diagnostics = stderr.fileHandleForReading.readDataToEndOfFile()
