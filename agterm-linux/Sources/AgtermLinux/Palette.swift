@@ -137,6 +137,7 @@ extension AppController {
         case .decreaseFontSize: return { self.activeSurface()?.performBindingAction(FontBindingAction.decrease) }
         case .resetFontSize: return { self.activeSurface()?.performBindingAction(FontBindingAction.reset) }
         case .selectTheme: return { self.showThemePicker() }
+        case .attachRemote: return { self.attachRemote() }
         case .deleteWorkspace: return { if let id = self.store.currentWorkspaceID { self.store.removeWorkspace(id); self.reconcile() } }
         case .toggleFlaggedView: return { self.toggleFlaggedView() }
         case .focusLeftPane: return { self.focusPane(left: true) }

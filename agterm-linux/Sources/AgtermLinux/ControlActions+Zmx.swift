@@ -241,4 +241,30 @@ extension AppController {
         sessionFocusTarget(for: created.id, wantSplit: created.splitFocused)?.grabFocus()
         return ControlResponse(ok: true, result: ControlResult(id: created.id.uuidString))
     }
+
+    var configuredRemotes: [RemoteEntry] {
+        let settings = linuxSettingsStore().load()
+        let configDir = ConfigPaths.configDirectory(
+            setting: settings.configDirectory,
+            stateDir: ProcessInfo.processInfo.environment["AGT_STATE_DIR"],
+            home: FileManager.default.homeDirectoryForCurrentUser
+        )
+        let remotesURL = ConfigPaths.remotesPath(configDirectory: configDir)
+        return (try? RemotesFile.load(at: remotesURL).remotes.entries) ?? []
+    }
+
+    func attachRemote() {
+        let remotes = configuredRemotes
+        guard let first = remotes.first else { return }
+        if remotes.count == 1 {
+            let emptyTree = ControlRemoteTree(host: first.destination, endpoint: ControlZmxEndpoint(executable: "", socketDirectory: ""), sessions: [])
+            _ = attachRemoteSession(host: first.destination, session: "", tree: emptyTree)
+            return
+        }
+        let items = remotes.map {
+            ControlPickItem(id: $0.destination, label: $0.label, subtitle: $0.label == $0.destination ? nil : $0.destination)
+        }
+        let pick = PendingPick(id: UUID().uuidString, items: items, prompt: "Attach from which remote?")
+        _ = openPick(pick, window: windowID.uuidString, follow: true)
+    }
 }

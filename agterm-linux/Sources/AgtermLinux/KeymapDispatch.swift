@@ -433,6 +433,7 @@ extension AppController {
         case .toggleSidebar: toggleSidebar()
         case .toggleFullscreen: toggleWindowFullscreen()
         case .selectTheme: showThemePicker()
+        case .attachRemote: attachRemote()
         case .toggleFlaggedView: toggleFlaggedView()
         case .toggleFlag: toggleFlagActive()
         case .focusWorkspace: focusActiveWorkspace()   // toggle focus on the active session's workspace
