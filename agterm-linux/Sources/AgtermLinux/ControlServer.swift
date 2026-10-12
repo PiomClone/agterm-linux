@@ -281,10 +281,11 @@ final class ControlServer: @unchecked Sendable {
         switch req.cmd {
         case .sessionClose, .sessionDuplicate, .sessionSelect, .sessionGo, .sessionRename, .sessionReveal,
              .sessionMove, .sessionType,
-             .sessionStatus, .sessionRestore, .sessionFlag, .sessionContext, .sessionSeen,
+             .sessionStatus, .sessionRestore, .sessionRestart, .sessionFlag, .sessionContext, .sessionSeen,
              .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionLead, .sessionScratch, .sessionFocus,
              .sessionCopy, .sessionPaste, .sessionSelectAll, .sessionSearch,
-             .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayResult,
+             .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayReload,
+             .sessionOverlayNavigate, .sessionOverlayResult, .sessionOverlaySubmit,
              .sessionOverlayCopy, .sessionOverlayText, .sessionOverlayJobRun,
              .sessionHudOpen, .sessionHudUpdate, .sessionHudClose,
              .sessionBackground, .sessionResize, .sessionText, .notify,
@@ -301,10 +302,11 @@ final class ControlServer: @unchecked Sendable {
              .sidebar, .sidebarMode, .sidebarFlaggedLayout, .sidebarExpand, .sidebarCollapse, .workspaceFilter,
              .windowNew, .windowList, .windowSelect, .windowGo, .windowClose, .windowRename, .windowDelete,
              .windowResize, .windowMove, .windowZoom, .windowFullscreen, .windowMinimize,
-             .keymapReload, .keymapList, .hooksReload, .hooksList, .configReload, .themeSet, .themeList,
+             .keymapReload, .keymapList, .keymapRun, .hooksReload, .hooksList, .browserClear, .browserLinks,
+             .configReload, .themeSet, .themeList,
              .pickOpen, .pickResult, .pickCancel, .askOpen, .askResult, .askCancel, .sidebarWidth,
              .restoreClear, .restoreCapture, .restoreMode, .recentClear, .version,
-             .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent, .debugAppearance:
+             .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent, .zmxScreen, .debugAppearance:
             return .controller(gController)
         }
     }
