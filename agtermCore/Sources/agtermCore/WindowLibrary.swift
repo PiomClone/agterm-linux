@@ -960,24 +960,4 @@ public final class WindowLibrary {
             self.onControlEvent?(event)
         }
     }
-<<<<<<< HEAD
-||||||| 1ffc3ee8
-
-    func refreshRecentClosedItems() {
-        recentClosedItems = recentClosedStore.load()
-    }
-
-    private func log(_ message: @autoclosure () -> String) {
-        NSLog("agterm: %@", message())
-    }
-=======
-
-    func refreshRecentClosedItems() {
-        recentClosedItems = recentClosedStore.load()
-    }
-
-    func log(_ message: @autoclosure () -> String) {
-        NSLog("agterm: %@", message())
-    }
->>>>>>> master
 }
