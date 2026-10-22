@@ -83,6 +83,13 @@ session drag are out of scope.
   The reason is an attribute, not a param, despite `AERegistry.h` calling it a parameter: loginwindow
   writes it with `AEPutAttributePtr`. Never switch that read to `paramDescriptor`.
   The GUI-only prompt is keep-in-sync exempt and manually verified.
+- The window-close sheet takes its text from `QuitPrompt.windowCloseMessage` under the same mode rule.
+- A confirmed Live sessions reset (`LiveResetCoordinator.pending`) skips the quit alert, since its own
+  dialog or `zmx.reset --force` was the confirmation. `AppDelegate.exitFlush` fixes the order: capture,
+  finalize pending closes, then the CHECKED save; only a fully saved snapshot arms the marker and the
+  relauncher. `LaunchOrchestration.run` in `LiveResetConsumer.swift` owns the launch side: the library's
+  inventory sink only stores the inventory, the consumer runs after `WindowLibrary` returns, and the
+  ordinary reap and the foreground resolver refresh follow it, all before any window mounts.
 - App-side `WindowRegistry` maps IDs to `NSWindow`. Register/unregister through `TitleProbeView`;
   `raise` deminiaturizes and fronts, and `close` uses `performClose` so standard teardown runs.
 
@@ -191,6 +198,24 @@ session drag are out of scope.
   agterm, select the non-active window, confirm list marks it active and untargeted session creation lands
   there. XCUITest cannot deactivate without disturbing the user's Space.
 
+## Live session host
+
+- `agterm-session-host` is a persistent responsibility root for Live daemons in one state directory.
+  Reuse it across app restarts; host death leaves its panes orphaned and later panes can start a
+  replacement host.
+- Keep all `responsibility_*` SPI lookups in the `AgtermResponsibility` target.
+  If the SPI is unavailable, panes fall back to bare attach.
+- `SessionHostTrampoline` owns the `forkpty` child path through `execve`; no Swift runs there.
+- The host answers one client at a time.
+  A connected client waits up to 30 seconds for its turn before falling back to a bare attach,
+  so a long enough queue of creations still yields an `app` pane.
+- Fresh shells and Re-run never stop a live host.
+- The host's files live under `/tmp`, where macOS deletes a regular file after three days untouched
+  (`/usr/libexec/tmp_cleaner`; sockets stay). The host touches its lock, log and pidfile at start and
+  hourly, on a clock that counts sleep, and publishes the pidfile again when it is missing or does not
+  hold the host's pid.
+  A deleted lock or log cannot be brought back, and a host started by an older build does none of this
+  until it is replaced.
 ## Attachment and cache
 
 - `window.new` is not ready when its store becomes open. Its `NSWindow` registers only after store

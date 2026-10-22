@@ -30,6 +30,7 @@ final class MockControlActions: ControlActions {
         case workspaceFocus(target: String?, window: String?, ControlWorkspaceFocusMode)
         case workspaceFilter(window: String?, ControlToggleMode)
         case workspaceExpansion(target: String?, window: String?, expanded: Bool)
+        case workspaceFlag(target: String?, window: String?, ControlToggleMode)
         case sessionFlag(target: String?, window: String?, String?)
         case sessionContext(target: String?, window: String?, context: String?)
         case markSessionSeen(target: String?, window: String?)
@@ -40,7 +41,7 @@ final class MockControlActions: ControlActions {
         case sessionSplitClose(target: String?, window: String?)
         case sessionSwap(target: String?, window: String?)
         case sessionLead(target: String?, window: String?, pane: StatusPane?)
-        case sessionScratch(target: String?, window: String?, String?, command: String?)
+        case sessionScratch(target: String?, window: String?, String?, command: String?, follow: Bool)
         case sessionFocus(target: String?, window: String?, String?)
         case sessionResize(target: String?, window: String?, ControlSplitResize)
         case surfaceZoom(target: String?, window: String?, ControlToggleMode)
@@ -52,6 +53,9 @@ final class MockControlActions: ControlActions {
         case keymapRun(name: String, target: String?, window: String?)
         case hooksReload
         case hooksList
+        case recentList
+        case recentClear
+        case recentOpen(target: String?, window: String?)
         case browserClear
         case browserLinks(LinkOpenMode?)
         case version
@@ -86,6 +90,7 @@ final class MockControlActions: ControlActions {
         case sessionSearch(target: String?, window: String?, text: String?, to: String?)
         case overlayOpen(target: String?, window: String?, ControlSessionOverlayOpenOptions)
         case overlayClose(target: String?, window: String?, pane: OverlayPane?)
+        case overlayVisibility(target: String?, window: String?, pane: OverlayPane?, mode: OverlayVisibilityMode)
         case overlayReload(target: String?, window: String?, pane: OverlayPane?, current: Bool)
         case overlayNavigate(target: String?, window: String?, pane: OverlayPane?, HtmlNavigation)
         case overlayResize(target: String?, window: String?, sizePercent: Int?)
@@ -118,7 +123,6 @@ final class MockControlActions: ControlActions {
         case askResult(target: String, window: String?)
         case askCancel(target: String, window: String?)
         case restoreClear
-        case recentClear
         case restoreCapture
     }
 
@@ -151,6 +155,7 @@ final class MockControlActions: ControlActions {
     var nextBrowserClearResponse = ControlResponse(ok: true)
     var nextBrowserLinksResponse = ControlResponse(ok: true)
     var nextHooksListResponse = ControlResponse(ok: true)
+    var nextRecentResponse = ControlResponse(ok: true)
     var nextVersionResponse = ControlResponse(ok: true)
     var nextKeymapResponse = ControlResponse(ok: true)
     var nextConfigResponse = ControlResponse(ok: true)
@@ -204,7 +209,6 @@ final class MockControlActions: ControlActions {
     var nextAskResultResponse = ControlResponse(ok: true)
     var nextAskCancelResponse = ControlResponse(ok: true)
     var nextRestoreClearResponse = ControlResponse(ok: true)
-    var nextRecentClearResponse = ControlResponse(ok: true)
     var nextRestoreCaptureResponse = ControlResponse(ok: true)
     var nextSessionRestoreResponse = ControlResponse(ok: true)
     var nextSessionSwapResponse = ControlResponse(ok: true)
@@ -324,6 +328,11 @@ final class MockControlActions: ControlActions {
         return ControlResponse(ok: true)
     }
 
+    func setWorkspaceFlag(_ target: String?, window: String?, mode: ControlToggleMode) -> ControlResponse {
+        calls.append(.workspaceFlag(target: target, window: window, mode))
+        return ControlResponse(ok: true, result: ControlResult(id: target))
+    }
+
     func setSessionFlag(_ target: String?, window: String?, mode: String?) -> ControlResponse {
         calls.append(.sessionFlag(target: target, window: window, mode))
         return ControlResponse(ok: true)
@@ -383,7 +392,12 @@ final class MockControlActions: ControlActions {
 
     func scratchSession(_ target: String?, window: String?, mode: String?,
                         command: String?) -> ControlResponse {
-        calls.append(.sessionScratch(target: target, window: window, mode, command: command))
+        scratchSession(target, window: window, mode: mode, command: command, follow: false)
+    }
+
+    func scratchSession(_ target: String?, window: String?, mode: String?, command: String?,
+                        follow: Bool) -> ControlResponse {
+        calls.append(.sessionScratch(target: target, window: window, mode, command: command, follow: follow))
         return ControlResponse(ok: true)
     }
 
@@ -445,6 +459,21 @@ final class MockControlActions: ControlActions {
     func listHooks() -> ControlResponse {
         calls.append(.hooksList)
         return nextHooksListResponse
+    }
+
+    func listRecentClosed() -> ControlResponse {
+        calls.append(.recentList)
+        return nextRecentResponse
+    }
+
+    func clearRecentClosed() -> ControlResponse {
+        calls.append(.recentClear)
+        return nextRecentResponse
+    }
+
+    func openRecentClosed(_ target: String?, window: String?) -> ControlResponse {
+        calls.append(.recentOpen(target: target, window: window))
+        return nextRecentResponse
     }
 
     func clearBrowser() async -> ControlResponse {
@@ -632,6 +661,12 @@ final class MockControlActions: ControlActions {
         return nextOverlayCloseResponse
     }
 
+    func setSessionOverlayVisibility(_ target: String?, window: String?, pane: OverlayPane?,
+                                     mode: OverlayVisibilityMode) -> ControlResponse {
+        calls.append(.overlayVisibility(target: target, window: window, pane: pane, mode: mode))
+        return ControlResponse(ok: true, result: ControlResult(id: target, text: "hidden"))
+    }
+
     func resizeSessionOverlay(_ target: String?, window: String?, sizePercent: Int?) -> ControlResponse {
         calls.append(.overlayResize(target: target, window: window, sizePercent: sizePercent))
         return nextOverlayResizeResponse
@@ -793,11 +828,6 @@ final class MockControlActions: ControlActions {
     func clearRestoreCommands() -> ControlResponse {
         calls.append(.restoreClear)
         return nextRestoreClearResponse
-    }
-
-    func clearRecentClosedItems() -> ControlResponse {
-        calls.append(.recentClear)
-        return nextRecentClearResponse
     }
 
     func captureRestoreCommands() -> ControlResponse {

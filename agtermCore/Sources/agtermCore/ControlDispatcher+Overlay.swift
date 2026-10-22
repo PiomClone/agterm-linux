@@ -108,12 +108,27 @@ extension ControlDispatcher {
             }
         case .sessionOverlayText:
             return dispatchSessionOverlayText(request)
+        case .sessionOverlayHide, .sessionOverlayShow, .sessionOverlayToggle:
+            let mode: OverlayVisibilityMode = request.cmd == .sessionOverlayHide ? .hide
+                : (request.cmd == .sessionOverlayShow ? .show : .toggle)
+            switch parseOverlayPane(request.args?.pane) {
+            case .rejected(let response): return response
+            case .pane(let pane):
+                return actions.setSessionOverlayVisibility(request.target, window: request.args?.window, pane: pane,
+                                                           mode: mode)
+            }
         case .sessionOverlayJobRun:
             guard let job = request.target?.trimmedOrNil else {
                 return ControlResponse(ok: false, error: "session.overlay.job.run requires a job id")
             }
             guard UUID(uuidString: job) != nil else { return ControlResponse(ok: false, error: "invalid job id") }
             return actions.claimOverlayJob(job)
+        case .sessionOverlayPageServe:
+            guard let token = request.target?.trimmedOrNil else {
+                return ControlResponse(ok: false, error: "session.overlay.page.serve requires a page token")
+            }
+            guard UUID(uuidString: token) != nil else { return ControlResponse(ok: false, error: "invalid page token") }
+            return actions.claimPageServe(token)
         default:
             preconditionFailure("dispatchSessionOverlayCommand called for \(request.cmd.rawValue)")
         }
@@ -151,8 +166,10 @@ extension ControlDispatcher {
             if !command.isEmpty { return reject(OverlayHtmlError.commandAndURL) }
             if args?.wait == true { return reject(OverlayHtmlError.waitWithURL) }
             if args?.cwd != nil { return reject(OverlayHtmlError.cwdWithURL) }
-            if args?.chromeless == true { return reject(OverlayHtmlError.chromelessRequiresFile) }
+            if args?.chromeless == true, args?.navigation == true { return reject(OverlayHtmlError.chromelessWithNavigation) }
+            if args?.chromeless == true, args?.browse == true { return reject(OverlayHtmlError.chromelessWithBrowse) }
             guard let url = HtmlSource.webURL(text) else { return reject(OverlayHtmlError.invalidURL) }
+            if args?.chromeless == true, !HtmlSource.isLoopback(text) { return reject(OverlayHtmlError.chromelessRequiresLoopback) }
             return .page(.url(url))
         }
     }

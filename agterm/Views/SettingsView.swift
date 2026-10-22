@@ -485,9 +485,12 @@ private struct InterfaceSettingsView: View {
 
     var body: some View {
         Form {
-            twoColumnSection("Title Bar", elements: InterfaceElement.allCases.filter { $0.section == .titleBar })
-            twoColumnSection("Sidebar", elements: InterfaceElement.allCases.filter { $0.section == .sidebar })
-            Section("Multiple Windows") {
+            twoColumnSection("Title Bar", elements: InterfaceElement.allCases.filter { $0.section == .titleBar }) {
+                EmptyView()
+            }
+            // the multi-window toggle rides the Sidebar section: the tab is full at 540x680, and its own
+            // section header would push the quick-terminal Size off the bottom.
+            twoColumnSection("Sidebar", elements: InterfaceElement.allCases.filter { $0.section == .sidebar }) {
                 Toggle("Show sidebar only in the active window", isOn: autoHideSidebarInactiveWindows)
                     .accessibilityIdentifier("settings-auto-hide-inactive-sidebars")
             }
@@ -520,7 +523,8 @@ private struct InterfaceSettingsView: View {
     /// A section whose toggles lay out TWO per row, each filling half the row around a centered `Divider` so
     /// the columns read as EVEN and visibly separated; an odd final element pairs with an empty half.
     @ViewBuilder
-    private func twoColumnSection(_ title: String, elements: [InterfaceElement]) -> some View {
+    private func twoColumnSection(_ title: String, elements: [InterfaceElement],
+                                  @ViewBuilder trailing: () -> some View) -> some View {
         Section(title) {
             ForEach(Array(stride(from: 0, to: elements.count, by: 2)), id: \.self) { start in
                 HStack(spacing: 16) {
@@ -533,6 +537,7 @@ private struct InterfaceSettingsView: View {
                     }
                 }
             }
+            trailing()
         }
     }
 
@@ -826,6 +831,7 @@ private struct AgentStatusSettingsView: View {
 /// keymap and posts the change, updating the menu shortcuts, custom-command runner and action palette.
 private struct KeyMappingSettingsView: View {
     let model: SettingsModel
+    @State private var enabledInputSources = TerminalInputSource.enabledSources()
 
     /// configDirectoryPath is the directory shown in the field, matching `SettingsModel`'s own resolution.
     private var configDirectoryPath: String {
@@ -838,6 +844,21 @@ private struct KeyMappingSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Keyboard Layout") {
+                Picker("Lock in terminals", selection: terminalInputSource) {
+                    Text("Off").tag(String?.none)
+                    ForEach(inputSources, id: \.id) { source in
+                        Text(source.name).tag(String?.some(source.id))
+                    }
+                }
+                .accessibilityIdentifier("settings-terminal-input-source")
+                .onAppear { enabledInputSources = TerminalInputSource.enabledSources() }
+                // enabling a source means a trip to System Settings and back, so activation is the reload.
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    enabledInputSources = TerminalInputSource.enabledSources()
+                }
+            }
+
             Section("Config Directory") {
                 HStack {
                     Text(configDirectoryPath)
@@ -909,6 +930,21 @@ private struct KeyMappingSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    /// inputSources is what macOS can select, plus a saved source it no longer can, so the picker still
+    /// shows the stored choice.
+    private var inputSources: [KeyboardInputSource] {
+        let enabled = enabledInputSources
+        guard let saved = model.settings.terminalInputSource, !enabled.contains(where: { $0.id == saved }) else {
+            return enabled
+        }
+        return enabled + [KeyboardInputSource(id: saved, name: "\(saved) (unavailable)")]
+    }
+
+    private var terminalInputSource: Binding<String?> {
+        Binding(get: { model.settings.terminalInputSource },
+                set: { model.setTerminalInputSource($0) })
     }
 
     private var hooksDiagnosticsSummary: String {

@@ -60,6 +60,7 @@ extension AppStore {
         // the origin takes a handed-over ask back when the stream goes, so the replica must not answer it
         if session.askReplica { session.releaseAsk() }
         orphanReplicaOverlays(of: session)
+        closeReplicaPages(of: session)
     }
 
     /// Shows an overlay `id`'s origin handed over as a local one running `command`, the job's helper over
@@ -139,10 +140,12 @@ extension AppStore {
         }
         let pending = PendingAsk(id: ask.id, title: ask.title, message: ask.message, buttons: ask.buttons,
                                  defaultID: ask.defaultID, destructiveID: ask.destructiveID, style: ask.style,
-                                 align: ask.align, width: ask.width)
+                                 align: ask.align, width: ask.width, form: ask.form, cancelID: ask.cancelID)
         return session.openReplicaAsk(pending, paneIdentity: paneIdentity) { result in
             switch result.result {
-            case .answered: answer(.askResolve(PresentationAskAnswer(id: ask.id, owner: ask.owner, button: result.id)))
+            case .answered:
+                answer(.askResolve(PresentationAskAnswer(id: ask.id, owner: ask.owner, button: result.id,
+                                                         text: result.text, selected: result.selected)))
             case .escaped: answer(.askResolve(PresentationAskAnswer(id: ask.id, owner: ask.owner, button: nil)))
             case .cancelled, .pending: answer(.askRejected(PresentationAskRef(id: ask.id, owner: ask.owner)))
             }

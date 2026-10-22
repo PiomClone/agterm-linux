@@ -156,6 +156,8 @@ extension ControlServer {
         presentationHub.onPresenterFrame = { [weak self] session, body in
             self?.receivePresenterFrame(body, forSession: session)
         }
+        RemotePageEnds.shared.onEnd = { [weak self] page in self?.pageServeStreams[page]?.shutdown() }
+        HtmlOverlayReleases.shared.onReplicaRelease = { [weak self] local, origin in self?.replicaPageReleased(local, origin: origin) }
         overlayJobs.onFinished = { [weak self] job in
             self?.pendingJobCancels.remove(job.id)
             self?.library.store(forSession: job.session)?.finishRemoteOverlay(job)
@@ -167,6 +169,7 @@ extension ControlServer {
             store.onRemoteRowVisibility = { [weak self] session, shown in
                 MainActor.assumeIsolated { self?.remoteRowVisibilityChanged(session, shown: shown) }
             }
+            store.onReplicaPageChanged = { [weak self] page in MainActor.assumeIsolated { self?.replicaPageChanged(page) } }
         }
         dropOrphanedPresentationStreams()
     }

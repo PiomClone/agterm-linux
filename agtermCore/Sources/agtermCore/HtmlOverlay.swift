@@ -8,11 +8,24 @@ public enum HtmlSource: Equatable, Sendable {
     case file(path: String, grantRoot: String?)
     /// url is a web page, pinned to its origin by the navigation policy.
     case url(URL)
+    /// replica is a file page another Mac opened, shown here from `agterm-page://<page id>/`: `path` is its
+    /// path on that Mac, whose own grant decides what else may be fetched.
+    case replica(path: String)
 
     /// webURL parses `--url`: an absolute http or https URL with a host, nil for anything else.
-    static func webURL(_ text: String) -> URL? {
+    public static func webURL(_ text: String) -> URL? {
         guard let url = URL(string: text), HtmlOrigin(url) != nil else { return nil }
         return url
+    }
+
+    /// replicaScheme is the URL scheme a replica page loads from.
+    public static let replicaScheme = "agterm-page"
+
+    /// isLoopback says whether `--url` names this Mac by one of three exact hosts: 127.0.0.1, ::1 or localhost.
+    /// Ranges and aliases never match, so WebKit cannot read an accepted host as a different one.
+    public static func isLoopback(_ text: String) -> Bool {
+        guard let url = webURL(text), let host = HtmlOrigin(url)?.host else { return false }
+        return ["127.0.0.1", "::1", "localhost"].contains(host)
     }
 }
 
@@ -71,12 +84,15 @@ public struct HtmlOverlay: Equatable, Sendable {
     public let navigation: Bool
     /// javascript lets the page run its own scripts; agterm's theme script runs either way.
     public let javascript: Bool
-    /// chromeless drops the identity strip, file pages only: the strip is what names a URL page's origin.
+    /// chromeless drops the identity strip: a file page, or a URL page on a loopback host whose frames stay on
+    /// its origin, since nothing else names whose content it shows.
     public let chromeless: Bool
     /// persistent puts a URL page on the saved browser store; every other page gets an in-memory one of its own.
     public let persistent: Bool
     /// browse lets a URL page's main frame leave its original origin for any HTTP(S) site.
     public let browse: Bool
+    /// replicaOf is the page id on the Mac that opened the page, set only on a page shown here for it.
+    public let replicaOf: UUID?
     public var loadState: HtmlLoadState = .loading
     public var loadError: String?
     /// current is what the web view shows now, as the adapter last reported it; nil until the first load
@@ -88,8 +104,9 @@ public struct HtmlOverlay: Equatable, Sendable {
     public var reloadTarget = HtmlReloadTarget.original
 
     public init(source: HtmlSource, navigation: Bool = false, javascript: Bool = false, chromeless: Bool = false,
-                persistent: Bool = false, browse: Bool = false, id: UUID = UUID()) {
+                persistent: Bool = false, browse: Bool = false, id: UUID = UUID(), replicaOf: UUID? = nil) {
         self.id = id
+        self.replicaOf = replicaOf
         self.source = source
         self.navigation = navigation
         self.javascript = javascript
@@ -135,6 +152,7 @@ extension HtmlOverlay {
     public var identity: String {
         switch source {
         case .file(let path, _): return URL(fileURLWithPath: current?.page ?? path).lastPathComponent
+        case .replica(let path): return URL(fileURLWithPath: current?.page ?? path).lastPathComponent
         case .url(let url):
             let shown = browse ? current.map { URL(string: $0.page).flatMap(HtmlOrigin.init)?.display ?? $0.page } : nil
             return shown ?? HtmlOrigin(url)?.display ?? url.absoluteString
@@ -254,9 +272,14 @@ public enum HtmlNavigationPolicy {
             if web { return action.userActivated ? .openExternal : .cancel }
             guard scheme == "file", let grantRoot else { return .cancel }
             return HtmlOverlay.contains(grantRoot, action.url.path) ? .allow : .cancel
+        case .replica:
+            if web { return action.userActivated ? .openExternal : .cancel }
+            let own = action.url.host?.lowercased() == overlay.id.uuidString.lowercased()
+            return scheme == HtmlSource.replicaScheme && own ? .allow : .cancel
         case .url(let original):
             guard web else { return .cancel }
-            if overlay.browse || action.target == .subframe || HtmlOrigin(action.url) == HtmlOrigin(original) { return .allow }
+            if HtmlOrigin(action.url) == HtmlOrigin(original) || overlay.browse { return .allow }
+            if action.target == .subframe, !overlay.chromeless { return .allow }
             return action.userActivated ? .openExternal : .cancel
         }
     }
@@ -269,10 +292,14 @@ public enum HtmlNavigationPolicy {
 public final class HtmlOverlayReleases {
     public static let shared = HtmlOverlayReleases()
     public var onRelease: ((UUID) -> Void)?
+    /// onReplicaRelease is told a page shown for another Mac left its slot, with its local and origin ids, so
+    /// that Mac can free the page whatever closed it here.
+    public var onReplicaRelease: ((_ local: UUID, _ origin: UUID) -> Void)?
 
     func release(_ overlay: HtmlOverlay?) {
         guard let overlay else { return }
         HtmlPageOutcomes.shared.dismiss(overlay.id)
         onRelease?(overlay.id)
+        if let origin = overlay.replicaOf { onReplicaRelease?(overlay.id, origin) }
     }
 }

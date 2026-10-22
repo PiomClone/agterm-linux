@@ -253,6 +253,8 @@ final class LinuxHtmlOverlayPage {
                 return
             }
             html.withCString { webkit_web_view_load_html(cast(webView), $0, nil) }
+        case .replica:
+            fail(OverlayHtmlError.remoteFile)
         }
     }
 

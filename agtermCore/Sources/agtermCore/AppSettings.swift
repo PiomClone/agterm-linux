@@ -51,6 +51,7 @@ public enum InterfaceElement: String, Codable, Sendable, CaseIterable {
     case recentSessions
     case scratch
     case split
+    case overlayToggle
     case dashboard
     case quickTerminal
     case customCommands
@@ -73,7 +74,7 @@ public enum InterfaceElement: String, Codable, Sendable, CaseIterable {
     }
 
     /// Whether the element starts hidden, so its toggle reads off until the user opts in.
-    public var hiddenByDefault: Bool { self == .customCommands || self == .workspaceName }
+    public var hiddenByDefault: Bool { self == .customCommands || self == .workspaceName || self == .overlayToggle }
     /// The human-facing toggle label shown in the Interface settings tab.
     public var displayName: String {
         switch self {
@@ -86,6 +87,7 @@ public enum InterfaceElement: String, Codable, Sendable, CaseIterable {
         case .recentSessions: return "Recent sessions"
         case .scratch: return "Scratch terminal"
         case .split: return "Split view"
+        case .overlayToggle: return "Hide overlays"
         case .dashboard: return "Dashboard"
         case .quickTerminal: return "Quick terminal"
         case .customCommands: return "Custom commands"
@@ -339,6 +341,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var flaggedViewLayout: String?
     /// Raw `LinkOpenMode`; nil = browser. Resolved by `effectiveLinkOpenMode`.
     public var linkOpenMode: String?
+    /// terminalInputSource is the keyboard input source id held while a terminal has the keyboard; nil = off.
+    /// `InputSourceLock` owns when it is selected and restored.
+    public var terminalInputSource: String?
     /// htmlOverlayZoom is the page zoom every HTML overlay shows at, nil for actual size; read it through
     /// `effectiveHtmlOverlayZoom`.
     public var htmlOverlayZoom: Double?
@@ -371,7 +376,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 interfaceFontSize: Double? = nil, quickTerminalSizePercent: Int? = nil,
                 hiddenInterfaceElements: [String]? = nil, shownInterfaceElements: [String]? = nil,
                 autoHideSidebarInactiveWindows: Bool? = nil, flaggedViewLayout: String? = nil,
-                linkOpenMode: String? = nil,
+                linkOpenMode: String? = nil, terminalInputSource: String? = nil,
                 htmlOverlayZoom: Double? = nil, welcomeShown: Bool? = nil) {
         self.fontFamily = fontFamily
         self.fontSize = fontSize
@@ -422,6 +427,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.autoHideSidebarInactiveWindows = autoHideSidebarInactiveWindows
         self.flaggedViewLayout = flaggedViewLayout
         self.linkOpenMode = linkOpenMode
+        self.terminalInputSource = terminalInputSource
         self.htmlOverlayZoom = htmlOverlayZoom
         self.welcomeShown = welcomeShown
     }

@@ -155,6 +155,7 @@ extension AppController {
         case .addWorkspaceToFocus: return { self.addActiveWorkspaceToFocus() }
         case .toggleWorkspaceFilter: return { self.toggleWorkspaceFilter() }
         case .toggleWorkspaceCollapse: return { self.toggleCurrentWorkspaceCollapse() }
+        case .toggleOverlay: return { self.toggleOverlays() }
         }
     }
 

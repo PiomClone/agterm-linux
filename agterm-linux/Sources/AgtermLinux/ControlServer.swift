@@ -383,13 +383,14 @@ final class ControlServer: @unchecked Sendable {
              .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayResult,
              .sessionOverlayReload, .sessionOverlayNavigate,
              .sessionOverlayCopy, .sessionOverlayText,
+             .sessionOverlayHide, .sessionOverlayShow, .sessionOverlayToggle,
              .sessionHudOpen, .sessionHudUpdate, .sessionHudClose,
              .askOpen,
              .sessionBackground, .sessionResize, .sessionText, .notify,
              .fontInc, .fontDec, .fontReset:
             return routeOwningSession(req.target) ?? .controller(gController)
         case .workspaceRename, .workspaceDelete, .workspaceSelect, .workspaceMove, .workspaceFocus,
-             .workspaceCollapse, .workspaceExpand:
+             .workspaceCollapse, .workspaceExpand, .workspaceFlag:
             return routeOwningWorkspace(req.target) ?? .controller(gController)
         case .sessionNew:
             return routeOwningWorkspace(req.args?.workspace) ?? .controller(gController)
@@ -408,9 +409,9 @@ final class ControlServer: @unchecked Sendable {
              .keymapReload, .keymapList, .hooksReload, .hooksList, .browserClear, .browserLinks,
              .configReload, .themeSet, .themeList,
              .pickOpen, .pickResult, .pickCancel, .askResult, .askCancel, .sidebarWidth,
-             .restoreClear, .restoreCapture, .restoreMode, .recentClear, .version,
+             .restoreClear, .restoreCapture, .restoreMode, .recentList, .recentOpen, .recentClear, .version,
              .zmxScreen, .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent,
-             .sessionOverlayJobRun, .debugAppearance:
+             .sessionOverlayJobRun, .sessionOverlayPageServe, .debugAppearance:
             return .controller(gController)
         }
     }

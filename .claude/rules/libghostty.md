@@ -91,8 +91,12 @@ paths:
 
 - Chrome reads background/foreground through `ghostty_config_get`. It cannot read optional
   `selection-*` keys, even when set, so `resolveSelectionColors` parses the same last-wins config sources
-  and named bundled theme file. Selected rows use selection background/foreground, with black/white
-  luminance fallback. Tint borderless New Session through `.tint`; its label ignores foreground style.
+  and the theme file, found as libghostty finds it: a leading `~/` expanded, an absolute path directly,
+  a name in the user themes directory and then the bundled one.
+  `GhosttyConfigText` owns ghostty's quote, empty-reset and last-valid-wins rules for those keys.
+  Selected rows use selection background/foreground, black/white luminance text over a background with no
+  foreground, and the theme foreground for both when neither is set.
+  Tint borderless New Session through `.tint`; its label ignores foreground style.
 - Pass `theme = light:X,dark:Y` raw. The pinned libghostty supports conditional themes, but
   `set_color_scheme` only changes conditional state and emits an unhandled soft reload. agterm must set
   app and surface schemes, then call `update_config`.
@@ -383,6 +387,10 @@ paths:
   `UNAVAILABLE` result never starts the request, so an OSC 52 reader would wait for a reply that never comes.
 - A write keeps every representation (`NSPasteboard.PasteboardType(mimeType:)` mapping): the callback is
   void and core reports `DONE` right after it, so a dropped representation is a false success.
+- Reads and writes follow the callback's clipboard location through `GhosttyCallbacks.pasteboard(for:)`:
+  selection (`copy-on-select = true`, OSC 52 `s`) is a private pasteboard named for the bundle id, as in
+  Ghostty.app, so selecting text never replaces the system clipboard. Primary stays on the general one,
+  because an OSC 52 `p` write reaches the embedder although `supportsClipboard` reports none.
 - Default ungated writes are synchronous so a same-tick read sees them. Read defaults to ask; write defaults
   allow and can be changed in agterm `ghostty.conf`.
 - Deferred completion captures `GhosttySurfaceView`, then rereads its live surface. If a pane closed while

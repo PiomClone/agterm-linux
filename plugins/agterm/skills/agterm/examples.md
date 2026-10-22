@@ -472,7 +472,8 @@ translucency (solid when off, blurred/translucent when on).
 A third per-session full-coverage shell. Hide keeps it alive; `exit` in it recreates on next show.
 
 ```bash
-agtermctl session scratch on        # show (selects the target)
+agtermctl session scratch on        # show; a --target that is not on screen stays unselected
+agtermctl session scratch on --target "$AGTERM_SESSION_ID" --follow   # show and switch to it
 agtermctl session scratch off       # hide, shell stays alive
 agtermctl session scratch toggle
 agtermctl session scratch on --command "zsh -lc 'lazygit'"   # run a program instead of a shell (run-once); login-shell wrap so Homebrew's PATH is found (bare "lazygit" exits 127)
@@ -705,19 +706,23 @@ agtermctl notify "tests failed" --target "$sid"               # a specific sessi
 
 ## Wait for a session status
 
-Subscribe before starting the work, then select the first matching status event. The initial read
-subscribes from now, so an old completed state is not mistaken for a new completion.
+From a project directory the agent already trusts, start a worker there and block until its agent
+finishes or asks for input, giving up after ten minutes:
 
 ```bash
-export target="$AGTERM_SESSION_ID"
-agtermctl events --json --kind status |
-  jq --unbuffered -e 'select(.session == env.target and .payload.status == "completed")' |
-  head -n 1
+id=$(agtermctl session new --cwd "$PWD" --command "zsh -lc 'claude \"fix the failing tests\"'" --no-select --json | jq -r '.result.id')
+status=$(agtermctl session wait --target "$id" --until completed --until blocked --timeout 600)
+case $? in
+  0) echo "worker $status" ;;
+  2) echo "worker session closed" ;;
+  124) echo "worker timed out" ;;
+  *) echo "wait failed" ;;
+esac
 ```
 
-The pipeline ends after the match. A cursor failure, or a transport failure the CLI does not retry,
-makes `agtermctl events` exit non-zero; preserve pipeline status in automation that must distinguish a
-match from a failed stream.
+The wait returns at once when the status already matches, so a worker that finished before the call is
+not missed. That also means a reused session still showing the previous run's `completed` matches
+immediately: wait for `active` first when the session is not fresh.
 
 ## Relay accepted notifications
 

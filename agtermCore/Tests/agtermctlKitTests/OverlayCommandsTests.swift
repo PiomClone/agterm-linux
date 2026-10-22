@@ -73,6 +73,18 @@ struct OverlayCommandsTests {
         #expect(req.args?.persistent == true)
     }
 
+    @Test(arguments: ["http://127.0.0.1:8792/", "http://[::1]:8792/", "http://localhost:5173/"])
+    func urlOpenSendsChromelessForALoopbackHost(_ url: String) throws {
+        let req = try request(["session", "overlay", "open", "--url", url, "--chromeless", "--js", "--persistent"])
+        #expect(req.args?.url == url)
+        #expect(req.args?.chromeless == true)
+    }
+
+    @Test func aMalformedChromelessUrlIsLeftForTheServerToName() throws {
+        let req = try request(["session", "overlay", "open", "--url", "localhost:5173", "--chromeless"])
+        #expect(req.args?.url == "localhost:5173")
+    }
+
     @Test func aProgramOpenLeavesItsCwdAsTyped() throws {
         let req = try request(["session", "overlay", "open", "revdiff", "--cwd", "repo"])
         #expect(req.args?.command == "revdiff")
@@ -88,7 +100,10 @@ struct OverlayCommandsTests {
         ["session", "overlay", "open", "revdiff", "--navigation"],
         ["session", "overlay", "open", "revdiff", "--js"],
         ["session", "overlay", "open", "revdiff", "--chromeless"],
-        ["session", "overlay", "open", "--url", "http://localhost:5173/", "--chromeless"],
+        ["session", "overlay", "open", "--url", "http://example.com/", "--chromeless"],
+        ["session", "overlay", "open", "--url", "http://127.0.0.2:8792/", "--chromeless"],
+        ["session", "overlay", "open", "--url", "http://localhost:5173/", "--chromeless", "--browse"],
+        ["session", "overlay", "open", "--url", "http://localhost:5173/", "--chromeless", "--navigation"],
         ["session", "overlay", "open", "--html", "/tmp/r.html", "--chromeless", "--navigation"],
         ["session", "overlay", "open", "revdiff", "--persistent"],
         ["session", "overlay", "open", "--html", "/tmp/r.html", "--persistent"],
@@ -234,5 +249,28 @@ struct OverlayCommandsTests {
         #expect(navigate.contains("finder (file pages only)"))
         let open = Session.Overlay.Open.helpMessage(columns: 200)
         #expect(open.contains("Show in Finder or Copy Link"))
+    }
+
+    @Test(arguments: [("hide", Command.sessionOverlayHide), ("show", .sessionOverlayShow), ("toggle", .sessionOverlayToggle)])
+    func visibilityCommandsSendTheirCommandPaneAndTarget(_ verb: String, _ cmd: Command) throws {
+        let whole = try request(["session", "overlay", verb, "--target", "s"])
+        #expect(whole.cmd == cmd)
+        #expect(whole.target == "s")
+        #expect(whole.args?.pane == nil)
+
+        let pane = try request(["session", "overlay", verb, "--pane", "right", "--window", "w"])
+        #expect(pane.args?.pane == "right")
+        #expect(pane.args?.window == "w")
+        #expect(rejects(["session", "overlay", verb, "--pane", "scratch"]))
+    }
+
+    @Test func visibilityHelpStatesTheSessionScopeAndTheToggleRule() {
+        let helps = [Session.Overlay.Hide.helpMessage(columns: 400), Session.Overlay.Show.helpMessage(columns: 400),
+                     Session.Overlay.Toggle.helpMessage(columns: 400)]
+        for help in helps {
+            #expect(help.contains("every overlay of the session"))
+            #expect(help.contains("--pane"))
+        }
+        #expect(helps[2].contains("if any is shown, otherwise show them all"))
     }
 }

@@ -19,7 +19,7 @@ struct Session: ParsableCommand {
                       Split.self, Swap.self, Lead.self, Scratch.self, Focus.self, Resize.self, Copy.self, Paste.self,
                       SelectAll.self,
                       Text.self, Status.self, Restore.self, Restart.self, FlagCommand.self, Context.self,
-                      Seen.self, Search.self, Background.self, Overlay.self, Hud.self]
+                      Seen.self, Search.self, Background.self, Overlay.self, Hud.self, Wait.self]
     )
 
     struct New: RequestCommand {
@@ -260,11 +260,13 @@ struct Session: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show or hide a session scratch terminal (on|off|toggle).")
         @Argument(help: "Mode: on (show), off (hide), or toggle (default). The hidden scratch shell stays alive.") var mode: String = "toggle"
         @Option(name: .long, help: "When showing, run this command as the scratch's process instead of a login shell (run-once; respawns the scratch if one is already open).") var command: String?
+        @Flag(name: .long, help: "Select (switch to) the target session when showing its scratch (default: show without switching).") var follow = false
         @OptionGroup var target: TargetOptions
         @OptionGroup var options: ClientOptions
 
         func makeRequest() throws -> ControlRequest {
-            ControlRequest(cmd: .sessionScratch, target: target.target, args: options.withWindow(ControlArgs(mode: mode, command: command)))
+            ControlRequest(cmd: .sessionScratch, target: target.target,
+                           args: options.withWindow(ControlArgs(mode: mode, command: command, follow: follow ? true : nil)))
         }
     }
 
@@ -532,8 +534,8 @@ struct Session: ParsableCommand {
     struct Overlay: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Open, read, resize, or close an ephemeral overlay terminal on a session.",
-            subcommands: [Open.self, Close.self, Resize.self, Reload.self, Navigate.self, Result.self, Submit.self, Copy.self,
-                          Text.self, RunJob.self]
+            subcommands: [Open.self, Close.self, Hide.self, Show.self, Toggle.self, Resize.self, Reload.self, Navigate.self,
+                          Result.self, Submit.self, Copy.self, Text.self, RunJob.self, PageServe.self]
         )
 
         /// `--pane` validation for the overlay commands: the two pane roles only, deliberately NOT the shared
@@ -558,7 +560,11 @@ struct Session: ParsableCommand {
             @Flag(name: .long, help: "With --html or --url, add back, forward, reload, open in browser, and Show in Finder or Copy Link buttons.")
             var navigation = false
             @Flag(name: .customLong("js"), help: "With --html or --url, let the page run its own JavaScript (off by default).") var javascript = false
-            @Flag(name: .long, help: "With --html, show the page without agterm's strip naming it; ⌘W or session overlay close closes it.") var chromeless = false
+            @Flag(name: .long, help: """
+                With --html, or --url on 127.0.0.1, ::1 or localhost, show the page without agterm's strip naming it; \
+                ⌘W or session overlay close closes it.
+                """)
+            var chromeless = false
             @Flag(name: .long, help: Open.persistentHelp) var persistent = false
             @Flag(name: .long, help: Open.browseHelp) var browse = false
             @Option(name: .long, help: """
@@ -590,8 +596,12 @@ struct Session: ParsableCommand {
                 if command == nil, wait || (url != nil && block) { throw ValidationError("a page takes no --wait, and a --url page no --block") }
                 if navigation, command != nil { throw ValidationError("--navigation requires --html or --url") }
                 if javascript, command != nil { throw ValidationError("--js requires --html or --url") }
-                if chromeless, html == nil { throw ValidationError("--chromeless requires --html") }
+                if chromeless, command != nil { throw ValidationError("--chromeless requires --html or a loopback --url") }
                 if chromeless, navigation { throw ValidationError("--chromeless cannot be combined with --navigation") }
+                if chromeless, browse { throw ValidationError("--chromeless cannot be combined with --browse") }
+                if chromeless, let url, HtmlSource.webURL(url) != nil, !HtmlSource.isLoopback(url) {
+                    throw ValidationError("--chromeless with --url requires a loopback host: 127.0.0.1, ::1 or localhost")
+                }
                 if persistent, url == nil { throw ValidationError("--persistent requires --url") }
                 if browse, url == nil { throw ValidationError("--browse requires --url") }
                 if url != nil, cwd != nil { throw ValidationError("--cwd cannot be combined with --url") }

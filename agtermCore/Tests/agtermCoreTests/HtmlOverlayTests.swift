@@ -149,6 +149,23 @@ struct HtmlOverlayTests {
     }
 
     @Test(arguments: [
+        ("http://127.0.0.1:8792/frame.html", HtmlNavigationTarget.subframe, false, HtmlNavigationDecision.allow),
+        ("http://127.0.0.1:8792/next", .mainFrame, false, .allow),
+        ("https://example.com/embed", .subframe, false, .cancel),
+        ("https://example.com/embed", .subframe, true, .openExternal),
+        ("http://localhost:8792/frame.html", .subframe, false, .cancel),
+        ("http://127.0.0.1:8793/frame.html", .subframe, false, .cancel),
+        ("https://example.com/", .mainFrame, false, .cancel),
+        ("about:srcdoc", .subframe, false, .allow),
+    ])
+    func chromelessPagePolicyKeepsFramesOnItsOrigin(_ url: String, _ target: HtmlNavigationTarget, _ userActivated: Bool,
+                                                    _ decision: HtmlNavigationDecision) throws {
+        let action = HtmlNavigationAction(url: try #require(URL(string: url)), target: target, userActivated: userActivated)
+        let overlay = HtmlOverlay(source: .url(try #require(URL(string: "http://127.0.0.1:8792/"))), chromeless: true)
+        #expect(HtmlNavigationPolicy.decide(action, overlay: overlay) == decision)
+    }
+
+    @Test(arguments: [
         ("http://example.com/", "http://EXAMPLE.com:80/a", true),
         ("https://example.com/", "https://example.com:443/b", true),
         ("HTTPS://example.com/", "https://example.com/", true),
@@ -209,6 +226,50 @@ struct HtmlOverlayTests {
         #expect(HtmlOverlay(source: source, persistent: true).persistent)
     }
 
+    @Test(arguments: [
+        ("agterm-page://OWN/index.html", HtmlNavigationTarget.mainFrame, false, HtmlNavigationDecision.allow),
+        ("agterm-page://own/sub/b.html", .subframe, false, .allow),
+        ("agterm-page://\(UUID().uuidString)/index.html", .mainFrame, false, .cancel),
+        ("file:///tmp/a/index.html", .mainFrame, false, .cancel),
+        ("https://example.com/", .mainFrame, true, .openExternal),
+        ("https://example.com/", .mainFrame, false, .cancel),
+        ("about:blank", .mainFrame, false, .allow),
+    ])
+    func replicaPolicyAllowsOnlyItsOwnSchemeOrigin(_ url: String, _ target: HtmlNavigationTarget, _ userActivated: Bool,
+                                                   _ expected: HtmlNavigationDecision) throws {
+        let overlay = HtmlOverlay(source: .replica(path: "/origin/docs/index.html"), replicaOf: UUID())
+        let resolved = url.replacingOccurrences(of: "OWN", with: overlay.id.uuidString)
+            .replacingOccurrences(of: "own", with: overlay.id.uuidString.lowercased())
+        let action = HtmlNavigationAction(url: try #require(URL(string: resolved)), target: target, userActivated: userActivated)
+        #expect(HtmlNavigationPolicy.decide(action, overlay: overlay) == expected)
+    }
+
+    @Test func aReplicaIsNamedByItsFileAndReportsTheOriginPathAsReplica() throws {
+        let origin = UUID()
+        let overlay = HtmlOverlay(source: .replica(path: "/origin/docs/index.html"), replicaOf: origin)
+        #expect(overlay.identity == "index.html")
+        #expect(store.openHtmlOverlay(session.id, pane: nil, overlay: overlay, sizePercent: nil) == nil)
+
+        let node = try #require(store.htmlOverlayNodes(session, zoom: nil)?.first)
+        #expect(node.file == "/origin/docs/index.html")
+        #expect(node.cwd == nil)
+        #expect(node.replica == true)
+        #expect(node.remote == nil)
+    }
+
+    @Test func aLocalPageNodeOmitsTheRemoteFields() throws {
+        #expect(store.openHtmlOverlay(session.id, pane: nil, overlay: page(), sizePercent: nil) == nil)
+        let node = try #require(store.htmlOverlayNodes(session, zoom: nil)?.first)
+        let json = try #require(String(data: try JSONEncoder().encode(node), encoding: .utf8))
+        #expect(!json.contains("\"remote\""))
+        #expect(!json.contains("\"replica\""))
+
+        let reservation = try JSONEncoder().encode(ControlRemoteOverlayNode(pane: nil, sizePercent: 60))
+        #expect(!String(decoding: reservation, as: UTF8.self).contains("pageID"))
+        let page = ControlRemoteOverlayNode(pane: "left", sizePercent: nil, pageID: "p1")
+        #expect(try JSONDecoder().decode(ControlRemoteOverlayNode.self, from: JSONEncoder().encode(page)) == page)
+    }
+
     @Test func fileIdentityIsTheFileShownNeverTheTitle() {
         var overlay = HtmlOverlay(source: .file(path: "/a/docs/index.html", grantRoot: "/a/docs"))
         #expect(overlay.identity == "index.html")
@@ -232,6 +293,29 @@ struct HtmlOverlayTests {
     ])
     func webURLAcceptsOnlyAbsoluteHttpWithAHost(_ text: String, _ valid: Bool) {
         #expect((HtmlSource.webURL(text) != nil) == valid)
+    }
+
+    @Test(arguments: [
+        ("http://127.0.0.1:8792/", true),
+        ("https://127.0.0.1/app", true),
+        ("http://[::1]:8792/", true),
+        ("http://localhost:5173/", true),
+        ("http://LOCALHOST/", true),
+        ("http://127.0.0.2/", false),
+        ("http://127.1/", false),
+        ("http://2130706433/", false),
+        ("http://0.0.0.0:8792/", false),
+        ("http://[::ffff:127.0.0.1]/", false),
+        ("http://localhost./", false),
+        ("http://app.localhost/", false),
+        ("http://localhost.example.com/", false),
+        ("http://example.com/", false),
+        ("ftp://127.0.0.1/", false),
+        ("localhost:5173", false),
+        ("", false),
+    ])
+    func isLoopbackMatchesOnlyTheExactLoopbackHosts(_ text: String, _ loopback: Bool) {
+        #expect(HtmlSource.isLoopback(text) == loopback)
     }
 
     @Test func sessionWideOpenReplacesAHudAndClearsThePriorResult() throws {
@@ -285,10 +369,14 @@ struct HtmlOverlayTests {
         #expect(session.paneOverlayExitCode(.right) == nil)
     }
 
-    @Test func openIsRefusedWhileAPresenterOwnsTheSession() throws {
+    @Test func openIsRefusedWhenAFollowingPaneBelongsToAPresenterWithoutPages() throws {
         let hub = PresentationHub(staleTimeout: 30)
         let presenter = Sink()
         store.presentationHub = hub
+        let attachment = ZmxLeadAttachment(claim: false)
+        ZmxLeadBook.shared.begin(attachment, pane: session.paneIdentity)
+        let notice = try #require(ZmxLeadNotice(title: "zmx-role;\(attachment.nonce):follower:1"))
+        _ = ZmxLeadBook.shared.apply(notice, pane: session.paneIdentity)
         let hello = PresentationHello(version: 1, kinds: [], mode: .presenter)
         let id = try hub.subscribe(session: session.id, hello: hello, sink: presenter) { PresentationSnapshot(status: nil, hud: nil) }
         hub.receive(PresentationFrame(gen: presenter.frames[0].gen, rev: 0, body: .presenterAcquire), from: id)

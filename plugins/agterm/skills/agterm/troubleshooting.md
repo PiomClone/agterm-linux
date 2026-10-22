@@ -138,9 +138,9 @@ Check these in order:
 
 - **Restart after selecting Live sessions.** The restore mode is fixed when agterm starts. Changing
   **Settings ▸ General ▸ Restore sessions** affects the next process, not sessions already open.
-- **Read the eligibility reason in Settings.** Live mode requires zsh as the password-database login shell,
-  bundled zmx, and the bundled zsh-integration resources on both frontends. If the launch cannot use live
-  mode, every pane starts as an ordinary shell.
+- **Read the eligibility reason in Settings.** Live mode requires zsh or fish as the login shell and the
+  bundled zmx and shell-integration resources (`ZDOTDIR` for zsh, `XDG_DATA_DIRS` for fish) on both frontends. If the launch
+  cannot use live mode, every pane starts as an ordinary shell.
 - **Inspect actual backing with `tree --json`.** Primary and split surfaces report `backedByZmx`; the session
   field is true only when every existing primary or split is backed. The sidebar deliberately has no zmx
   indicator.

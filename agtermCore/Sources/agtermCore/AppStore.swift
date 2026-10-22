@@ -135,6 +135,9 @@ public final class AppStore {
     @ObservationIgnored let recentClosedStore: RecentClosedStore?
     @ObservationIgnored var recentClosedDidChange: (() -> Void)?
     @ObservationIgnored let controlEventSink: ((ControlEventDraft) -> Void)?
+    /// The settled selected-pane identity per session that `pane.focused` diffs against.
+    @ObservationIgnored var paneFocusBaseline: [UUID: UUID] = [:]
+    @ObservationIgnored let paneFocusDebouncer = Debouncer()
     /// Where this store publishes a session's presentation state for attached viewers. One hub serves every
     /// window, since a viewer subscribes by session id alone.
     @ObservationIgnored public var presentationHub: PresentationHub?
@@ -142,6 +145,8 @@ public final class AppStore {
     @ObservationIgnored public var overlayJobs: OverlayJobs?
     /// Told when an attached session's row is shown or leaves, undo and restoration included.
     @ObservationIgnored public var onRemoteRowVisibility: ((Session, Bool) -> Void)?
+    /// onReplicaPageChanged is told the local id of a page shown for an origin whose reported state changed.
+    @ObservationIgnored public var onReplicaPageChanged: ((UUID) -> Void)?
     @ObservationIgnored let paneFinalizer: (([UUID]) -> Void)?
 
     /// Told the pane identities of every session or split leaving the visible model, hard or soft, which
@@ -203,6 +208,7 @@ public final class AppStore {
         self.controlEventSink = controlEventSink
         self.paneFinalizer = paneFinalizer
         self.launchPaneDrop = launchPaneDrop
+        observePaneFocus()
     }
 
     /// The currently selected session, derived from `selectedSessionID`.
@@ -373,7 +379,8 @@ public final class AppStore {
                                           liveAttribution: mainAttribution?.rawValue, splitLiveAttribution: splitAttribution?.rawValue,
                                           presentation: presentationNode(of: session), presenters: presentersNode(of: session),
                                           remoteOverlays: remoteOverlayNodes(of: session),
-                                          htmlOverlays: htmlOverlayNodes(session, zoom: htmlZoom))
+                                          htmlOverlays: htmlOverlayNodes(session, zoom: htmlZoom),
+                                          hiddenOverlays: hiddenOverlaysNode(session))
             }
             return ControlWorkspaceNode(id: workspace.id.uuidString, name: workspace.name,
                                         active: workspace.id == activeWorkspaceID,
@@ -924,6 +931,8 @@ public final class AppStore {
         recordRecency()
         // LAST, after the recency stack is re-seeded: the pick is MRU, so earlier finds an empty stack.
         reselectIfSelectionHidden()
+        // a reload is not a pane selection either
+        paneFocusBaseline = selectedPaneIdentities()
     }
 
     func log(_ message: @autoclosure () -> String) {

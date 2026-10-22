@@ -186,4 +186,10 @@ extension AppController {
         }
         updateCoverDimming(windowOpacity: windowOpacity)
     }
+
+    func toggleOverlays() {
+        guard let session = store.activeSession else { return }
+        store.toggleOverlaysHidden(session.id, pane: nil)
+        reconcile()
+    }
 }

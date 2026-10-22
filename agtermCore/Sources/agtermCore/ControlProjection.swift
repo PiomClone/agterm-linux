@@ -57,7 +57,7 @@ public struct ControlReconnect: Codable, Sendable, Equatable {
 /// The HUD panel occupying a session's overlay slot, as projected into the `tree` response. Present only
 /// while a HUD is up, and the session node's `overlay` reads FALSE beside it, so a script polling "is a
 /// program covering this session" can never mistake a message for a running program. The read side of
-/// `session.hud.open`/`.update`; HUD state is poll-only, no event announces it.
+/// `session.hud.open`/`.update`; an open or close emits `tree.changed`, an update emits nothing.
 public struct ControlHudNode: Codable, Sendable, Equatable {
     public let message: String
     /// The dim second line; nil/omitted when the caller set none.
@@ -335,8 +335,13 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     /// an overlay covers nothing here, so `overlay` and `paneOverlays` leave it out.
     public let remoteOverlays: [ControlRemoteOverlayNode]?
     /// htmlOverlays lists the pages in this session's overlay slots, session-wide first then left and right;
-    /// omitted when none is open. `overlay` and `paneOverlays` report their slots as covered too.
+    /// omitted when none is open. A local page's slot is also reported covered by `overlay` and `paneOverlays`;
+    /// a page shown on the presenting Mac (`remote`) covers nothing here.
     public let htmlOverlays: [ControlHtmlOverlayNode]?
+    /// hiddenOverlays lists the hidden slots as `session`, `left`, `right`, omitted when none is hidden. A
+    /// hidden local slot still counts in `overlay` and `paneOverlays`, which report occupancy; a remote page
+    /// is listed when the presenting Mac reports it hidden.
+    public let hiddenOverlays: [String]?
 
     public init(id: String, name: String, cwd: String, title: String? = nil, active: Bool, split: Bool,
                 hasSplit: Bool? = nil, backedByZmx: Bool?, splitAxis: String? = nil,
@@ -355,7 +360,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
                 context: String? = nil, remoteHost: String? = nil, splitCwd: String? = nil,
                 liveAttribution: String? = nil, splitLiveAttribution: String? = nil,
                 presentation: ControlPresentationNode? = nil, presenters: ControlPresentersNode? = nil,
-                remoteOverlays: [ControlRemoteOverlayNode]? = nil, htmlOverlays: [ControlHtmlOverlayNode]? = nil) {
+                remoteOverlays: [ControlRemoteOverlayNode]? = nil, htmlOverlays: [ControlHtmlOverlayNode]? = nil,
+                hiddenOverlays: [String]? = nil) {
         self.id = id
         self.name = name
         self.cwd = cwd
@@ -405,6 +411,7 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
         self.presenters = presenters
         self.remoteOverlays = remoteOverlays
         self.htmlOverlays = htmlOverlays
+        self.hiddenOverlays = hiddenOverlays
     }
 }
 
@@ -443,12 +450,22 @@ public struct ControlHtmlOverlayNode: Codable, Sendable, Equatable {
     public let zoom: Double?
     /// id is the page's identity, the one `session.overlay.result --page` reads; an older server omits it.
     public let id: String?
+    /// hidden is true while the page's slot is hidden, omitted otherwise.
+    public let hidden: Bool?
+    /// remote is true for a page this Mac opened that the presenting Mac shows, omitted otherwise.
+    public let remote: Bool?
+    /// replica is true for a page shown here for the Mac that opened it, omitted otherwise.
+    public let replica: Bool?
 
     public init(pane: String?, file: String? = nil, cwd: String? = nil, url: String? = nil, state: String,
                 error: String?, page: String? = nil, title: String? = nil, canGoBack: Bool? = nil,
                 canGoForward: Bool? = nil, navigation: Bool? = nil, javascript: Bool = false, chromeless: Bool = false,
-                zoom: Double? = nil, id: String? = nil, persistent: Bool = false, browse: Bool = false) {
+                zoom: Double? = nil, id: String? = nil, persistent: Bool = false, browse: Bool = false,
+                hidden: Bool? = nil, remote: Bool? = nil, replica: Bool? = nil) {
         self.id = id
+        self.hidden = hidden
+        self.remote = remote
+        self.replica = replica
         self.pane = pane
         self.file = file
         self.cwd = cwd
@@ -469,7 +486,7 @@ public struct ControlHtmlOverlayNode: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case pane, file, cwd, url, state, error, page, title, canGoBack, canGoForward, navigation, javascript
-        case chromeless, persistent, browse, zoom, id
+        case chromeless, persistent, browse, zoom, id, hidden, remote, replica
     }
 
     public init(from decoder: Decoder) throws {
@@ -491,6 +508,9 @@ public struct ControlHtmlOverlayNode: Codable, Sendable, Equatable {
         browse = try c.decodeIfPresent(Bool.self, forKey: .browse) ?? false
         zoom = try c.decodeIfPresent(Double.self, forKey: .zoom)
         id = try c.decodeIfPresent(String.self, forKey: .id)
+        hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden)
+        remote = try c.decodeIfPresent(Bool.self, forKey: .remote)
+        replica = try c.decodeIfPresent(Bool.self, forKey: .replica)
     }
 }
 
@@ -501,10 +521,13 @@ public struct ControlRemoteOverlayNode: Codable, Sendable, Equatable {
     public let pane: String?
     /// The size requested for a session-wide overlay; what the viewer applied is not reported.
     public let sizePercent: Int?
+    /// pageID names the page the slot holds, the id `htmlOverlays` reports; omitted for a program overlay.
+    public let pageID: String?
 
-    public init(pane: String?, sizePercent: Int?) {
+    public init(pane: String?, sizePercent: Int?, pageID: String? = nil) {
         self.pane = pane
         self.sizePercent = sizePercent
+        self.pageID = pageID
     }
 }
 

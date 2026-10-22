@@ -31,6 +31,8 @@ public protocol ControlActions {
     /// it takes no workspace target — the host resolves the store from `window` (frontmost when nil).
     func setWorkspaceFilter(window: String?, mode: ControlToggleMode) -> ControlResponse
     func setWorkspaceExpansion(_ target: String?, window: String?, expanded: Bool) -> ControlResponse
+    /// Flags or unflags every session of the target workspace as one value; `toggle` unflags only when all are.
+    func setWorkspaceFlag(_ target: String?, window: String?, mode: ControlToggleMode) -> ControlResponse
     func setSessionFlag(_ target: String?, window: String?, mode: String?) -> ControlResponse
     /// Sets or clears the session's title-bar context; `context` is already trimmed and validated, and nil
     /// means clear.
@@ -62,6 +64,10 @@ public protocol ControlActions {
     /// default below keeps existing hosts source-compatible.
     func takeSessionLead(_ target: String?, window: String?, pane: StatusPane?) -> ControlResponse
     func scratchSession(_ target: String?, window: String?, mode: String?, command: String?) -> ControlResponse
+    /// Selection-aware entry point: `follow` selects the target when showing its scratch. Its default
+    /// delegates to the original method so an existing conformer keeps its own selection behavior.
+    func scratchSession(_ target: String?, window: String?, mode: String?, command: String?,
+                        follow: Bool) -> ControlResponse
     func focusSessionPane(_ target: String?, window: String?, pane: String?) -> ControlResponse
     func resizeSplit(_ target: String?, window: String?, resize: ControlSplitResize) -> ControlResponse
     func setSurfaceZoom(_ target: String?, window: String?, mode: ControlToggleMode) -> ControlResponse
@@ -81,6 +87,12 @@ public protocol ControlActions {
     /// `hooks.reload` / `hooks.list`, app-global like the keymap pair.
     func reloadHooks() -> ControlResponse
     func listHooks() -> ControlResponse
+    /// `recent.list` / `recent.clear`, app-global over the one Recent Closed list.
+    func listRecentClosed() -> ControlResponse
+    func clearRecentClosed() -> ControlResponse
+    /// `recent.open` restores the entry `target` names, the newest when nil, into `window`'s store or the
+    /// frontmost one. The host owns resolution and reports the window the entry actually went to.
+    func openRecentClosed(_ target: String?, window: String?) -> ControlResponse
     /// `browser.clear` empties the saved browser store; the reply waits for the removal to finish.
     func clearBrowser() async -> ControlResponse
     /// `browser.links` sets where a clicked web link opens, or with nil only reads it; the reply's text is
@@ -114,6 +126,9 @@ public protocol ControlActions {
     func navigateSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?,
                                 navigation: HtmlNavigation) -> ControlResponse
     func sessionOverlayResult(_ target: String?, window: String?, pane: OverlayPane?) -> ControlResponse
+    /// Hides, shows or toggles the session's overlays, or one pane's; a hidden overlay keeps running.
+    func setSessionOverlayVisibility(_ target: String?, window: String?, pane: OverlayPane?,
+                                     mode: OverlayVisibilityMode) -> ControlResponse
     /// Answers the page in the addressed slot with `value` and closes it; `session.overlay.result --page` reads it.
     func submitSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?, value: String) -> ControlResponse
     /// The selector outcome of page `pageID`, readable after the page and its session are gone.
@@ -167,7 +182,6 @@ public protocol ControlActions {
     /// cancelAsk administratively cancels a dialog without answering a named button.
     func cancelAsk(_ target: String, window: String?) -> ControlResponse
     func clearRestoreCommands() -> ControlResponse
-    func clearRecentClosedItems() -> ControlResponse
     /// Capture every open pane's foreground command now, the same read `applicationWillTerminate` does. The
     /// host owns the `sysctl` read, the save, and the count it reports back.
     func captureRestoreCommands() -> ControlResponse
@@ -199,6 +213,9 @@ public protocol ControlActions {
     func openPresentation(session: String) -> ControlResponse
     /// Claim a remote overlay job for the helper asking. After an ok answer the connection carries job frames.
     func claimOverlayJob(_ job: String) -> ControlResponse
+    /// claimPageServe claims a handed-over page's channel with its single-use token. After an ok answer the
+    /// connection carries page channel frames.
+    func claimPageServe(_ token: String) -> ControlResponse
     /// Attach into an open local window, defaulting to the frontmost window after discovery.
     func attachRemoteSession(host: String, session: String, window: String?) async -> ControlResponse
 }
@@ -230,21 +247,25 @@ public struct ControlDispatcher {
                 .sessionCopy, .sessionPaste, .sessionSelectAll, .sessionSearch, .sessionOverlayOpen,
                 .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayReload, .sessionOverlayNavigate,
                 .sessionOverlayResult, .sessionOverlaySubmit, .sessionOverlayCopy, .sessionOverlayText,
+                .sessionOverlayHide, .sessionOverlayShow, .sessionOverlayToggle,
                 .sessionBackground, .sessionText:
             return await dispatchSessionSurfaceCommand(request)
-        case .sessionOverlayJobRun:
+        case .sessionOverlayJobRun, .sessionOverlayPageServe:
             return dispatchSessionOverlayCommand(request)
         case .workspaceNew, .workspaceSelect, .workspaceGo, .workspaceRename, .workspaceDelete,
-                .workspaceMove, .workspaceFocus, .workspaceFilter, .workspaceCollapse, .workspaceExpand:
+                .workspaceMove, .workspaceFocus, .workspaceFilter, .workspaceCollapse, .workspaceExpand,
+                .workspaceFlag:
             return dispatchWorkspaceCommand(request)
         case .quick, .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .keymapRun,
                 .configReload, .notify, .themeSet, .themeList, .sidebar, .sidebarMode, .sidebarFlaggedLayout,
-                .sidebarExpand, .sidebarCollapse, .sidebarWidth, .restoreClear, .restoreCapture, .recentClear, .version:
+                .sidebarExpand, .sidebarCollapse, .sidebarWidth, .restoreClear, .restoreCapture, .version:
             return dispatchAppCommand(request)
         case .restoreMode, .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent, .zmxScreen:
             return await dispatchZmxCommand(request)
         case .hooksReload, .hooksList:
             return dispatchHooksCommand(request)
+        case .recentList, .recentOpen, .recentClear:
+            return dispatchRecentCommand(request)
         case .browserClear, .browserLinks:
             return await dispatchBrowserCommand(request)
         case .quickType, .quickText:
@@ -607,6 +628,12 @@ public struct ControlDispatcher {
             return actions.setWorkspaceExpansion(request.target, window: request.args?.window, expanded: false)
         case .workspaceExpand:
             return actions.setWorkspaceExpansion(request.target, window: request.args?.window, expanded: true)
+        case .workspaceFlag:
+            guard let mode = ControlToggleMode.parse(request.args?.mode) else {
+                return ControlResponse(ok: false,
+                                       error: "invalid workspace flag mode: \(request.args?.mode ?? "toggle")")
+            }
+            return actions.setWorkspaceFlag(request.target, window: request.args?.window, mode: mode)
         default:
             preconditionFailure("unexpected workspace command: \(request.cmd.rawValue)")
         }
@@ -637,7 +664,7 @@ public struct ControlDispatcher {
             }
         case .sessionScratch:
             return actions.scratchSession(request.target, window: request.args?.window, mode: request.args?.mode,
-                                          command: request.args?.command)
+                                          command: request.args?.command, follow: request.args?.follow == true)
         case .sessionFocus:
             return actions.focusSessionPane(request.target, window: request.args?.window, pane: request.args?.pane)
         case .sessionResize:
@@ -682,7 +709,7 @@ public struct ControlDispatcher {
                                                text: request.args?.text, to: request.args?.to)
         case .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayReload,
              .sessionOverlayNavigate, .sessionOverlayResult, .sessionOverlaySubmit, .sessionOverlayCopy,
-             .sessionOverlayText:
+             .sessionOverlayText, .sessionOverlayHide, .sessionOverlayShow, .sessionOverlayToggle:
             return dispatchSessionOverlayCommand(request)
         case .sessionBackground:
             return dispatchSessionBackground(request)
@@ -753,8 +780,6 @@ public struct ControlDispatcher {
             return actions.setSidebarWidth(points, window: request.args?.window)
         case .restoreClear:
             return actions.clearRestoreCommands()
-        case .recentClear:
-            return actions.clearRecentClosedItems()
         case .restoreCapture:
             return actions.captureRestoreCommands()
         default:

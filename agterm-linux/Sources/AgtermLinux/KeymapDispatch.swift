@@ -477,6 +477,7 @@ extension AppController {
         case .commandPalette: showPalette()
         case .customCommandPalette: showPalette()   // the palette already lists custom commands
         case .showAttention: showAttentionPalette()
+        case .toggleOverlay: toggleOverlays()
         }
     }
 
