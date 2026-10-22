@@ -32,6 +32,14 @@ if [ ! -e "$COMPAT/libxml2.so.2" ] && [ -n "$LIBXML2_SRC" ]; then
   ln -sf "$LIBXML2_SRC" "$COMPAT/libxml2.so.2"
 fi
 export LD_LIBRARY_PATH="$COMPAT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -d "$HOME/.local/lib" ]; then
+  export LD_LIBRARY_PATH="$HOME/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+for pkg_dir in "$HOME/.local/lib/pkgconfig" "$HOME/.local/share/pkgconfig"; do
+  if [ -d "$pkg_dir" ]; then
+    export PKG_CONFIG_PATH="$pkg_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  fi
+done
 
 BIN_DIR="$HOME/.local/bin"
 APP_DIR="$HOME/.local/share/applications"

@@ -471,27 +471,34 @@ private extension IntegrationService {
         warnings: inout [String], conflicts: inout [String],
         operations: inout [IntegrationOperation]
     ) throws {
-        let home = environment.homeDirectory.path
-        let base = environment.homeDirectory.appendingPathComponent(
-            ".config/opencode", isDirectory: true)
+        if skipOpenCode { warnings.append("OpenCode plugin skipped by choice."); return }
+        let detection = resolveOpenCode()
+        guard let base = detection.configurationDirectory else {
+            warnings.append("OpenCode configuration directory is unavailable; its plugin will be skipped.")
+            return
+        }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: base.path, isDirectory: &isDirectory) else {
             warnings.append(
-                "No ~/.config/opencode directory was detected; the OpenCode plugin will be skipped.")
+                "No OpenCode configuration directory was detected at \(base.path); its plugin will be skipped.")
             return
         }
         guard isDirectory.boolValue else {
             conflicts.append("\(base.path) exists but is not a directory.")
             return
         }
-        let source = package.appendingPathComponent(AgentHooksInstall.opencodePluginRelativePath)
+        guard let version = detection.version else {
+            warnings.append("OpenCode major version is unknown; choose v1 or v2, or skip its plugin.")
+            return
+        }
+        let source = package.appendingPathComponent(AgentHooksInstall.OpenCode.relativePath(version: version))
         guard let bundled = try? String(contentsOf: source, encoding: .utf8),
-              bundled.contains(AgentHooksInstall.opencodePluginMarker) else {
+              bundled.contains(AgentHooksInstall.OpenCode.marker(version: version)) else {
             throw IntegrationServiceError.invalidResource(
                 "The bundled OpenCode plugin is missing or invalid: \(source.path)"
             )
         }
-        let path = URL(fileURLWithPath: AgentHooksInstall.opencodePluginPath(home: home))
+        let path = URL(fileURLWithPath: AgentHooksInstall.OpenCode.pluginPath(configurationDirectory: base.path, version: version))
         let pathFingerprint = IntegrationFilesystem.fingerprint(path)
         let exists = pathFingerprint.value != "missing"
         let existing: String?
@@ -502,7 +509,7 @@ private extension IntegrationService {
             return
         }
         guard AgentHooksInstall.mayOverwriteOpenCodePlugin(
-            fileExists: exists, existingContents: existing
+            fileExists: exists, existingContents: existing, version: version
         ) else {
             conflicts.append("\(path.path) is user-owned and will not be changed.")
             return

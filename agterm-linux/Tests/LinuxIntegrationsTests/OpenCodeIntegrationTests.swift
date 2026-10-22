@@ -13,7 +13,7 @@ struct OpenCodeIntegrationTests {
             at: fixture.home.appendingPathComponent(".config/opencode"),
             withIntermediateDirectories: true
         )
-        let service = fixture.service(path: [])
+        let service = IntegrationService(environment: fixture.service(path: []).environment, openCodeVersion: .v1)
         #expect(service.status()[.opencodePlugin]?.state == .notInstalled)
         #expect(try service.apply(service.planHooks()).succeeded)
         #expect(service.status()[.opencodePlugin]?.state == .installed)
@@ -35,7 +35,7 @@ struct OpenCodeIntegrationTests {
         let plugin = fixture.home.appendingPathComponent(
             ".config/opencode/plugins/agterm-status.js")
         try fixture.write("export const Mine = async () => ({})\n", to: plugin)
-        let service = fixture.service(path: [])
+        let service = IntegrationService(environment: fixture.service(path: []).environment, openCodeVersion: .v1)
         #expect(service.status()[.opencodePlugin]?.state == .conflict)
         let plan = try service.planHooks()
         #expect(plan.conflicts.contains { $0.contains("user-owned") && $0.contains("opencode") })

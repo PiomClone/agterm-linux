@@ -13,6 +13,7 @@ extension AppController {
 
     func syncPaneOverlays(_ session: Session, allowFocus: Bool) {
         for pane in OverlayPane.allCases {
+            syncHtmlPaneOverlay(session, pane: pane)
             syncPaneOverlay(session, pane: pane)
         }
         session.dropUnrealizedPaneOverlays()
@@ -25,13 +26,19 @@ extension AppController {
         updatePaneDim(session)
         if allowFocus, session.id == store.selectedSessionID,
            let pane = session.focusedOverlayPane {
-            paneOverlaySurface(session.id, pane: pane)?
-                .grabFocus(supersedingPopoverCapture: true)
+            if let html = session.paneOverlay(pane)?.html,
+               let page = LinuxHtmlOverlayRegistry.shared.existing(html.id) {
+                gtk_widget_grab_focus(W(page.webView))
+            } else {
+                paneOverlaySurface(session.id, pane: pane)?
+                    .grabFocus(supersedingPopoverCapture: true)
+            }
         }
     }
 
     private func syncPaneOverlay(_ session: Session, pane: OverlayPane) {
-        guard let overlay = session.paneOverlay(pane), paneOverlaySurface(session.id, pane: pane) == nil,
+        guard let overlay = session.paneOverlay(pane), overlay.html == nil,
+              paneOverlaySurface(session.id, pane: pane) == nil,
               let host = paneHost(session.id, pane: pane) else { return }
         let codePath = NSTemporaryDirectory() + "agterm-pane-ovl-\(UUID().uuidString).code"
         var environment = sessionEnv(for: session)
@@ -39,7 +46,7 @@ extension AppController {
         environment[OverlayCapture.codeEnvKey] = codePath
         let surface = GhosttySurface(
             sessionID: session.id,
-            cwd: overlay.cwd ?? session.effectiveCwd,
+            cwd: Self.overlayLaunchCwd(session, pane: pane),
             command: "sh -c " + Self.singleQuoted(OverlayCapture.shellLine),
             env: environment,
             controller: self,
@@ -66,6 +73,10 @@ extension AppController {
                 controller.store.closePaneOverlay(sessionID, pane: livePane)
                 controller.reconcile()
             } }
+        }
+        surface.onExitHeld = { [weak surface] in
+            guard let surface else { return }
+            gWindows[owner]?.remoteHeldExits.overlayHeld(surface, forSession: sessionID)
         }
         session.setPaneOverlaySurface(surface, pane: pane)
         setPaneOverlaySurface(surface, sessionID: session.id, pane: pane)

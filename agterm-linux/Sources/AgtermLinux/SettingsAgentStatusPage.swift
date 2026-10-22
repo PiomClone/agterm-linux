@@ -36,6 +36,16 @@ extension AppController {
                     handler: unsafeBitCast(onSettingsBlockedSound, to: GCallback.self))))
         adw_preferences_page_add(cast(page), cast(sound))
 
+        let typing = preferencesGroup("Typing")
+        let resetModes = StatusReset.allCases
+        let selectedReset = resetModes.firstIndex(of: settings.effectiveStatusReset) ?? 0
+        adw_preferences_group_add(
+            cast(typing),
+            W(preferencesCombo(
+                "Status reset", values: ["On first key", "On Enter", "Disabled"], selected: selectedReset,
+                handler: unsafeBitCast(onSettingsStatusReset, to: GCallback.self))))
+        adw_preferences_page_add(cast(page), cast(typing))
+
         let follow = preferencesGroup("Auto-follow")
         let mode = AppSettings.AutoFollowAttention(tolerant: settings.autoFollowAttention)
         let modes = AppSettings.AutoFollowAttention.allCases
@@ -71,7 +81,7 @@ extension AppController {
                     "Manage", handler: unsafeBitCast(onManageAgentIntegrations, to: GCallback.self))))
         adw_preferences_group_add(cast(setup), W(integrations))
         let reset = OpaquePointer(adw_action_row_new())
-        "Colors and sound".withCString { adw_preferences_row_set_title(cast(reset), $0) }
+        "Agent status".withCString { adw_preferences_row_set_title(cast(reset), $0) }
         adw_action_row_add_suffix(
             cast(reset),
             W(
@@ -136,6 +146,11 @@ private let onSettingsCompletedShape: @MainActor @convention(c) (OpaquePointer?,
 private let onSettingsBlockedSound: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated {
         controllerForWidget(row)?.setBlockedSoundAtIndex(Int(adw_combo_row_get_selected(cast(row))))
+    }
+}
+private let onSettingsStatusReset: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+    MainActor.assumeIsolated {
+        controllerForWidget(row)?.setStatusResetAtIndex(Int(adw_combo_row_get_selected(cast(row))))
     }
 }
 private let onSettingsAutoFollow: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in

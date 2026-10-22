@@ -14,7 +14,9 @@ extension AppController {
     /// every reconcile, not only the trailing one a soft close arms. Reaping a held session would free its
     /// ghostty surfaces (killing the shells) while `undoPendingClose` still offers to bring it back, and
     /// the undo would then silently spawn a brand-new login shell in place of the user's running one.
-    func reconcile(focusActive: Bool = true, rebuildSidebar: Bool = true) {
+    func reconcile(focusActive: Bool = true, syncSidebar: Bool = true, preferMoving: Set<UUID> = []) {
+        syncRemotePresentations()
+        syncAskSurfaces()
         let dashboardRestore = prepareDashboardForReconcile()
         clearInvalidTerminalZoom()
         for ws in store.workspaces {
@@ -30,12 +32,13 @@ extension AppController {
         var live = Set(store.workspaces.flatMap { $0.sessions.map(\.id) })
         live.formUnion(store.pendingHeldSessionIDs())
         for id in Array(surfaces.keys) where !live.contains(id) { removeSession(id) }
-        if rebuildSidebar { self.rebuildSidebar() }
+        if syncSidebar { self.syncSidebar(preferMoving: preferMoving) }
         showActive(focus: focusActive)
         updateTitle()
         updateAttentionButton()
         updateDashboardButton()
         restoreDashboardAfterReconcile(dashboardRestore)
+        syncAskSurfaces()
     }
 
     /// The `AGTERM_*` env injected into a session's spawned shells (main/split/scratch) so the
@@ -75,6 +78,7 @@ extension AppController {
         surf.launchSeed = launch
         gSpawnRegistry.enqueue(surf, key: s.paneIdentity, shouldPace: launch.shouldPace)
         s.surface = surf
+        if let title = GhosttyApp.shared.staticTitle { surf.applyTitle(title) }
         surfaces[s.id] = surf
         installPaneExitHandler(surf, sessionID: s.id)
         let paneHost = OpaquePointer(gtk_overlay_new())
@@ -100,7 +104,7 @@ extension AppController {
             if scratchSurfaces[s.id] == nil {
                 let command = s.scratchCommand
                 s.scratchCommand = nil
-                let sc = GhosttySurface(sessionID: s.id, cwd: s.effectiveCwd, command: command,
+                let sc = GhosttySurface(sessionID: s.id, cwd: Self.scratchLaunchCwd(s), command: command,
                                         env: sessionEnv(for: s, pane: .scratch), controller: self,
                                         role: .scratch,
                                         reportsPaneState: false)
@@ -123,15 +127,24 @@ extension AppController {
     /// Create/show/hide the ephemeral overlay terminal (runs `overlayCommand` over the session).
     private func syncOverlay(_ s: Session, allowFocus: Bool) {
         guard let stack = sessionStacks[s.id] else { return }
+        if s.hudActive, let frame = floatingOverlayFrames[s.id],
+           let parent = gtk_widget_get_parent(W(frame)),
+           OpaquePointer(parent) != floatingOverlayHost(for: s, pane: s.hudTargetPane) {
+            // A GtkGLArea loses its context permanently when its frame is unparented. Restart only
+            // a HUD whose target pane moved; its helper can read the current body file again.
+            overlaySurfaces[s.id]?.teardown()
+            s.overlaySurface = nil
+        }
         if let cached = overlaySurfaces[s.id], s.overlaySurface !== cached {
             if let frame = floatingOverlayFrames[s.id] {
-                gtk_overlay_remove_overlay(deck, W(frame))
+                removeFloatingOverlayFrame(frame)
                 floatingOverlayFrames[s.id] = nil
             } else {
                 gtk_stack_remove(stack, W(cached.rootWidget))
             }
             overlaySurfaces[s.id] = nil
         }
+        if syncHtmlSessionOverlay(s, allowFocus: allowFocus) { return }
         if s.overlayActive {
             if overlaySurfaces[s.id] == nil, let cmd = s.overlayCommand {
                 let codePath = NSTemporaryDirectory() + "agterm-ovl-\(UUID().uuidString).code"
@@ -141,12 +154,12 @@ extension AppController {
                 if s.hudActive, let hudFile = s.hudFile {
                     ovlEnv[HudLayout.fileEnvKey] = hudFile
                 }
-                let ov = GhosttySurface(sessionID: s.id, cwd: s.overlayCwd ?? s.effectiveCwd,
+                let ov = GhosttySurface(sessionID: s.id, cwd: Self.overlayLaunchCwd(s, pane: nil),
                                         command: "sh -c " + Self.singleQuoted(OverlayCapture.shellLine),
                                         env: ovlEnv, controller: self, waitAfterCommand: s.overlayWait,
                                         role: .overlay,
                                         reportsPaneState: false,
-                                        fontSize: s.fontSize,
+                                        fontSize: s.hudFontSize ?? s.fontSize,
                                         backgroundColor: s.overlayBackgroundColor,
                                         usesSessionWatermark: false)
                 let sid = s.id
@@ -155,18 +168,30 @@ extension AppController {
                 ov.captureExitCode(from: codePath) { code in
                     if recordsExitCode { gWindows[owner]?.store.recordOverlayExit(sid, code: code) }
                 }
-                ov.onExit = {
+                ov.onExit = { [weak ov] in
                     runOnMain { MainActor.assumeIsolated {
-                        gWindows[owner]?.closeOverlay(sid)
+                        guard let controller = gWindows[owner],
+                              Self.sessionOverlayExitCloses(ov, in: controller.store.session(withID: sid)) else { return }
+                        controller.closeOverlay(sid)
                     } }
+                }
+                ov.onExitHeld = { [weak ov] in
+                    guard let ov else { return }
+                    gWindows[owner]?.remoteHeldExits.overlayHeld(ov, forSession: sid)
                 }
                 s.overlaySurface = ov
                 overlaySurfaces[s.id] = ov
                 if let pct = s.overlaySizePercent {
-                    let overlay = deck
+                    let overlay = floatingOverlayHost(for: s, pane: s.hudTargetPane)
                     guard let frame = OpaquePointer(gtk_frame_new(nil)) else { return }
                     gtk_widget_add_css_class(W(frame), "card")
                     gtk_widget_add_css_class(W(frame), "agterm-quick")
+                    var property = GTK_ACCESSIBLE_PROPERTY_LABEL
+                    var value = GValue()
+                    gtk_accessible_property_init_value(property, &value)
+                    "Floating terminal overlay".withCString { g_value_set_string(&value, $0) }
+                    gtk_accessible_update_property_value(frame, 1, &property, &value)
+                    g_value_unset(&value)
                     gtk_widget_set_overflow(W(frame), GTK_OVERFLOW_HIDDEN)   // clip GL child to the rounded card; see LinuxQuickCardPolicy
                     gtk_widget_set_halign(W(frame), GTK_ALIGN_CENTER)
                     gtk_widget_set_valign(W(frame), GTK_ALIGN_CENTER)
@@ -183,7 +208,7 @@ extension AppController {
             }
             if floatingOverlayFrames[s.id] != nil {
                 if let frame = floatingOverlayFrames[s.id], let percent = s.overlaySizePercent {
-                    let overlay = deck
+                    let overlay = placeFloatingOverlayFrame(frame, for: s)
                     updateFloatingOverlayFrame(s, frame: frame, overlay: overlay, fallbackPercent: percent)
                 }
                 if allowFocus, !s.hudActive, s.id == store.selectedSessionID {
@@ -197,8 +222,7 @@ extension AppController {
             }
         } else if let ov = overlaySurfaces[s.id], s.overlaySurface == nil {
             if let frame = floatingOverlayFrames[s.id] {
-                let overlay = deck
-                gtk_overlay_remove_overlay(overlay, W(frame))
+                removeFloatingOverlayFrame(frame)
                 floatingOverlayFrames[s.id] = nil
             } else {
                 (s.scratchActive ? "scratch" : "main").withCString { gtk_stack_set_visible_child_name(stack, $0) }
@@ -229,9 +253,9 @@ extension AppController {
     }
 
     @discardableResult
-    private func updateFloatingOverlayFrame(_ session: Session, frame: OpaquePointer,
-                                            overlay: OpaquePointer,
-                                            fallbackPercent: Int) -> (width: Int32, height: Int32) {
+    func updateFloatingOverlayFrame(_ session: Session, frame: OpaquePointer,
+                                    overlay: OpaquePointer,
+                                    fallbackPercent: Int) -> (width: Int32, height: Int32) {
         let width = gtk_widget_get_width(W(overlay))
         let height = gtk_widget_get_height(W(overlay))
         let widthPercent = Int32(session.overlaySizePercent ?? fallbackPercent)
@@ -294,10 +318,14 @@ extension AppController {
         guard Self.hudGeometryNeedsRefresh(
             previous: lastHudGeometryDeckSize, width: width, height: height) else { return }
         lastHudGeometryDeckSize = (width, height)
+        for (id, paned) in sessionPanes where store.session(withID: id)?.isSplit == true {
+            scheduleSplitRatioRestore(sessionID: id, paned: paned)
+        }
         for (id, frame) in floatingOverlayFrames {
             guard let session = store.session(withID: id), session.hudActive,
                   let percent = session.overlaySizePercent else { continue }
-            updateFloatingOverlayFrame(session, frame: frame, overlay: deck, fallbackPercent: percent)
+            let host = placeFloatingOverlayFrame(frame, for: session)
+            updateFloatingOverlayFrame(session, frame: frame, overlay: host, fallbackPercent: percent)
         }
     }
 
@@ -309,6 +337,12 @@ extension AppController {
 
     static func singleQuoted(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+    /// A queued exit must not close a program or page that took the slot after its surface left it.
+    static func sessionOverlayExitCloses(_ surface: (any TerminalSurface)?, in session: Session?) -> Bool {
+        guard let surface, let session else { return false }
+        return session.overlaySurface === surface
+    }
+
     /// The overlay's command exited (or a control close): tear it down + reconcile.
     func closeOverlay(_ id: UUID) {
         let hud = store.session(withID: id)?.hudActive == true
@@ -317,32 +351,28 @@ extension AppController {
     }
 
     /// Capture each pane's live foreground command into the session model so a restart can re-run it.
-    func captureForegroundCommands() {
-        let denylistPath = ConfigPaths.restoreDenylistPath(configDirectory: configDirectory())
-        let denylist = (try? String(contentsOf: denylistPath, encoding: .utf8)).map(CommandRestore.parseDenylist)
-            ?? ["tmux", "screen", "zellij"]
-        for ws in store.workspaces {
-            for s in ws.sessions {
-                if let argv = surfaces[s.id]?.foregroundCommand(), CommandRestore.shouldRestore(argv: argv, denylist: denylist) {
-                    s.foregroundCommand = argv
-                } else {
-                    s.foregroundCommand = nil
-                }
-                let splitArgv = s.isSplit ? splitSurfaces[s.id]?.foregroundCommand() : nil
-                s.splitForegroundCommand = splitArgv.flatMap {
-                    CommandRestore.shouldRestore(argv: $0, denylist: denylist) ? $0 : nil
-                }
-            }
+    /// One call per edge across its windows, so the edge takes one zmx listing and one budget.
+    @discardableResult
+    static func captureForegroundCommands(in controllers: [AppController], preserveUnconsumedPending: Bool) -> Int {
+        let owned = controllers.flatMap { owner in
+            owner.store.workspaces.flatMap(\.sessions).map { (session: $0, owner: owner) }
         }
+        let owners = Dictionary(owned.map { ($0.session.id, $0.owner) }, uniquingKeysWith: { first, _ in first })
+        return LinuxForegroundCapture.capture(
+            sessions: owned.map(\.session), preserveUnconsumedPending: preserveUnconsumedPending,
+            panes: { (owners[$0.id]?.surfaces[$0.id], owners[$0.id]?.splitSurfaces[$0.id]) },
+            snapshot: { gZmxForegroundResolver?.freshSnapshot(timeout: LinuxZmxClient.captureInvocationTimeout) },
+            read: { surface, snapshot in surface.foregroundCommand(zmxSnapshot: snapshot) })
     }
 
+    @discardableResult
     func runCustomCommand(_ cmd: CustomCommand, origin: GhosttySurface? = nil,
-                          allowSessionless: Bool = false) {
-        let s = store.activeSession
-        guard s != nil || allowSessionless else { return }
+                          allowSessionless: Bool = false, targetSession: Session? = nil) -> Bool {
+        let s = targetSession ?? store.activeSession
+        guard s != nil || allowSessionless else { return false }
         if s == nil, CommandContext.referencesSessionScopedContext(cmd.command) {
             showToast("\(cmd.name) needs an active session")
-            return
+            return false
         }
         let workspace = s.flatMap { store.workspace(forSession: $0.id) }
         let pane: CommandContext.Pane
@@ -363,24 +393,30 @@ extension AppController {
             pane = .left
             selectionSurface = s.flatMap { surfaces[$0.id] }
         }
+        let reportedCwd = s?.cwd(for: pane) ?? ""
+        let localCwd = s?.localWorkingDirectory(
+            reported: reportedCwd, homeDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
         let context = CommandContext(sessionID: s?.id.uuidString ?? "", sessionName: s?.displayName ?? "",
-                                     sessionPWD: s?.effectiveCwd ?? "",
+                                     sessionPWD: reportedCwd,
+                                     sessionHost: TerminalText.sanitized(s?.remoteHost ?? ""),
                                      workspaceID: workspace?.id.uuidString ?? "",
                                      workspaceName: workspace?.name ?? "",
                                      windowID: windowID.uuidString,
                                      windowName: gLibrary.windows.first(where: { $0.id == windowID })?.name ?? "",
-                                     pane: pane, selection: selectionSurface?.readSelection() ?? "",
+                                     pane: pane, paneID: s?.paneToken(for: pane) ?? "",
+                                     selection: selectionSurface?.readSelection() ?? "",
                                      socket: gControlServer.resolvedSocketPath)
         let controllerOrigin = customCommandOrigin
         let launcher = controllerOrigin.launcher
-        LinuxCustomCommandProcess.launch(command: cmd, context: context, launcher: launcher) { [weak self] failure in
+        return LinuxCustomCommandProcess.launch(command: cmd, context: context,
+                                         localWorkingDirectory: localCwd, launcher: launcher) { [weak self] failure in
             runOnMain { [weak self, weak controllerOrigin] in
                 MainActor.assumeIsolated {
                     guard let self, let controllerOrigin,
                           self.customCommandOrigin === controllerOrigin,
                           gWindows[self.windowID] === self else { return }
                     controllerOrigin.deliverIfActive {
-                        self.showToast(failure.toast(commandName: cmd.name))
+                        self.reportCustomCommandFailure(failure, command: cmd, sessionID: context.sessionID)
                     }
                 }
             }
@@ -389,7 +425,8 @@ extension AppController {
 
     func configDirectory() -> URL {
         ConfigPaths.configDirectory(setting: linuxSettingsStore().load().configDirectory,
-                                    stateDir: ProcessInfo.processInfo.environment["AGTERM_STATE_DIR"],
+                                    stateDir: DebugStateDirectory.configStateDirectory(environment: ProcessInfo.processInfo.environment,
+                                        liveDirectory: PersistenceStore.defaultDirectory),
                                     home: FileManager.default.homeDirectoryForCurrentUser)
     }
 
@@ -400,16 +437,16 @@ extension AppController {
         reconcile()
     }
 
-    func editGhosttyConfig() {
+    func editHooks() {
         guard let id = store.selectedSessionID else { return }
-        let path = ConfigPaths.ghosttyConfigPath(configDirectory: configDirectory()).path
+        let path = ConfigPaths.hooksPath(configDirectory: configDirectory()).path
         store.openOverlay(id, command: ConfigPaths.editorCommand(forPath: path), sizePercent: 95)
         reconcile()
     }
 
-    func editHooks() {
+    func editGhosttyConfig() {
         guard let id = store.selectedSessionID else { return }
-        let path = ConfigPaths.hooksPath(configDirectory: configDirectory()).path
+        let path = ConfigPaths.ghosttyConfigPath(configDirectory: configDirectory()).path
         store.openOverlay(id, command: ConfigPaths.editorCommand(forPath: path), sizePercent: 95)
         reconcile()
     }
@@ -425,7 +462,7 @@ extension AppController {
         guard let paned = sessionPanes[s.id], let primaryHost = primaryPaneHosts[s.id] else { return }
         if s.isSplit, splitSurfaces[s.id] == nil {
             let launch = paneLaunchProvider(for: s, pane: .right)
-            let split = GhosttySurface(sessionID: s.id, cwd: s.initialSplitCwd ?? s.effectiveCwd,
+            let split = GhosttySurface(sessionID: s.id, cwd: Self.splitLaunchCwd(s),
                                        env: launch.environment, controller: self,
                                        role: .split, fontSize: s.fontSize,
                                        backedByZmx: launch.backedByZmx)
@@ -434,6 +471,7 @@ extension AppController {
                 gSpawnRegistry.enqueue(split, key: identity, shouldPace: launch.shouldPace)
             }
             s.splitSurface = split
+            if let title = GhosttyApp.shared.staticTitle { split.applyTitle(title) }
             splitSurfaces[s.id] = split
             installPaneExitHandler(split, sessionID: s.id)
             let paneHost = OpaquePointer(gtk_overlay_new())
@@ -473,6 +511,10 @@ extension AppController {
             } else {
                 self.reconcile()
             }
+        }
+        surface.onExitHeld = { [weak self, weak surface] in
+            guard let self, let surface else { return }
+            self.remoteHeldExits.paneHeld(surface, forSession: sessionID)
         }
     }
 
@@ -532,12 +574,14 @@ extension AppController {
                 }
             }
         }
-        gtk_widget_set_visible(primaryWidget, layout.primaryVisible ? 1 : 0)
-        gtk_widget_set_visible(splitWidget, layout.splitVisible ? 1 : 0)
+        let zoomed = zoomedPaneVisibility(forSession: s.id)   // a zoom keeps only its own pane shown
+        gtk_widget_set_visible(primaryWidget, (zoomed?.primary ?? layout.primaryVisible) ? 1 : 0)
+        gtk_widget_set_visible(splitWidget, (zoomed?.split ?? layout.splitVisible) ? 1 : 0)
     }
 
     func capturePanedRatio(_ paned: OpaquePointer?) {
         guard let paned, let (sid, _) = sessionPanes.first(where: { $0.value == paned }),
+              terminalZoom.target == nil, !zoomPendingRatioRestore.contains(sid),
               !splitRatioRestore.isSuppressed(sid), !splitAxisTransitions.contains(sid) else { return }
         guard let session = store.session(withID: sid) else { return }
         let extent = session.splitAxis == .topBottom
@@ -612,14 +656,16 @@ extension AppController {
     }
 
     private func removeSession(_ id: UUID) {
+        removeTerminalAskSurface(id)
         abandonSearch(ownedBy: id)
         splitRatioRestore.cancel(sessionID: id)
         scratchSurfaces[id]?.teardown()
         scratchSurfaces[id] = nil
         if let frame = floatingOverlayFrames[id] {
-            gtk_overlay_remove_overlay(deck, W(frame))
+            removeFloatingOverlayFrame(frame)
             floatingOverlayFrames[id] = nil
         }
+        htmlSessionFrames[id] = nil
         overlaySurfaces[id]?.teardown()
         overlaySurfaces[id] = nil
         leftOverlaySurfaces[id]?.teardown()
@@ -656,7 +702,7 @@ extension AppController {
             guard let stack = sessionStacks[session.id] else { continue }
             let page: String
             if session.fullOverlayActive {
-                page = "overlay"
+                page = session.htmlOverlayActive ? "html" : "overlay"
             } else if session.scratchActive {
                 page = "scratch"
             } else {
@@ -676,16 +722,31 @@ extension AppController {
     /// goes inactive rather than keeping whatever the last selection left behind.
     func showActive(focus: Bool = true) {
         let active = store.activeSession
+        let focusedAsk = active.flatMap { terminalAskSurfaces[$0.id] }.map { ask in
+            gtk_window_get_focus(WIN(windowPointer)).map {
+                gtk_widget_is_ancestor($0, W(ask.root)) != 0
+            } == true && gtk_widget_get_visible(W(ask.root)) != 0
+        } == true
+        // A zoom presents its own session's page, which need not be the selection (`surface zoom --target`).
+        let presentedID = zoomedSessionID ?? active?.id
         for (id, stack) in sessionStacks {
-            let presentation = DeckPagePresentation(pageID: id, activeID: active?.id, dashboardOpen: dashboard.isOpen)
+            let presentation = DeckPagePresentation(pageID: id, activeID: presentedID, dashboardOpen: dashboard.isOpen)
             gtk_widget_set_opacity(W(stack), presentation.opacity)
             gtk_widget_set_can_target(W(stack), presentation.canTarget ? 1 : 0)
             gtk_widget_set_child_visible(W(stack), presentation.childVisible ? 1 : 0)
         }
-        updateFloatingOverlayVisibility(activeID: active?.id)
+        updateFloatingOverlayVisibility(activeID: presentedID)
+        applyTerminalZoomLayout()
         updateCoverDimming()
-        if focus, let active {
-            if active.programOverlayActive {
+        LinuxHtmlOverlayRegistry.shared.refreshVisibility(in: store, selected: active?.id,
+                                                          covered: dashboard.isOpen || quickVisible || terminalZoom.target != nil)
+        if focus, terminalZoom.target != nil {
+            focusActiveSurface()
+        } else if focus, !focusedAsk, let active {
+            if let page = active.topmostHtmlOverlay,
+               let view = LinuxHtmlOverlayRegistry.shared.existing(page.id) {
+                gtk_widget_grab_focus(W(view.webView))
+            } else if active.programOverlayActive {
                 overlaySurfaces[active.id]?.grabFocus()
             } else if active.scratchActive {
                 scratchSurfaces[active.id]?.grabFocus()
@@ -698,6 +759,7 @@ extension AppController {
             }
         }
         updateToggleIcons()
+        syncAskSurfaces()
     }
 
     /// Put keyboard focus back on the active surface when GTK has just stranded it.
@@ -726,12 +788,22 @@ extension AppController {
             quickSurface?.grabFocus()
             return
         }
-        guard !dashboard.isOpen, let id = store.activeSession?.id else { return }
-        searchTargetSurface(for: id)?.grabFocus()
+        guard !dashboard.isOpen, let session = store.activeSession else { return }
+        if let ask = terminalAskSurfaces[session.id], gtk_widget_get_visible(W(ask.root)) != 0,
+           session.askTargetPane == nil || session.askTargetPane == session.focusedPane {
+            ask.focusSelection()
+            return
+        }
+        if let page = session.topmostHtmlOverlay,
+           let view = LinuxHtmlOverlayRegistry.shared.existing(page.id) {
+            gtk_widget_grab_focus(W(view.webView))
+        } else {
+            searchTargetSurface(for: session.id)?.grabFocus()
+        }
     }
 
     /// The shape a path that hands the keyboard back after a MODE CHANGE must use: `showActive()`'s own
-    /// focus leg is deck-only, so it misses the quick terminal, the zoom host and the dashboard.
+    /// focus leg normally follows the selected deck page, while this helper follows any visible modal surface.
     func showActiveFocusingVisibleSurface() {
         showActive(focus: false)
         focusActiveSurface()
@@ -768,7 +840,9 @@ extension AppController {
     /// in the in-terminal search entry, which is unknowable by dismissal time. `detachPopover` consumes
     /// the capture. `keepingCapture` carries a still-live one across a REPLACEMENT, where re-reading the
     /// entry answers `false` because the outgoing popover holds the keyboard.
+    /// A popover takes the keyboard, so it also ends a Ctrl-Tab cycle.
     func popupPopover(_ popover: OpaquePointer, keepingCapture: Bool = false) {
+        cancelSessionSwitch()
         popoverTookKeyboardFromSearchEntry = keepingCapture || searchEntryHoldsKeyboard()
         gtk_popover_popup(POPOVER(popover))
     }
@@ -780,7 +854,7 @@ extension AppController {
     }
 
     /// Whether a REPLACEMENT opener may carry the capture: only while `outgoing` still OWNS the keyboard.
-    /// BOUNDARY, measured — do NOT apply this to the dismissal-time repairs (`rebuildSidebar()`'s tail,
+    /// BOUNDARY, measured — do NOT apply this to the dismissal-time repairs (the sidebar sync's tail,
     /// `activateSessionPickerRow`); both covering `chrome-focus-popovers` steps fail when it is.
     func searchEntryCaptureSurvives(_ outgoing: OpaquePointer?) -> Bool {
         guard popoverTookKeyboardFromSearchEntry, let outgoing else { return false }
@@ -790,9 +864,20 @@ extension AppController {
 
     private func updateFloatingOverlayVisibility(activeID: UUID?) {
         for (id, frame) in floatingOverlayFrames {
-            let visible = id == activeID && (store.session(withID: id)?.overlayActive == true)
+            let visible = Self.floatingOverlayVisible(
+                sessionID: id, activeID: activeID,
+                overlayActive: store.session(withID: id)?.overlayActive == true,
+                zoomTarget: terminalZoom.target)
             gtk_widget_set_visible(W(frame), visible ? 1 : 0)
         }
+    }
+
+    static func floatingOverlayVisible(
+        sessionID: UUID, activeID: UUID?, overlayActive: Bool, zoomTarget: TerminalZoomTarget?
+    ) -> Bool {
+        guard sessionID == activeID, overlayActive else { return false }
+        guard let zoomTarget else { return true }
+        return zoomTarget == .session(sessionID, .overlay)
     }
 
     func surfaceDidReportProgress(_ id: UUID, percent: Int?) {
@@ -803,7 +888,7 @@ extension AppController {
     func updateTitle() {
         let settings = linuxSettingsStore().load()
         let windowInfo = library.windows.first(where: { $0.id == windowID })
-        let normalTitle = LinuxModalTitle.normal(sessionName: store.activeSession?.displayName, window: windowInfo)
+        let normalTitle = LinuxModalTitle.normal(sessionName: zoomTitleSessionName, window: windowInfo)
         var title = store.activeSession?.displayName ?? "agterm"
         if let id = store.selectedSessionID, let p = sessionProgress[id] {
             title = (p < 0 ? "⋯ " : "\(p)% ") + title
@@ -811,18 +896,24 @@ extension AppController {
         title.withCString { gtk_window_set_title(WIN(window), $0) }
         if let titleWidget {
             let hidden = settings.resolvedHiddenInterfaceElements
+            let active = store.activeSession
+            let workspace = active.flatMap { store.workspace(forSession: $0.id) }
             let composition = TitlebarComposition.compose(
                 .init(
+                    workspaceName: hidden.contains(.workspaceName) ? nil : workspace?.name,
                     sessionName: hidden.contains(.sessionName)
-                        ? nil : (store.activeSession?.displayName ?? "agterm"),
+                        ? nil : (active?.displayName ?? "agterm"),
                     windowName: hidden.contains(.windowName) || windowInfo?.hasCustomName != true
                         ? nil : windowInfo?.name,
-                    context: hidden.contains(.sessionContext) ? nil : store.activeSession?.context,
-                    detail: store.activeSession?.subtitleDetail ?? ""
+                    context: hidden.contains(.sessionContext) ? nil : active?.effectiveContext,
+                    detail: active?.subtitleDetail ?? "",
+                    remoteHost: hidden.contains(.remoteHost) ? nil : active?.remoteHost
                 ),
                 mode: settings.effectiveToolbarMode
             )
-            composition.title.withCString { adw_window_title_set_title(titleWidget, $0) }
+            let identity = [composition.title, composition.host].compactMap { $0 }.filter { !$0.isEmpty }
+                .joined(separator: "  ")
+            (identity + composition.tail).withCString { adw_window_title_set_title(titleWidget, $0) }
             composition.subtitle.withCString { adw_window_title_set_subtitle(titleWidget, $0) }
         }
         normalTitle.withCString { value in
@@ -865,133 +956,26 @@ extension AppController {
         scheduleSidebarMetadataRefresh()
     }
 
-    /// Coalesce OSC title/pwd churn from every session into one sidebar rebuild.
+    /// Coalesce OSC title/pwd churn from every session into one sidebar sync.
     ///
-    /// A rebuild destroys and re-creates every row, so it must NOT land while the user is interacting with
-    /// one: it would tear down an in-progress inline rename (whose entry commits its half-typed text on the
-    /// focus-out that disposal triggers) and dismiss an open context menu — both from a background shell's
-    /// prompt redraw. Those interactions are short, so the refresh re-arms itself at a slower cadence
-    /// instead of being dropped; whichever ends the interaction rebuilds anyway, and the retry is then a
-    /// cheap no-op repaint. The gate is the shared `sidebarInteractionInProgress`, so this and the trailing
-    /// soft-close reconcile defer on exactly the same condition.
+    /// Both callers share the ONE debouncer, so `forced` is ORed across a coalesced burst: a forced
+    /// refresh (a desktop font/DPI change, which must re-measure every label under new CSS) still
+    /// destroys and re-creates every row, so it keeps the `sidebarInteractionInProgress` gate and its
+    /// retry — it would otherwise tear down an in-progress rename or an open menu from a background
+    /// shell's prompt redraw. An unforced refresh updates rows in place and needs no gate.
     ///
     /// Internal rather than file-private because the app-level desktop-metrics observer in `App.swift`
-    /// routes its own notification burst through this same debouncer and interaction gate.
-    func scheduleSidebarMetadataRefresh(after delay: TimeInterval = 0.01) {
+    /// routes its own notification burst through this same debouncer.
+    func scheduleSidebarMetadataRefresh(forced: Bool = false, after delay: TimeInterval = 0.01) {
+        sidebarRuntime.metadataRefresh.request(forced: forced)
         sidebarMetadataDebouncer.schedule(after: delay) { [weak self] in
             guard let self else { return }
-            guard !self.sidebarInteractionInProgress else {
-                self.scheduleSidebarMetadataRefresh(after: AppController.sidebarInteractionRetryInterval)
-                return
+            switch sidebarRuntime.metadataRefresh.take(interacting: sidebarInteractionInProgress) {
+            case .inPlace: syncSidebar()
+            case .rebuild: syncSidebar(force: true)
+            case .retry: scheduleSidebarMetadataRefresh(
+                forced: true, after: AppController.sidebarInteractionRetryInterval)
             }
-            self.rebuildSidebar()
         }
-    }
-
-    func sessionDidReportFontSize(_ id: UUID, _ size: Double) {
-        store.setFontSize(id, size)
-    }
-
-    func surfaceDidFocus(_ id: UUID, isSplit: Bool) {
-        guard store.session(withID: id)?.hasSplit == true else { return }
-        store.setPaneFocus(isSplit, forSession: id)
-        if let s = store.session(withID: id) {
-            updatePaneDim(s)
-            updateSessionName(id)
-        }
-        if id == store.selectedSessionID { updateTitle() }
-    }
-
-    static func paneSurfaceOpacities(
-        isSplit: Bool, splitFocused: Bool, dimmed: Double, backdropActive: Bool
-    ) -> (left: Double, right: Double) {
-        guard !backdropActive else { return (1, 1) }
-        return (isSplit && splitFocused ? dimmed : 1.0,
-                isSplit && !splitFocused ? dimmed : 1.0)
-    }
-
-    static func paneOverlayWashOpacity(
-        isSplit: Bool, splitFocused: Bool, pane: OverlayPane,
-        scaledMuteOpacity: Double, backdropActive: Bool
-    ) -> Double {
-        guard isSplit, !backdropActive else { return 0 }
-        let inactive = pane == .left ? splitFocused : !splitFocused
-        return inactive ? scaledMuteOpacity : 0
-    }
-
-    static func scaledMuteOpacity(_ muteOpacity: Double, renderedWindowOpacity: Double) -> Double {
-        min(1, max(0, muteOpacity)) * min(1, max(0, renderedWindowOpacity))
-    }
-
-    static func paneOverlayWashColor(fixedBackground: String?, themeBackground: String?) -> String {
-        fixedBackground ?? themeBackground ?? "#000000"
-    }
-
-    func renderedWindowOpacity(_ override: Double? = nil) -> Double {
-        let value = override ?? pendingBackgroundOpacity ?? linuxSettingsStore().load().backgroundOpacity ?? 1
-        return min(1, max(0, value))
-    }
-
-    func updatePaneDim(_ s: Session, windowOpacity: Double? = nil) {
-        let strength = linuxSettingsStore().load().inactivePaneMuteStrength ?? AppSettings.defaultInactivePaneMuteStrength
-        let rawMuteOpacity = AppSettings.muteOpacity(strength: strength)
-        let windowOpacity = renderedWindowOpacity(windowOpacity)
-        let muteOpacity = Self.scaledMuteOpacity(rawMuteOpacity, renderedWindowOpacity: windowOpacity)
-        let dimmed = 1.0 - muteOpacity
-        let floatingProgram = s.programOverlayActive && s.overlaySizePercent != nil
-        let backdropActive = s.id == store.selectedSessionID && (quickVisible || floatingProgram)
-        let opacities = Self.paneSurfaceOpacities(
-            isSplit: s.isSplit, splitFocused: s.splitFocused,
-            dimmed: dimmed, backdropActive: backdropActive)
-        if let main = surfaces[s.id] { gtk_widget_set_opacity(W(main.rootWidget), opacities.left) }
-        if let split = splitSurfaces[s.id] { gtk_widget_set_opacity(W(split.rootWidget), opacities.right) }
-        if let wash = leftOverlayWashes[s.id] {
-            updatePaneOverlayWashColor(s, pane: .left)
-            gtk_widget_set_opacity(W(wash), Self.paneOverlayWashOpacity(
-                isSplit: s.isSplit, splitFocused: s.splitFocused, pane: .left,
-                scaledMuteOpacity: muteOpacity, backdropActive: backdropActive))
-        }
-        if let wash = rightOverlayWashes[s.id] {
-            updatePaneOverlayWashColor(s, pane: .right)
-            gtk_widget_set_opacity(W(wash), Self.paneOverlayWashOpacity(
-                isSplit: s.isSplit, splitFocused: s.splitFocused, pane: .right,
-                scaledMuteOpacity: muteOpacity, backdropActive: backdropActive))
-        }
-    }
-
-    private func updatePaneOverlayWashColor(_ session: Session, pane: OverlayPane) {
-        guard let provider = paneOverlayWashProvider(session.id, pane: pane) else { return }
-        let color = Self.paneOverlayWashColor(
-            fixedBackground: session.paneOverlay(pane)?.backgroundColor,
-            themeBackground: GhosttyApp.shared.currentThemeBackgroundHex)
-        "* { background-color: \(color); }".withCString {
-            gtk_css_provider_load_from_string(cast(provider), $0)
-        }
-    }
-
-    /// Floating program cards and the quick terminal wash out the content behind them. HUDs stay passive
-    /// and do not add a wash, matching the upstream overlay distinction.
-    func updateCoverDimming(windowOpacity: Double? = nil) {
-        let strength = linuxSettingsStore().load().inactivePaneMuteStrength
-            ?? AppSettings.defaultInactivePaneMuteStrength
-        let muteOpacity = Self.scaledMuteOpacity(
-            AppSettings.muteOpacity(strength: strength),
-            renderedWindowOpacity: renderedWindowOpacity(windowOpacity))
-        let dimmed = 1.0 - muteOpacity
-        gtk_widget_set_opacity(W(sidebarBox), quickVisible ? dimmed : 1.0)
-        if let dashboardHost = dashboardRuntime.host {
-            gtk_widget_set_opacity(W(dashboardHost), quickVisible ? dimmed : 1.0)
-        }
-        let floatingOpacity = Self.floatingFrameOpacity(quickVisible: quickVisible, dimmed: dimmed)
-        for frame in floatingOverlayFrames.values { gtk_widget_set_opacity(W(frame), floatingOpacity) }
-        guard let active = store.activeSession, let stack = sessionStacks[active.id], !dashboard.isOpen else {
-            return
-        }
-        let floatingProgram = active.programOverlayActive && active.overlaySizePercent != nil
-        gtk_widget_set_opacity(W(stack), quickVisible || floatingProgram ? dimmed : 1.0)
-    }
-
-    static func floatingFrameOpacity(quickVisible: Bool, dimmed: Double) -> Double {
-        quickVisible ? dimmed : 1
     }
 }

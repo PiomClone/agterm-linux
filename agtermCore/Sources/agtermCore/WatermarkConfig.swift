@@ -1,3 +1,5 @@
+import Foundation
+
 /// Host-free: formats a `BackgroundWatermark` into one surface's ghostty config-overlay text, plus the
 /// `fit`/`position` validation the CLI and control server share. No AppKit — `.text` rasterization lives in
 /// the app target, so this only emits the `background-image*` lines once a PNG path is known.
@@ -98,14 +100,14 @@ public enum WatermarkConfig {
     }
 
     /// Format a `Double` for a ghostty config value: integral without a trailing `.0` (`14.0` → `14`), else
-    /// the minimal decimal. Locale-independent (always `.`) — `String(format:)` uses the C locale.
+    /// the minimal decimal. Locale-independent (always `.`).
     /// Fixed-point, NOT `String(Double)`, whose scientific notation for tiny magnitudes (`1e-05`) ghostty's
     /// config parser rejects, silently dropping the line back to the default opacity.
     static func formatted(_ value: Double) -> String {
         // `Int(value)` TRAPS on .infinity or |value| ≥ ~9.2e18, so guard the integral fast-path: a validated
         // opacity or live font size never gets there, but `fontSize` comes from a hand-editable snapshot.
         if value == value.rounded(), value.isFinite, abs(value) < Double(Int.max) { return String(Int(value)) }
-        var s = String(format: "%.6f", value)
+        var s = String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), value).lowercased()
         while s.hasSuffix("0") { s.removeLast() }
         if s.hasSuffix(".") { s.removeLast() }
         return s

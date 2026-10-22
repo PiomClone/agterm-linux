@@ -7,11 +7,14 @@ public struct IntegrationEnvironment: Sendable {
     public let resourceRoot: URL?
     public let knownCommandLineTools: [URL]
     public let versionOverride: String?
+    public let probeEnvironment: [String: String]
+    public let openCodeConfigDirectory: String?
+    public let xdgConfigHome: String?
     public let portableLauncherAllowed: Bool
 
     public init(homeDirectory: URL, executableURL: URL, pathDirectories: [URL], resourceRoot: URL?,
                 knownCommandLineTools: [URL] = [], versionOverride: String? = nil,
-                portableLauncherAllowed: Bool = true) {
+                portableLauncherAllowed: Bool = true, openCodeConfigDirectory: String? = nil, xdgConfigHome: String? = nil, probeEnvironment: [String: String]? = nil) {
         self.homeDirectory = homeDirectory
         self.executableURL = executableURL
         self.pathDirectories = pathDirectories
@@ -19,6 +22,9 @@ public struct IntegrationEnvironment: Sendable {
         self.knownCommandLineTools = knownCommandLineTools
         self.versionOverride = versionOverride
         self.portableLauncherAllowed = portableLauncherAllowed
+        self.probeEnvironment = probeEnvironment ?? ["HOME": homeDirectory.path, "PATH": "/usr/local/bin:/usr/bin:/bin"]
+        self.openCodeConfigDirectory = openCodeConfigDirectory
+        self.xdgConfigHome = xdgConfigHome
     }
 
     public static func process(
@@ -54,7 +60,8 @@ public struct IntegrationEnvironment: Sendable {
                                           URL(fileURLWithPath: "/opt/agterm-linux/bin/agtermctl"),
                                       ],
                                       versionOverride: environment["AGTERM_VERSION"],
-                                      portableLauncherAllowed: !appImage && !flatpak)
+                                      portableLauncherAllowed: !appImage && !flatpak,
+                                      openCodeConfigDirectory: environment["OPENCODE_CONFIG_DIR"], xdgConfigHome: environment["XDG_CONFIG_HOME"], probeEnvironment: environment)
     }
 
     public var userBinDirectory: URL {

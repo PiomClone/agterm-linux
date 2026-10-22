@@ -14,10 +14,17 @@ struct LinuxPaneLaunchProvider {
     let resolve: @MainActor (StatusPane) -> LinuxLaunchSeed
 }
 
-private struct LinuxLaunchSeedPolicy {
+struct LinuxLaunchSeedPolicy {
     let restoreEnabled: Bool
     let denylist: Set<String>
     let runningNames: Set<String>?
+
+    /// Replay reads the launch latch, never current settings: a restore-mode change applies after restart.
+    init(launch decision: RestoreLaunchDecision, denylist: Set<String>, runningNames: Set<String>?) {
+        restoreEnabled = decision.active == .rerun
+        self.denylist = denylist
+        self.runningNames = runningNames
+    }
 }
 
 @MainActor
@@ -29,9 +36,10 @@ extension AppController {
         let identity = pane == .right ? session.splitPaneIdentity : session.paneIdentity
         let decision = gRestoreLaunchDecision
         let disposition: ZmxSupport.LaunchDisposition
+        let lead = ZmxLeadAttachment(claim: false)
         if decision.requested == .live, session.remoteHost == nil, let identity {
             let configuration = try? LinuxZmxLaunch.configuration(
-                paneIdentity: identity, baseEnvironment: baseEnvironment
+                paneIdentity: identity, baseEnvironment: baseEnvironment, lead: lead
             ).get()
             disposition = ZmxSupport.launchDisposition(
                 requested: decision.requested, active: decision.active, configuration: configuration
@@ -39,10 +47,11 @@ extension AppController {
         } else {
             disposition = .ordinary
         }
+        if disposition.backedByZmx, let identity {
+            ZmxLeadBook.shared.begin(lead, pane: identity)
+        }
         let policy = LinuxLaunchSeedPolicy(
-            restoreEnabled: linuxSettingsStore().load().effectiveRestoreMode == .rerun,
-            denylist: restoreDenylist(),
-            runningNames: gZmxRunningNames
+            launch: decision, denylist: restoreDenylist(), runningNames: gZmxRunningNames
         )
         let shouldPace = shouldPace(
             session: session, pane: pane, disposition: disposition, policy: policy
@@ -72,12 +81,10 @@ extension AppController {
                             policy: LinuxLaunchSeedPolicy) -> LinuxLaunchSeed {
         switch disposition {
         case .wrapped(let configuration):
-            let replay = session.takePendingForegroundCommand(pane: pane)
-            let creationCommand = replay == nil ? durableCommand(session: session, pane: pane) : nil
             return LinuxLaunchSeed(
-                command: ZmxSupport.attachCommand(
-                    configuration, replaying: replay, creationCommand: creationCommand,
-                    denylist: policy.denylist
+                command: Self.wrappedAttachCommand(
+                    configuration, replay: session.takePendingForegroundCommand(pane: pane),
+                    durable: durableCommand(session: session, pane: pane), denylist: policy.denylist
                 ),
                 initialInput: nil,
                 waitAfterCommand: false
@@ -108,6 +115,13 @@ extension AppController {
             return LinuxLaunchSeed(command: plan.command, initialInput: plan.initialInput,
                                    waitAfterCommand: plan.waitAfterCommand)
         }
+    }
+
+    /// A captured argv, even a denylisted one, preempts the durable creation command after daemon loss.
+    nonisolated static func wrappedAttachCommand(_ configuration: ZmxSupport.Configuration, replay: [String]?,
+                                                 durable: String?, denylist: Set<String>) -> String {
+        ZmxSupport.attachCommand(configuration, replaying: replay,
+                                 creationCommand: replay == nil ? durable : nil, denylist: denylist)
     }
 
     private func shouldPace(session: Session, pane: StatusPane,

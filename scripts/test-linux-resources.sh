@@ -26,6 +26,7 @@ THEMES="$SHARE/ghostty/themes"
 mkdir -p "$THEMES" "$SHARE/ghostty/shell-integration/bash" "$SHARE/ghostty/shell-integration/zsh"
 printf 'fixture\n' > "$SHARE/ghostty/shell-integration/bash/ghostty.bash"
 printf 'fixture\n' > "$SHARE/ghostty/shell-integration/zsh/ghostty-integration"
+printf 'fixture\n' > "$SHARE/ghostty/shell-integration/zsh/.zshenv"
 for theme in "${GHOSTTY_KNOWN_THEMES[@]}"; do
   printf 'background = 000000\n' > "$THEMES/$theme"
 done
@@ -37,6 +38,13 @@ cp "$ROOT/linux/ghostty-resources.env" "$THEMES/.agterm-resource-manifest"
 printf 'xterm-ghostty|agterm resource verifier fixture,\n\tuse=xterm-256color,\n' > "$WORK/ghostty.terminfo"
 tic -x -o "$SHARE/terminfo" "$WORK/ghostty.terminfo"
 "$VERIFY" "$SHARE" >/dev/null
+
+rm "$SHARE/ghostty/shell-integration/zsh/.zshenv"
+if "$VERIFY" "$SHARE" >/dev/null 2>&1; then
+  echo "Ghostty resources without zsh .zshenv unexpectedly passed verification" >&2
+  exit 1
+fi
+printf 'fixture\n' > "$SHARE/ghostty/shell-integration/zsh/.zshenv"
 
 mkdir -p "$WORK/complete/include/ghostty" "$WORK/complete/lib"
 printf 'fixture\n' > "$WORK/complete/include/ghostty.h"
@@ -80,6 +88,9 @@ cp "$ROOT/scripts/setup-linux.sh" "$ROOT/scripts/verify-linux-architecture.sh" \
   "$ROOT/scripts/verify-linux-resources.sh" "$ROOT/scripts/verify-linux-vendor-cache.sh" \
   "$ROOT/scripts/verify-linux-zmx-cache.sh" \
   "$SETUP_ROOT/scripts/"
+mkdir -p "$SETUP_ROOT/scripts/zmx-patches/ghostty"
+cp "$ROOT/scripts/zmx-patches/"*.patch "$SETUP_ROOT/scripts/zmx-patches/"
+cp "$ROOT/scripts/zmx-patches/ghostty/"*.patch "$SETUP_ROOT/scripts/zmx-patches/ghostty/"
 cp "$ROOT/linux/arch.sh" "$ROOT/linux/ghostty-resources.env" "$ROOT/linux/zmx.env" "$SETUP_ROOT/linux/"
 cp -R "$WORK/complete/." "$SETUP_ROOT/agterm-linux/vendor/ghostty/"
 cat > "$SETUP_ROOT/agterm-linux/vendor/zmx/zmx" <<'EOF'
@@ -90,7 +101,8 @@ chmod 0755 "$SETUP_ROOT/agterm-linux/vendor/zmx/zmx"
 printf 'test license\n' > "$SETUP_ROOT/agterm-linux/vendor/zmx/LICENSE"
 # shellcheck source=../linux/zmx.env
 source "$ROOT/linux/zmx.env"
-printf '%s\n' "$ZMX_REV" > "$SETUP_ROOT/agterm-linux/vendor/zmx/REVISION"
+ZMX_PATCH_DIGEST="$(cat "$ROOT/scripts/zmx-patches"/*.patch "$ROOT/scripts/zmx-patches/ghostty"/*.patch | sha256sum | cut -c1-16)"
+printf '%s %s\n' "$ZMX_REV" "$ZMX_PATCH_DIGEST" > "$SETUP_ROOT/agterm-linux/vendor/zmx/REVISION"
 cat > "$WORK/git" <<'EOF'
 #!/usr/bin/env bash
 echo "agterm cache test reached the libghostty rebuild path" >&2

@@ -1,7 +1,7 @@
 ---
 name: agterm
 description: >
-  Drive agterm, a native terminal with macOS and GTK Linux frontends, via the agtermctl CLI. Use in an agterm session when
+  Drive agterm, a native terminal, via the agtermctl CLI. Use in an agterm session when
   asked to control it: create, rename, close, select or
   reorder sessions and workspaces; split panes; toggle the scratch terminal; run overlay programs
   and read their exit status; create and show HTML pages, interactive too, URLs or dev servers in an overlay with saved logins;
@@ -11,8 +11,8 @@ description: >
   a closed window's session screen; subscribe to status, notification, lifecycle, selection,
   pane-visibility and tree-change events.
   Covers window/workspace/session addressing, AGTERM_* variables,
-  platform-supported persistent sessions, attaching a session running on another host, cookbook recipes, running version, diagnosing
-  problems and filing an agterm bug or feature request.
+  attaching a session from another host, cookbook recipes, running version, diagnosing
+  problems and filing a bug or feature request.
 when_to_use: >
   Trigger on: agterm, agtermctl, AGTERM_SESSION_ID, and, from inside a session, plain requests such as
   split the pane, close the overlay, show a message over the session, show a question dialog, agtermctl ask,

@@ -11,8 +11,9 @@ struct LinuxControlPickRow {
 @MainActor
 extension AppController {
     func openPick(_ pick: PendingPick, window: String?, follow: Bool) -> ControlResponse {
+        guard guiAskWindow == nil else { return ControlResponse(ok: false, error: "ask already pending") }
         guard pickController.open(pick) else {
-            return ControlResponse(ok: false, error: "pick already pending")
+            return ControlResponse(ok: false, error: pickController.pendingModalError ?? "pick already pending")
         }
         if follow { gtk_window_present(WIN(windowPointer)) }
         closePalette()
@@ -74,6 +75,7 @@ extension AppController {
             return
         }
         controlPickWindow = win
+        installPaneLeadReleaseCapture(on: win)
         suppressAutoFollow()
         controlPickSuppressesAutoFollow = true
         attachControllerContext(to: win, windowID: windowID)
@@ -131,7 +133,10 @@ extension AppController {
         ))
         gtk_widget_add_controller(W(win), keys)
 
-        filterControlPick("")
+        if let query = pick.query {
+            query.withCString { gtk_editable_set_text(entry, $0) }
+        }
+        filterControlPick(pick.query ?? "")
         gtk_window_present(WIN(win))
         _ = gtk_widget_grab_focus(W(entry))
     }
@@ -163,8 +168,13 @@ extension AppController {
                 appendControlPickRow(label: value.item.label, subtitle: value.item.subtitle, to: list)
             }
         }
-        if let first = gtk_list_box_get_row_at_index(list, 0) {
-            gtk_list_box_select_row(list, first)
+        let selectedIndex = query == pending.query ? pending.selection.flatMap { selection in
+            controlPickRows.firstIndex(where: { $0.item?.id == selection })
+        } : nil
+        let index = selectedIndex ?? 0
+        if let selected = gtk_list_box_get_row_at_index(list, Int32(index)) {
+            gtk_list_box_select_row(list, selected)
+            if selectedIndex != nil { scrollListBoxRowIntoView(list, toIndex: index) }
         }
     }
 
@@ -300,7 +310,9 @@ private let onControlPickRow: @MainActor @convention(c)
     }
 
 private let onControlPickKey: @MainActor @convention(c)
-    (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> gboolean = { keys, keyval, _, _, _ in
+    (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> gboolean = { keys, originalKeyval, _, state, _ in
+    let keyval: UInt32 = state & UInt32(GDK_CONTROL_MASK.rawValue) != 0
+        ? (originalKeyval == 106 ? 0xFF54 : (originalKeyval == 107 ? 0xFF52 : originalKeyval)) : originalKeyval
         switch keyval {
         case 0xFF1B:
             MainActor.assumeIsolated { controllerForEventController(keys)?.cancelControlPick() }

@@ -7,6 +7,7 @@ import Glibc
 /// Bounded process adapter for the pinned zmx CLI. Every invocation owns its Process and pipes, so the
 /// immutable client can serve local inventory and remote-control workers concurrently.
 final class LinuxZmxClient: @unchecked Sendable {
+    /// With `LinuxRemoteCommand`'s 250 ms kill grace, a hung listing still ends inside the 500 ms exit budget.
     static let captureInvocationTimeout: TimeInterval = 0.1
     static let terminationGrace: TimeInterval = 0.25
 
@@ -15,6 +16,9 @@ final class LinuxZmxClient: @unchecked Sendable {
         let arguments: [String]
         let environment: [String: String]
         let timeout: TimeInterval
+        /// zmx confirms a kill on stderr; a listing must not see stderr notices.
+        let mergesStderr: Bool
+        let input: Data?
     }
 
     enum CommandError: Error, Equatable {
@@ -28,13 +32,15 @@ final class LinuxZmxClient: @unchecked Sendable {
     let socketDirectory: String
     private let timeout: TimeInterval
     private let runner: Runner
+    private let sweeper: LinuxProcessSweeper?
 
     init(executablePath: String, socketDirectory: String, timeout: TimeInterval = 3,
-         runner: @escaping Runner = LinuxZmxClient.run) {
+         sweeper: LinuxProcessSweeper? = nil, runner: @escaping Runner = LinuxZmxClient.run) {
         self.executablePath = executablePath
         self.socketDirectory = socketDirectory
         self.timeout = timeout
         self.runner = runner
+        self.sweeper = sweeper
     }
 
     var endpoint: ControlZmxEndpoint {
@@ -69,12 +75,21 @@ final class LinuxZmxClient: @unchecked Sendable {
         kill(names: paneIdentities.map(ZmxSupport.daemonName(for:)))
     }
 
-    func listSessions() -> [ZmxSessionRecord]? {
-        try? ZmxListParser.parse(invoke(["list"]))
+    func listSessions(timeout: TimeInterval? = nil) -> [ZmxSessionRecord]? {
+        try? ZmxListParser.parse(invoke(["list"], timeout: timeout))
     }
 
-    func sessionLeaderPIDs() -> [String: Int32]? {
-        listSessions().map(ZmxLeaderMap.leaders(in:))
+    func screen(name: String, all: Bool) -> ZmxScreen? {
+        guard let output = try? invoke(["screen", name] + (all ? ["--all"] : [])) else { return nil }
+        return ZmxScreen(output: output)
+    }
+
+    func type(name: String, bytes: [UInt8]) -> Bool {
+        (try? invoke(["type", name], input: Data(bytes))) != nil
+    }
+
+    func sessionLeaderPIDs(timeout: TimeInterval? = nil) -> [String: Int32]? {
+        listSessions(timeout: timeout).map(ZmxLeaderMap.leaders(in:))
     }
 
     enum KillOutcome: Equatable {
@@ -85,9 +100,11 @@ final class LinuxZmxClient: @unchecked Sendable {
 
     func killObservedOrphan(names: [String]) -> [String: KillOutcome] {
         var outcomes: [String: KillOutcome] = [:]
+        let jobs = foregroundJobs(of: names)
         for name in Set(names) {
             do {
-                outcomes[name] = Self.outcome(of: try invoke(["kill", name]), name: name)
+                outcomes[name] = Self.outcome(of: try invoke(["kill", name], mergesStderr: true), name: name)
+                if outcomes[name] == .killed, let job = jobs[name] { sweeper?.send(SIGHUP, to: job) }
             } catch {
                 outcomes[name] = .failed(String(describing: error))
             }
@@ -96,8 +113,11 @@ final class LinuxZmxClient: @unchecked Sendable {
     }
 
     func killConfirmed(name: String) -> KillOutcome {
+        let job = foregroundJobs(of: [name])[name]
         do {
-            return Self.outcome(of: try invoke(["kill", name, "--force"]), name: name)
+            let outcome = Self.outcome(of: try invoke(["kill", name, "--force"], mergesStderr: true), name: name)
+            if outcome == .killed, let job { sweeper?.send(SIGHUP, to: job) }
+            return outcome
         } catch {
             return .failed(String(describing: error))
         }
@@ -116,43 +136,42 @@ final class LinuxZmxClient: @unchecked Sendable {
         var seen = Set<String>()
         let unique = names.filter { seen.insert($0).inserted }
         guard !unique.isEmpty else { return true }
-        return (try? invoke(["kill"] + unique + ["--force"])) != nil
+        let jobs = foregroundJobs(of: unique)
+        guard let output = try? invoke(["kill"] + unique + ["--force"], mergesStderr: true) else { return false }
+        for (name, job) in jobs where Self.outcome(of: output, name: name) == .killed { sweeper?.send(SIGHUP, to: job) }
+        return true
     }
 
-    private func invoke(_ arguments: [String], timeout timeoutOverride: TimeInterval? = nil) throws -> String {
+    func foregroundJob(ofShell pid: Int32) -> [ProcessRecord]? { sweeper?.foregroundJob(of: pid) ?? (sweeper == nil ? [] : nil) }
+    func isRunning(_ job: [ProcessRecord]) -> Bool { sweeper?.isRunning(job) ?? false }
+    func forceEnd(_ job: [ProcessRecord]) { sweeper?.send(SIGKILL, to: job) }
+
+    private func foregroundJobs(of names: [String]) -> [String: [ProcessRecord]] {
+        guard let sweeper, let records = listSessions() else { return [:] }
+        let leaders = Dictionary(records.compactMap { record in record.leaderPID.map { (record.name, $0) } }) { first, _ in first }
+        return leaders.filter { names.contains($0.key) }.compactMapValues { sweeper.foregroundJob(of: $0) }
+    }
+
+    private func invoke(_ arguments: [String], timeout timeoutOverride: TimeInterval? = nil,
+                        mergesStderr: Bool = false, input: Data? = nil) throws -> String {
         var environment = ProcessInfo.processInfo.environment
         environment["ZMX_DIR"] = socketDirectory
         environment.removeValue(forKey: "ZMX_SESSION")
         environment.removeValue(forKey: "ZMX_SESSION_PREFIX")
         return try runner(.init(executablePath: executablePath, arguments: arguments,
-                                environment: environment, timeout: timeoutOverride ?? timeout))
+                                environment: environment, timeout: timeoutOverride ?? timeout,
+                                mergesStderr: mergesStderr, input: input))
     }
 
     private static func run(_ invocation: Invocation) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: invocation.executablePath)
-        process.arguments = invocation.arguments
-        process.environment = invocation.environment
-        let output = Pipe()
-        let errors = Pipe()
-        process.standardOutput = output
-        process.standardError = errors
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
-        try process.run()
-        if finished.wait(timeout: .now() + invocation.timeout) == .timedOut {
-            process.terminate()
-            if finished.wait(timeout: .now() + terminationGrace) == .timedOut {
-                _ = Glibc.kill(process.processIdentifier, SIGKILL)
-                process.waitUntilExit()
-            }
-            throw CommandError.timedOut
+        let argv = ["ZMX_DIR=" + (invocation.environment["ZMX_DIR"] ?? ""),
+                    "ZMX_SESSION=", "ZMX_SESSION_PREFIX=",
+                    invocation.executablePath] + invocation.arguments
+        let result = LinuxRemoteCommand.run(argv, deadline: invocation.timeout, input: invocation.input)
+        if result.status == 124 { throw CommandError.timedOut }
+        guard result.status == 0 else {
+            throw CommandError.failed(result.status, result.stdout + result.stderr)
         }
-        let stdout = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        let stderr = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        guard process.terminationStatus == 0 else {
-            throw CommandError.failed(process.terminationStatus, stdout + stderr)
-        }
-        return stdout
+        return invocation.mergesStderr ? result.stdout + result.stderr : result.stdout
     }
 }

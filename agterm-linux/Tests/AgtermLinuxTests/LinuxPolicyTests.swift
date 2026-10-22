@@ -147,94 +147,6 @@ struct LinuxPolicyTests {
         #expect(ghostty_config_key_is_binding(scoped, physicalA))
     }
 
-    @Test("session switcher starts from the previous MRU entry and wraps")
-    func sessionSwitcher() {
-        let first = UUID()
-        let second = UUID()
-        let third = UUID()
-        var switcher = SessionSwitcherModel()
-        switcher.begin([first])
-        #expect(!switcher.isActive)
-        switcher.begin([first, second, third])
-        #expect(switcher.current == second)
-        switcher.advance(reverse: true)
-        #expect(switcher.current == first)
-        switcher.advance(reverse: true)
-        #expect(switcher.current == third)
-        switcher.advance()
-        #expect(switcher.current == first)
-        switcher.end()
-        #expect(!switcher.isActive)
-    }
-
-    @Test("Ctrl release commits the highlighted candidate, or nothing")
-    func sessionSwitcherCommitTarget() {
-        let first = UUID()
-        let second = UUID()
-        let third = UUID()
-        let live: Set<UUID> = [first, second, third]
-        var switcher = SessionSwitcherModel()
-        #expect(switcher.commitTarget(liveIDs: live) == nil)
-        switcher.begin([first])
-        #expect(switcher.commitTarget(liveIDs: live) == nil)
-
-        switcher.begin([first, second, third])
-        #expect(switcher.commitTarget(liveIDs: live) == second)
-        switcher.advance()
-        #expect(switcher.commitTarget(liveIDs: live) == third)
-        #expect(switcher.commitTarget(liveIDs: live.subtracting([third])) == nil)
-        switcher.advance(reverse: true)
-        #expect(switcher.commitTarget(liveIDs: live) == second)
-
-        switcher.end()
-        switcher.end()
-        #expect(!switcher.isActive)
-        #expect(switcher.commitTarget(liveIDs: live) == nil)
-    }
-
-    @Test("the commit waits for the last held Ctrl key")
-    func heldControlKeys() {
-        let left: UInt32 = 37
-        let right: UInt32 = 105
-        let tab: UInt32 = 23
-        let control = ModifierKeyMods.controlBit
-        var held = HeldControlKeys()
-
-        held.pressed(keyval: 0xFFE3, keycode: left, state: 0)
-        held.pressed(keyval: 0xFFE4, keycode: right, state: control)
-        held.pressed(keyval: 0xFF09, keycode: tab, state: control)
-        var commits = held.released(keycode: right, controlStillHeld: true)
-        #expect(!commits)
-        commits = held.released(keycode: left, controlStillHeld: false)
-        #expect(commits)
-
-        // A key up lost to a blur strands `left`; the next press without Ctrl resyncs it away.
-        held.pressed(keyval: 0xFFE3, keycode: left, state: 0)
-        held.pressed(keyval: 0xFF09, keycode: tab, state: 0)
-        held.pressed(keyval: 0xFFE4, keycode: right, state: 0)
-        commits = held.released(keycode: right, controlStillHeld: false)
-        #expect(commits)
-
-        // Both Ctrl keys predate this controller's focus, so its fallback set never saw either press.
-        // GTK's live device state must still keep the first release from committing.
-        var preHeld = HeldControlKeys()
-        preHeld.pressed(keyval: 0xFF09, keycode: tab, state: control)
-        commits = preHeld.released(keycode: left, controlStillHeld: true)
-        #expect(!commits)
-        commits = preHeld.released(keycode: right, controlStillHeld: false)
-        #expect(commits)
-    }
-
-    @Test("the switcher cycles at most ten candidates")
-    func sessionSwitcherCandidateCap() {
-        let ids = (0..<12).map { _ in UUID() }
-        var recency = RecencyStack<UUID>()
-        for id in ids { recency.push(id) }
-        var switcher = SessionSwitcherModel()
-        switcher.begin(recency.top(SessionSwitcherModel.maxCandidates, in: Set(ids)))
-        #expect(switcher.ordered.count == 10)
-    }
-
     @Test("delete prompts use native Linux wording")
     func deletePrompts() {
         #expect(DeletePrompt.workspaceMessage(name: "work", sessions: 1).contains("1 session"))
@@ -289,6 +201,8 @@ struct LinuxPolicyTests {
     func sidebarCSS() {
         let standard = LinuxSidebarPolicy.sidebarCSS(fontSize: 13)
         #expect(standard.contains(".agterm-sidebar label { font-size: 13.0pt; }"))
+        // The rename entry's text node is not a `label`; without its own rule it renders at the GTK default.
+        #expect(standard.contains(".agterm-sidebar entry.agterm-rename > text { font-size: 13.0pt; }"))
         // The full selector, closing brace included, pins the exact libadwaita rule being lowered.
         #expect(standard.contains(".agterm-sidebar .navigation-sidebar > row { min-height: 28px; }"))
         // Only the row rule may be emitted: Adwaita's inner-box rule is AdwSidebar-scoped and never
@@ -518,6 +432,41 @@ struct LinuxPolicyTests {
             pane: .overlay, sessionExists: true, hasSplit: false, coverActive: false) == .primary)
         #expect(LinuxNotificationRevealFocus.resolve(
             pane: .main, sessionExists: false, hasSplit: false, coverActive: false) == nil)
+    }
+}
+
+@Suite("Sidebar scroll-into-view")
+struct SidebarScrollOffsetTests {
+    @Test("a row scrolls only far enough to become fully visible")
+    func rowScrollsToTheNearestEdge() {
+        #expect(LinuxSidebarPolicy.scrollOffset(rowY: 40, rowHeight: 24,
+                                                value: 100, pageSize: 200) == 40)
+        #expect(LinuxSidebarPolicy.scrollOffset(rowY: 380, rowHeight: 24,
+                                                value: 100, pageSize: 200) == 204)
+        #expect(LinuxSidebarPolicy.scrollOffset(rowY: 120, rowHeight: 24,
+                                                value: 100, pageSize: 200) == nil)
+    }
+
+    @Test("the retry waits for the row's and its list box's allocation, and only for a bounded run of frames")
+    func scrollRetryDecisions() {
+        let bound = LinuxSidebarPolicy.scrollRetryTicks
+        func decision(mapped: Bool = true, row: Double, listBox: Double, inSidebar: Bool = true,
+                      ticks: Int) -> LinuxSidebarPolicy.ScrollRetry {
+            LinuxSidebarPolicy.scrollRetry(rowMapped: mapped, rowHeight: row, listBoxHeight: listBox,
+                                           rowInSidebar: inSidebar, ticksElapsed: ticks)
+        }
+        #expect(bound == 3)
+        #expect(decision(mapped: false, row: 0, listBox: 0, ticks: 0) == .giveUp)
+        #expect(decision(row: 24, listBox: 300, inSidebar: false, ticks: 0) == .giveUp)
+        #expect(decision(row: 0, listBox: 0, ticks: 0) == .wait)
+        #expect(decision(row: 0, listBox: 300, ticks: 0) == .wait)
+        #expect(decision(row: 24, listBox: 0, ticks: 0) == .wait)
+        #expect(decision(row: 24, listBox: 300, ticks: 0) == .scroll)
+        #expect(decision(row: 0, listBox: 0, ticks: bound - 1) == .wait)
+        #expect(decision(row: 24, listBox: 0, ticks: bound - 1) == .wait)
+        #expect(decision(row: 0, listBox: 0, ticks: bound) == .giveUp)
+        #expect(decision(row: 24, listBox: 0, ticks: bound) == .giveUp)
+        #expect(decision(row: 24, listBox: 300, ticks: bound) == .scroll)
     }
 }
 
@@ -844,6 +793,24 @@ struct SidebarHoverCSSTests {
     func appCSSInstallsHoverRule() {
         // The hover constant only takes effect once `installAppCSS` interpolates it into the
         // installed stylesheet — pin the composed string, not just the constant.
-        #expect(appCSS(prefersReducedMotion: false).contains(LinuxSidebarPolicy.sidebarHoverCSS))
+        #expect(appCSS.contains(LinuxSidebarPolicy.sidebarHoverCSS))
+    }
+
+    @Test("the installed app CSS keeps the rename entry in the label's box")
+    func appCSSInstallsRenameRule() {
+        #expect(appCSS.contains(LinuxSidebarPolicy.sidebarRenameCSS))
+        let rule = LinuxSidebarPolicy.sidebarRenameCSS
+        #expect(rule.hasPrefix(".agterm-sidebar entry.agterm-rename {"))
+        for property in ["min-height: 0;", "padding: 0;", "border: none;", "background: none;", "outline-offset: 1px;"] {
+            #expect(rule.contains(property))
+        }
+    }
+
+    @Test("the installed app CSS carries no blink animation")
+    func appCSSHasNoBlinkAnimation() {
+        // Blink is driven by BlinkPhaseCoordinator's timer; a surviving CSS animation would keep
+        // GTK's frame clock ticking for the whole toplevel.
+        #expect(!appCSS.contains("@keyframes"))
+        #expect(!appCSS.contains(".agterm-blink {"))
     }
 }

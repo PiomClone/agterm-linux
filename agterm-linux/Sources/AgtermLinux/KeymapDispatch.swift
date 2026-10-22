@@ -6,7 +6,8 @@
 // Resolution: a built-in's chord is `keymap.builtinOverrides[action] ?? action.linuxDefaultChord` (the
 // macOS BuiltinAction.defaultChord is Cmd-based and unsuitable on Linux). Custom commands feed a
 // KeybindMatcher (simple chords + leader sequences). The arrow/page nav and font keys stay fixed; reserved
-// monitor chords (Ctrl+Tab, Ctrl+1/2) are resolved before custom/built-in bindings.
+// monitor chords (Ctrl+1/2) are resolved before custom/built-in bindings. Ctrl+Tab never arrives
+// (agterm-linux/docs/menu-actions.md).
 import CGtk
 import Foundation
 import agtermCore
@@ -19,13 +20,9 @@ enum LinuxFixedShortcut: Equatable {
     case fontIncrease
     case fontDecrease
     case fontReset
-    case sessionSwitch(reverse: Bool)
 }
 
 func linuxFixedShortcut(for chord: Chord) -> LinuxFixedShortcut? {
-    if chord.key == "tab", chord.mods.contains(.control) {
-        return .sessionSwitch(reverse: chord.mods.contains(.shift))
-    }
     switch chord {
     case linuxPreferencesChord:
         return .preferences
@@ -153,6 +150,7 @@ func loadLinuxKeymap(configDirectory: URL) -> (keymap: Keymap, diagnostics: [Key
             commands: commands,
             builtinSequences: sequences,
             builtinUnbound: parsed.builtinUnbound,
+            builtinRepeating: parsed.builtinRepeating,
             globalHotkey: parsed.globalHotkey
         ),
         diagnostics
@@ -176,11 +174,14 @@ func projectLinuxKeymap(
             action: action.rawValue,
             chord: resolved?.displayString,
             alternates: alternates.isEmpty ? nil : alternates,
-            overridden: resolved != action.linuxDefaultChord ? true : nil
+            overridden: resolved != action.linuxDefaultChord ? true : nil,
+            repeats: keymap.builtinRepeating.contains(action) && !alternates.isEmpty ? true : nil
         )
     }
     let commands = keymap.commands.map {
-        ControlKeymapCommand(name: $0.name, shortcut: $0.shortcut.isEmpty ? nil : $0.shortcut)
+        ControlKeymapCommand(name: $0.name, shortcut: $0.shortcut.isEmpty ? nil : $0.shortcut,
+                            errorHud: $0.errorHud, errorPosition: $0.errorPosition, errorPane: $0.errorPane,
+                            repeats: $0.repeats)
     }
     return ControlKeymap(
         path: path,
@@ -265,7 +266,8 @@ extension AppController {
         // cleared shortcuts that collide with built-ins / reserved chords / each other).
         customCommandEngine = CustomCommandEngine(
             commands: km.commands,
-            builtinSequences: km.builtinSequences
+            builtinSequences: km.builtinSequences,
+            builtinRepeating: km.builtinRepeating
         )
         return diagnostics.count
     }
@@ -277,7 +279,10 @@ extension AppController {
     /// open. A malformed `keymap.conf` therefore toasts once per window opened, which is per-window on
     /// purpose — each window is loading the file for the first time.
     func loadKeymapAtStartup() {
+        let existingEngine = customCommandEngine
+        let preserveEngine = !gWindows.isEmpty
         if let message = keymapReloadToast(count: reloadKeymapDiagnostics()) { showToast(message) }
+        if preserveEngine { customCommandEngine = existingEngine }
     }
 
     /// The chord currently bound to `action`, or nil when nothing resolves (no Linux default, or the
@@ -291,20 +296,24 @@ extension AppController {
 
     /// The single entry point for a terminal key press (called by GhosttySurface.keyPressed). Returns
     /// true when the key was consumed as an app shortcut / custom command; false to let libghostty encode
-    /// it for the terminal. Dispatch order: Esc switcher-cancel → Esc leader-abort → reserved host chord →
+    /// it for the terminal. Dispatch order: Esc leader-abort → reserved host chord →
     /// custom command matcher → built-in → fixed shortcut → raw arrow/page navigation.
     func handleKey(keyval: UInt32, keycode: UInt32, state: UInt32, sessionID: UUID,
                    origin: GhosttySurface? = nil,
                    context: @autoclosure () -> ShortcutKeyContext? = nil) -> Bool {
         // Reset the leader deadline to the FINAL armed state on every exit: a fresh leader (re)starts the
         // 1.5s timer, a fired/aborted leader cancels it (macOS-parity leader timeout — see syncLeaderDeadline).
+        let keys = LinuxLeaderState.shared
+        if keys.consumed.contains(keycode) {
+            guard customCommandEngine.isRepeating,
+                  let chord = shortcutChord(fromKeyval: keyval, keycode: keycode, state: state, context: nil),
+                  customCommandEngine.isRepeatTail(chord) else { return true }
+        }
         defer { syncLeaderDeadline() }
-        // Both press paths funnel here, so this is where the Ctrl-Tab commit signal tracks the Ctrl keys.
-        heldControlKeys.pressed(keyval: keyval, keycode: keycode, state: state)
         // Esc fires on the keyval alone, ahead of chord parsing, so no modifier test is needed.
         if keyval == 0xFF1B {
-            if sessionSwitcher.isActive { cancelSessionSwitch(); return true }
-            if customCommandEngine.isArmed { customCommandEngine.reset(); return true }
+            if customCommandEngine.isArmed { customCommandEngine.reset(); keys.consumed.insert(keycode); return true }
+            if customCommandEngine.isRepeating { customCommandEngine.reset() }
             return false
         }
 
@@ -332,12 +341,15 @@ extension AppController {
 
         switch customCommandEngine.advance(chord) {
         case .fired(let command):
+            keys.consume(keycode, repeating: customCommandEngine.isRepeating)
             runCustomCommand(command, origin: origin, allowSessionless: store.activeSession == nil)
             return true
         case .firedBuiltin(let action):
+            keys.consume(keycode, repeating: customCommandEngine.isRepeating)
             dispatchBuiltin(action, sessionID: sessionID)
             return true
         case .armed:
+            keys.consumed.insert(keycode)
             return true
         case .unmatched:
             break
@@ -354,7 +366,19 @@ extension AppController {
         return rawNavigationShortcut(keyval: keyval, state: state)
     }
 
-    private func dispatchFixedShortcut(_ shortcut: LinuxFixedShortcut, origin: GhosttySurface?) {
+    func dispatchFixedShortcut(_ shortcut: LinuxFixedShortcut, origin: GhosttySurface?) {
+        let fontAction: String?
+        switch shortcut {
+        case .fontIncrease: fontAction = FontBindingAction.increase
+        case .fontDecrease: fontAction = FontBindingAction.decrease
+        case .fontReset: fontAction = FontBindingAction.reset
+        default: fontAction = nil
+        }
+        if let fontAction, !dashboard.isOpen,
+           LinuxHtmlOverlayRegistry.shared.ownsKeyboard(in: self) || store.activeSession?.topmostHtmlOverlay != nil {
+            LinuxHtmlOverlayRegistry.shared.stepZoom(fontAction)
+            return
+        }
         switch shortcut {
         case .preferences:
             showSettings()
@@ -366,33 +390,32 @@ extension AppController {
             (origin ?? focusedSurface())?.performBindingAction(FontBindingAction.decrease)
         case .fontReset:
             (origin ?? focusedSurface())?.performBindingAction(FontBindingAction.reset)
-        case .sessionSwitch(let reverse):
-            quickSwitchSession(reverse: reverse)
         }
     }
 
-    /// Abandon a half-typed leader sequence (called on terminal focus loss — mirrors the macOS
-    /// first-responder gate).
-    func resetLeader() { customCommandEngine.reset() }
+    private func resetLeader() { customCommandEngine.reset(); LinuxLeaderState.shared.heldTail = nil }
+
+    /// Drop a half-typed leader and its deadline: terminal focus loss (the macOS first-responder gate),
+    /// window close, and a key consumed before `handleKey`.
+    func abandonLeader() {
+        cancelLeaderDeadline()
+        resetLeader()
+    }
 
     /// Sync the leader deadline to the matcher's armed state (called via `defer` on every key): cancel any
     /// pending timer, then (re)arm a 1.5s g_timeout if a leader sequence is partially entered, so a
     /// half-typed leader self-aborts after the deadline — the Linux analogue of the macOS 1.5s timeout.
-    private func syncLeaderDeadline() {
+    func syncLeaderDeadline() {
         cancelLeaderDeadline()
-        if customCommandEngine.isArmed {
+        if customCommandEngine.isArmed || (customCommandEngine.isRepeating && LinuxLeaderState.shared.heldTail == nil) {
             let context = LeaderTimeoutContext(controller: self)
             leaderTimeout = g_timeout_add_full(
-                G_PRIORITY_DEFAULT, 1500, onLeaderTimeout,
+                G_PRIORITY_DEFAULT, customCommandEngine.isRepeating ? 500 : 1500, onLeaderTimeout,
                 Unmanaged.passRetained(context).toOpaque(), releaseLeaderTimeoutContext)
         }
     }
     private func cancelLeaderDeadline() {
         if leaderTimeout != 0 { g_source_remove(leaderTimeout); leaderTimeout = 0 }
-    }
-    func cancelLeaderDeadlineForWindowClose() {
-        cancelLeaderDeadline()
-        resetLeader()
     }
     /// The leader timer fired (no completing chord in time): abandon the half-typed sequence. The source
     /// auto-removes (the callback returns G_SOURCE_REMOVE), so just clear the id + reset the matcher.
@@ -421,9 +444,9 @@ extension AppController {
         case .clearStatus: clearActiveStatus()
         case .previousWindow: navigateWindow(.previous)
         case .nextWindow: navigateWindow(.next)
-        case .increaseFontSize: focusedSurface()?.performBindingAction(FontBindingAction.increase)
-        case .decreaseFontSize: focusedSurface()?.performBindingAction(FontBindingAction.decrease)
-        case .resetFontSize: focusedSurface()?.performBindingAction(FontBindingAction.reset)
+        case .increaseFontSize: dispatchFixedShortcut(.fontIncrease, origin: nil)
+        case .decreaseFontSize: dispatchFixedShortcut(.fontDecrease, origin: nil)
+        case .resetFontSize: dispatchFixedShortcut(.fontReset, origin: nil)
         case .toggleSplit: toggleSplit(axis: .leftRight)
         case .toggleHorizontalSplit: toggleSplit(axis: .topBottom)
         case .toggleScratch: toggleScratch()

@@ -161,15 +161,19 @@ extension IntegrationService {
     }
 
     func opencodePluginStatus() -> IntegrationItemStatus {
-        let home = environment.homeDirectory.path
-        let base = environment.homeDirectory.appendingPathComponent(".config/opencode", isDirectory: true)
-        let path = URL(fileURLWithPath: AgentHooksInstall.opencodePluginPath(home: home))
+        let detection = resolveOpenCode()
+        guard let base = detection.configurationDirectory else {
+            return IntegrationItemStatus(kind: .opencodePlugin, state: .unavailable, path: nil,
+                                         detail: "OpenCode configuration directory is unavailable.")
+        }
+        let version = detection.version
+        let path = URL(fileURLWithPath: AgentHooksInstall.OpenCode.pluginPath(configurationDirectory: base.path, version: version ?? .v1))
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: base.path, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             return IntegrationItemStatus(
                 kind: .opencodePlugin, state: .unavailable, path: path.path,
-                detail: "No ~/.config/opencode directory was detected."
+                detail: "No OpenCode configuration directory was detected at \(base.path)."
             )
         }
         guard let package = environment.resource(named: "agent-status") else {
@@ -178,9 +182,13 @@ extension IntegrationService {
                 detail: "The bundled OpenCode plugin is unavailable."
             )
         }
-        let source = package.appendingPathComponent(AgentHooksInstall.opencodePluginRelativePath)
+        guard let version else {
+            return IntegrationItemStatus(kind: .opencodePlugin, state: .notInstalled, path: base.path,
+                                         detail: "Choose OpenCode v1 or v2 when installing hooks, or skip its plugin.")
+        }
+        let source = package.appendingPathComponent(AgentHooksInstall.OpenCode.relativePath(version: version))
         guard let bundled = try? String(contentsOf: source, encoding: .utf8),
-              bundled.contains(AgentHooksInstall.opencodePluginMarker) else {
+              bundled.contains(AgentHooksInstall.OpenCode.marker(version: version)) else {
             return IntegrationItemStatus(
                 kind: .opencodePlugin, state: .unavailable, path: path.path,
                 detail: "The bundled OpenCode plugin is invalid."
@@ -203,7 +211,7 @@ extension IntegrationService {
             )
         }
         guard AgentHooksInstall.mayOverwriteOpenCodePlugin(
-            fileExists: true, existingContents: existing
+            fileExists: true, existingContents: existing, version: version
         ) else {
             return IntegrationItemStatus(
                 kind: .opencodePlugin, state: .conflict, path: path.path,

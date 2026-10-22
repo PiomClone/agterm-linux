@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const ACTIVE = ["active", "--blink"];
-const BLOCKED = ["blocked", "--blink"];
+const BLOCKED = process.env.AGTERM_OPENCODE_EVENTS ? ["blocked"] : ["blocked", "--blink"];
 const COMPLETED = ["completed", "--auto-reset"];
 
 /**
@@ -37,6 +37,7 @@ function errorName(error) {
 }
 
 function notificationArgs(event, statusArgs) {
+  if (process.env.AGTERM_OPENCODE_EVENTS) return null;
   if (!statusArgs || statusArgs[0] !== "blocked") return null;
   switch (event?.type) {
     case "permission.asked":

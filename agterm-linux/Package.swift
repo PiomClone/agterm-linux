@@ -5,6 +5,28 @@ import Foundation
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let vendor = "\(packageRoot)/vendor/ghostty"
 
+let home = ProcessInfo.processInfo.environment["HOME"] ?? ""
+var cIncludePaths: [String] = ["\(vendor)/include"]
+var extraLinkerFlags: [String] = [
+    "-L\(vendor)/lib", "-lghostty", "-lepoxy",
+    "-Xlinker", "-rpath", "-Xlinker", "\(vendor)/lib",
+]
+if !home.isEmpty && FileManager.default.fileExists(atPath: "\(home)/.local/include/webkitgtk-6.0") {
+    cIncludePaths.append(contentsOf: [
+        "\(home)/.local/include/webkitgtk-6.0",
+        "\(home)/.local/include/javascriptcoregtk-6.0",
+        "\(home)/.local/include/libsoup-3.0",
+    ])
+}
+if !home.isEmpty && FileManager.default.fileExists(atPath: "\(home)/.local/lib") {
+    extraLinkerFlags.append(contentsOf: [
+        "-L\(home)/.local/lib",
+        "-lwebkitgtk-6.0",
+        "-ljavascriptcoregtk-6.0",
+    ])
+}
+let targetSwiftSettings: [SwiftSetting] = cIncludePaths.map { .unsafeFlags(["-Xcc", "-I\($0)"]) }
+
 let package = Package(
     name: "agterm-linux",
     platforms: [
@@ -21,6 +43,7 @@ let package = Package(
     ],
     targets: [
         .systemLibrary(name: "CGtk", path: "Sources/CGtk", pkgConfig: "libadwaita-1"),
+        .systemLibrary(name: "CWebKit", path: "Sources/CWebKit", pkgConfig: "webkitgtk-6.0"),
         .target(
             name: "LinuxIntegrations",
             dependencies: [.product(name: "agtermCore", package: "agtermCore")]
@@ -29,15 +52,13 @@ let package = Package(
             name: "AgtermLinux",
             dependencies: [
                 "CGtk",
+                "CWebKit",
                 "LinuxIntegrations",
                 .product(name: "agtermCore", package: "agtermCore"),
             ],
             resources: [.copy("Resources/hud")],
-            swiftSettings: [ .unsafeFlags(["-Xcc", "-I\(vendor)/include"]) ],
-            linkerSettings: [ .unsafeFlags([
-                "-L\(vendor)/lib", "-lghostty", "-lepoxy",
-                "-Xlinker", "-rpath", "-Xlinker", "\(vendor)/lib",
-            ]) ]
+            swiftSettings: targetSwiftSettings,
+            linkerSettings: [ .unsafeFlags(extraLinkerFlags) ]
         ),
         .executableTarget(
             name: "agtermctlLinux",
@@ -63,7 +84,7 @@ let package = Package(
             // CGtk (+ the ghostty header path its umbrella pulls in) so the GLib timer seam can be pumped
             // headlessly with `g_main_context_iteration` — no display and no gtk_init needed.
             dependencies: ["AgtermLinux", "CGtk", .product(name: "agtermCore", package: "agtermCore")],
-            swiftSettings: [ .unsafeFlags(["-Xcc", "-I\(vendor)/include"]) ]
+            swiftSettings: targetSwiftSettings
         ),
     ],
     swiftLanguageModes: [.v6]

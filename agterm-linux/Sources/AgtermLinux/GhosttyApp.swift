@@ -33,11 +33,9 @@ final class GhosttyApp: @unchecked Sendable {
     private var tickScheduled = false
     private var resolvedResources: String?
 
-    /// The current theme's colors as OSC escape sequences (OSC 11/10/4/…), fed to each surface at creation
-    /// because the embedded OpenGL renderer doesn't adopt the config's default colors from the config file.
-    /// Set at launch from the persisted theme; refreshed by AppController.previewTheme on every theme change.
-    var currentThemeOSC: String = ""
     var currentThemeBackgroundHex: String?
+    var currentThemeForegroundHex: String?
+    var currentThemePalette: [String] = []
     @MainActor private var appliedAppearanceSide: LinuxAppearanceSide?
 
     @MainActor func start(appearanceSide: LinuxAppearanceSide) {
@@ -48,7 +46,6 @@ final class GhosttyApp: @unchecked Sendable {
         // relaunch. Translucency is omitted: Linux has no window-level compositing yet.
         let saved = linuxSettingsStore().load()
         let lines = AppController.ghosttyLines(for: saved, isDark: appearanceSide.isDark)
-        currentThemeOSC = AppSettings.themeOSC(from: lines)
         let cfg = buildConfig(extraLines: lines)
         if let cfg {
             currentThemeBackgroundHex = GhosttyConfigTheme.colors(from: cfg).background
@@ -104,6 +101,8 @@ final class GhosttyApp: @unchecked Sendable {
     /// Build a ghostty config (bundled defaults + the user's ~/.config/ghostty + the given
     /// extra lines, e.g. `theme = <name>`), finalized and ready for ghostty_surface_update_config.
     /// Caller owns it and must ghostty_config_free it after applying.
+    private(set) var staticTitle: String?
+
     func buildConfig(extraLines: [String]) -> ghostty_config_t? {
         let cfg = ghostty_config_new()
         if let path = Self.writeDefaultsConf() { path.withCString { ghostty_config_load_file(cfg, $0) } }
@@ -129,15 +128,32 @@ final class GhosttyApp: @unchecked Sendable {
         // recursive resolution after all load_file calls, before finalize). Without this a user's
         // `config-file` directives are silently ignored on Linux.
         ghostty_config_load_recursive_files(cfg)
+        clearStaticTitle(cfg)
         ghostty_config_finalize(cfg)
         return cfg
+    }
+
+    /// A Ghostty static title would suppress the OSC title reports managed zmx uses for pane leadership.
+    /// Keep the user's title at the host boundary and let the terminal report every role change.
+    private func clearStaticTitle(_ candidate: ghostty_config_t?) {
+        guard let config = candidate else { return }
+        let key = "title"
+        var value: UnsafePointer<CChar>?
+        let found = key.withCString { ghostty_config_get(config, &value, $0, UInt(key.utf8.count)) }
+        staticTitle = found ? value.map { String(cString: $0) }.flatMap { $0.isEmpty ? nil : $0 } : nil
+        guard staticTitle != nil else { return }
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("agterm-title-\(UUID().uuidString).conf")
+        guard (try? "title =\n".write(toFile: path, atomically: true, encoding: .utf8)) != nil else { return }
+        path.withCString { ghostty_config_load_file(config, $0) }
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     /// Build a config for one surface with a final per-session overlay (`background-image*`, solid
     /// `background`, and/or a font-size override). The returned config is owned by the caller.
     ///
-    /// Resolves through the live theme-picker preview (hence `@MainActor`): the per-surface watermark
-    /// reapply runs off the preview's own OSC color-change action, so a persisted-settings base would
+    /// Resolves through the live theme-picker preview (hence `@MainActor`): a program's OSC 11 during a
+    /// preview reapplies the overlay without explicit settings, so a persisted-settings base would
     /// rebuild the surface with the OLD theme's palette mid-preview.
     @MainActor
     func configWithOverlay(_ overlayText: String, settings: AppSettings? = nil) -> ghostty_config_t? {
@@ -208,8 +224,18 @@ final class GhosttyApp: @unchecked Sendable {
                 return true
             case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
                 guard let w = Self.wrapper(fromTarget: target) else { return false }
-                guard w.shouldCloseOnChildExitAction else { return false }
-                guard let retained = w.surface.flatMap({ RetainedGhosttySurface(ghostty_surface_userdata($0)) }) else { return false }
+                let retained = w.surface.flatMap { RetainedGhosttySurface(ghostty_surface_userdata($0)) }
+                guard w.shouldCloseOnChildExitAction else {
+                    w.handleHeldProcessExit()
+                    // the held hook reaches the store, which may close and free this surface: never inside the callback
+                    guard let retained else { return false }
+                    runOnMain { MainActor.assumeIsolated {
+                        retained.surface.onExitHeld?()
+                        retained.release()
+                    } }
+                    return false
+                }
+                guard let retained else { return false }
                 runOnMain { MainActor.assumeIsolated {
                     retained.surface.handleProcessExit()
                     retained.release()
@@ -366,25 +392,21 @@ final class GhosttyApp: @unchecked Sendable {
                     retained.release()
                     return
                 }
-                let req = ClipboardRequest(surface: surface, state: requestState, retained: retained)
+                let req = ClipboardRequest(state: requestState, retained: retained)
                 gdk_clipboard_read_text_async(
                     clipboard, nil,
                     { source, result, data in
                         let req = Unmanaged<ClipboardRequest>.fromOpaque(data!).takeRetainedValue()
                         defer { req.retained.release() }
                         guard let source else {
-                            "".withCString {
-                                ghostty_surface_complete_clipboard_request(req.surface, $0, req.state, false)
-                            }
+                            MainActor.assumeIsolated { req.complete("") }
                             return
                         }
                         let text = gdk_clipboard_read_text_finish(OpaquePointer(source), result, nil)
                         let raw = text.map { String(cString: $0) } ?? ""
                         // a file-manager copy lands as a file:// uri-list → paste the POSIX paths, like macOS.
                         let value = PasteDecoder.posixPaths(fromURIList: raw) ?? raw
-                        value.withCString {
-                            ghostty_surface_complete_clipboard_request(req.surface, $0, req.state, false)
-                        }
+                        MainActor.assumeIsolated { req.complete(value) }
                         if let text { g_free(text) }
                     },
                     Unmanaged.passRetained(req).toOpaque()
@@ -509,13 +531,18 @@ final class GhosttyApp: @unchecked Sendable {
 }
 
 final class ClipboardRequest: @unchecked Sendable {
-    let surface: ghostty_surface_t
     let state: UnsafeMutableRawPointer?
     let retained: RetainedGhosttySurface
-    init(surface: ghostty_surface_t, state: UnsafeMutableRawPointer?, retained: RetainedGhosttySurface) {
-        self.surface = surface
+    init(state: UnsafeMutableRawPointer?, retained: RetainedGhosttySurface) {
         self.state = state
         self.retained = retained
+    }
+
+    /// Rereads the live surface, which a teardown during the GDK read frees.
+    /// The orphaned request state then leaks: no C API frees it without the surface.
+    @MainActor func complete(_ text: String) {
+        guard let surface = retained.surface.surface else { return }
+        text.withCString { ghostty_surface_complete_clipboard_request(surface, $0, state, false) }
     }
 }
 

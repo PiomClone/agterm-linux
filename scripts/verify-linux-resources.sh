@@ -26,6 +26,7 @@ THEMES="$GHOSTTY/themes"
 TERMINFO="$SHARE/terminfo"
 require_file "$GHOSTTY/shell-integration/bash/ghostty.bash"
 require_file "$GHOSTTY/shell-integration/zsh/ghostty-integration"
+require_file "$GHOSTTY/shell-integration/zsh/.zshenv"
 require_file "$THEMES/.agterm-resource-manifest"
 cmp -s "$MANIFEST" "$THEMES/.agterm-resource-manifest" || {
   echo "Ghostty resource provenance does not match $MANIFEST" >&2

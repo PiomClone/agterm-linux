@@ -72,12 +72,28 @@ paths:
   hop seam next to `MainTimer` only if a real need appears.
   The one deliberate exception in core is `AppStore+AutoFollow`'s observation callback, a nonisolated→main
   hop the `@MainActor` timer seam cannot express — and unreachable under GTK.
+- **A child-exit action runs its surface hooks a hop later, held exits included.**
+  The `GHOSTTY_ACTION_SHOW_CHILD_EXITED` held arm keeps only `handleHeldProcessExit` (the lead reset)
+  synchronous and queues `onExitHeld` through `runOnMain` with a `RetainedGhosttySurface`, like the closing
+  arm: a replica's hook reaches the store, which may close and free that surface inside the callback.
+  `teardown()` clears `onExitHeld` beside `onExit`, so a hop that drains after teardown finds no hook.
+  `LinuxRemoteHeldExitRouter` acts only on the surface still in its slot and reconciles with
+  `focusActive: false`.
+  A queued closing hook checks the same identity, never the session id alone: a program or page can take
+  the session overlay slot before the hop drains (`AppController.sessionOverlayExitCloses`).
 - **A repeating or long-lived timer stays on the Linux side** with a direct `g_timeout_add`;
   `MainTimer` is deliberately one-shot.
-  Two live here: `LinuxAutoFollowCoordinator`'s idle tick, and `SplitRatioRestoreCoordinator`'s 50 ms
+  Three live here: `LinuxAutoFollowCoordinator`'s idle tick, `SplitRatioRestoreCoordinator`'s 50 ms
   divider-restore poll (`AppControllerSurfaces.scheduleSplitRatioRestore`, whose tick returns
-  `G_SOURCE_CONTINUE` until the paned has a width), each owning its `guint` source id and its own
-  `g_source_remove` cancel.
+  `G_SOURCE_CONTINUE` until the paned has a width), and `BlinkPhaseCoordinator`'s status-glyph pulse
+  (cancelled in `windowWillClose` only AFTER the glyph maps it resolves are emptied), each owning its
+  `guint` source id and its own `g_source_remove` cancel.
+- **A retry that must see a fresh ALLOCATION rides the frame clock, not another idle** —
+  `gtk_widget_add_tick_callback`, whose id is WIDGET-scoped and removed through the widget rather than with
+  `g_source_remove`.
+  `SidebarScrollRetryCoordinator` owns the sidebar's one pending request, supersedes it per navigation, and
+  is cancelled when its own row detaches, before a rebuild, and in `windowWillClose`
+  (`agterm-linux/docs/main-loop.md`).
 - **Derive a coupled delay from the constant it trails**, never re-hardcode it — `reconcileSoftClose`
   schedules at the soft-close `grace + 0.1` so it cannot drift from the finalizer it must follow.
 - **The grace window is a state, not a schedule — nothing that runs DURING it may reap a held session.**
@@ -125,15 +141,19 @@ paths:
   A dialog whose retained context is released by its OWN async callback and re-checked with a
   `gWindows[controller.windowID] === controller` staleness guard (the GtkFileDialog choosers) needs no
   dismissal — GTK owns the dialog and the guard is what makes the late callback a no-op.
-- **A deferred job that rebuilds the sidebar defers while the user is interacting with it — including with
+- **A deferred job that REBUILDS the sidebar defers while the user is interacting with it — including with
   the KEYBOARD.**
-  `rebuildSidebar()` destroys every row, so an async rebuild landing on a live inline rename commits its
-  half-typed text (the entry's disposal fires a focus-out) and dismisses an open context menu.
+  Only the forced path rebuilds: `syncSidebar()` updates rows in place and is deliberately ungated, while
+  `syncSidebar(force: true)` — the desktop-metrics leg of `scheduleSidebarMetadataRefresh`, where every
+  label must be re-measured under new CSS — destroys every row, so an async one landing on a live inline
+  rename commits its half-typed text (the entry's disposal fires a focus-out) and dismisses an open
+  context menu.
   Gate on the shared `AppController.sidebarInteractionInProgress` and re-arm at
   `AppController.sidebarInteractionRetryInterval` instead of dropping the rebuild; a SYNCHRONOUS rebuild is a
   direct consequence of a user action and is deliberately not gated.
-  Both live with the GATE, not with either deferred job — `SoftCloseReconcileCoordinator` takes the cadence
-  by injection so it stays independent of what its `deferWhile` reads.
+  Gate and cadence live with the GATE, not with either deferred job — `SoftCloseReconcileCoordinator`, the
+  other job reading it, takes the cadence by injection so it stays independent of what its `deferWhile`
+  reads.
   The gate's third disjunct is `sidebarHoldsKeyboardFocus` — the window's focus widget is a MAPPED
   descendant of `sidebarBox` — which covers Tab-parked focus on the disclosure, the add-session "+" or a
   session row; it is read from GTK rather than tracked, because unlike the other two it is a widget
@@ -171,7 +191,7 @@ paths:
   Leave `can-focus` ALONE — Tab reachability and screen readers depend on it — which is why
   `focus-on-click` is only HALF the invariant: it governs the CLICK, and a keyboard user can still hold
   focus ON a chrome button and press Space, so a handler that DESTROYS its own button owes the keyboard
-  repair as well (`rebuildSidebarKeepingKeyboard`, next bullet).
+  repair as well (next bullet).
 - **Hiding or destroying a focused widget strands the keyboard, and GTK will NOT fix it for you.**
   GTK4 does not clear the window's focus widget on unmap — `gtk_window_get_focus` keeps returning the same
   widget with `gtk_widget_get_mapped == 0`, and keystrokes then reach NOTHING.
@@ -185,31 +205,43 @@ paths:
   from the quick shell's exit callback, which `runOnMain` can drain after `windowWillClose`.
   `grep -rn refocusIfStranded agterm-linux/Sources` is the call-site inventory.
   The sidebar's own buttons are the KEYBOARD-only case `focus-on-click` cannot reach: `can-focus` is
-  deliberately intact, so Space on the Tab-focused disclosure runs `toggleWorkspaceCollapse`, whose
-  `rebuildSidebar()` destroys the button holding the keyboard.
-  That handler, and every other workspace-focus mutation that rebuilds the sidebar (the
-  `AppControllerWorkspaceFocus.swift` handlers, the `workspace.focus`/`workspace.filter` control arms),
-  routes through `rebuildSidebarKeepingKeyboard()` (`AppControllerSidebar.swift`).
-  Every NON-FOCUS-CHANGING control mutation that rebuilds sidebar chrome uses the same wrapper; an
-  intentional focus operation may use a bare rebuild only when it immediately grabs its explicit target.
-  The repair belongs at the HANDLERS, not at the tail of `rebuildSidebar()`: that function also runs from
-  the deferred metadata refresh, and a grab inside it re-enters it through `surfaceDidFocus`, rebuilding
-  the sidebar from inside a rebuild whose caller still holds pointers to the rows the inner one destroyed.
-  The ONE tail repair `rebuildSidebar()` carries is scoped to the popovers it dismisses itself with
-  `refocus: false` (the context menu; the session picker its
-  `updateAttentionButton`/`updateRecentSessionsButton` calls take down), and fires only when one actually
-  came down: it restores the search ENTRY if `popupPopover`'s capture — read before those dismissals
-  consume it — says the popover took the keyboard from a live search, else `refocusIfStranded()`.
+  deliberately intact, so Space on the Tab-focused disclosure runs `toggleWorkspaceCollapse`.
+  No handler owes a repair of its own any more: a collapse HIDES the section's list box and a focus change
+  repaints its header, so `syncSidebar()` leaves the parked button standing, and its tail repairs only what
+  the pass actually took away — a structural detach, or a popover it dismissed itself with `refocus: false`
+  (the context menu; the session picker its `updateAttentionButton`/`updateRecentSessionsButton` calls take
+  down).
+  That repair restores the search ENTRY if `popupPopover`'s capture — read before those dismissals consume
+  it — says the popover took the keyboard from a live search, else `refocusIfStranded()`.
+  The forced `rebuildSidebar` destroys every widget, so it repairs unconditionally — but only as its LAST
+  statement, because `refocusIfStranded()` re-enters the sidebar through `surfaceDidFocus`, which is
+  bounded there and would otherwise run against rows the outer pass had not finished replacing.
   Known limitation, accepted: because the unmapped disjunct is qualified by the TOPLEVEL being mapped, a
   HIDE performed while the window itself is unmapped (`agtermctl quick hide` on a minimized window) is
   never repaired; the destroy case still works, since the `focus == nil` disjunct carries no such qualifier.
-- **A terminal blur ends the half-finished keyboard interactions that surface owns.**
+- **A terminal blur ends half-finished keyboard interactions.**
   `surfaceFocusLeave` (`GhosttySurface.swift`) abandons a typed custom-command leader AND an in-flight
   Ctrl-Tab cycle. Why the cancel is broader than the blur that triggers it:
   `agterm-linux/docs/menu-actions.md`.
-  A Ctrl release schedules its commit through `MainTimer.schedule(after: 0)`: GTK's keyboard-device
-  modifier state remains pre-release inside the signal callback and becomes current on the next GLib
-  turn. Reacquire the display/seat/keyboard there; never retain the event or its borrowed pointers.
+- **The Ctrl-Tab commit reads the keyboard device from a GLib idle after the Ctrl release.**
+  The window's capture-phase switcher controller (`AppController+SessionSwitchCapture.swift`) schedules
+  it through `runOnMain`: GTK/X11 updates its cached modifier state in a separate `XkbStateNotify` event.
+  The cached Ctrl state was observed still set in a zero-delay `MainTimer` callback after release.
+  The lower-priority idle gives pending GDK work precedence before reading the device.
+  Reacquire the display/seat/keyboard there; never retain the event or its borrowed pointers.
+- **A covered pane's keys go to the keymap first, then `LinuxPaneLeadKeyPolicy`.**
+  Both entry points share that order: `GhosttySurface.keyPressed` after `handleKey` declines, and the lead
+  cover's button, which `syncLeadCover` gives the keyboard.
+  So Ctrl-Tab, the leader and app chords keep working on a covered pane; Super chords and modifier-only
+  presses are consumed without taking the lead, and the first other key takes it once.
+  Their modifier releases stay off the covered terminal too; the Ctrl-Tab commit is the window's, above.
+  GTK4 has no repeat flag, so the takeover keycode is one app-wide value consuming every further press of it
+  until its own release: the press lands on the surface `reattachPane` tears down, its repeats on the replacement.
+  The window capture controller clears that latch on release even when an entry or chrome has taken focus.
+  Auxiliary palette, theme, control-picker and GUI-ask toplevels install the same release observation.
+  Surface and cover release handlers still decide whether to forward modifier releases to libghostty.
+  Never clear it on focus change or teardown.
+  `reattachPane` hands focus to the replacement when the old GLArea OR its cover held it.
 - **A GtkPopover takes the keyboard on popup and does NOT give it back — the dismissal has to.**
   Measured (GTK 4.22): `gtk_popover_popup` moves the window's focus widget onto the popover's first item
   WHETHER OR NOT that item sets `focus-on-click`, and `gtk_popover_popdown` hands focus to the popover's
@@ -234,19 +266,19 @@ paths:
   `becameFrontmost()` consults the same predicate and declines its own grab — which is what makes the pair
   ORDER-INDEPENDENT.
   A `refocus: false` dismissal consumes the capture along with the grab, so the two callers whose popovers
-  may genuinely have taken the keyboard from the entry — `rebuildSidebar()`'s tail and
+  may genuinely have taken the keyboard from the entry — the sidebar sync's tail and
   `activateSessionPickerRow` — read the capture BEFORE dismissing and restore the ENTRY first in their own
   repair; and an opener that CHANGES the selection ends a live search BEFORE it selects
   (`endSearchForSelectionChange()`, the `selectSession` convention it mirrors), because its own
   `showActive()` moves the keyboard off the entry before the capture would run.
   **A dismissal that is about to be replaced, or torn down, passes `refocus: false`** — the detach still
   runs and only the grab is skipped, because that grab is not free there: it lands in `surfaceDidFocus`,
-  which rebuilds the whole sidebar from inside an opener still holding the row's pointers, or from inside
+  which re-enters the sidebar sync from inside an opener still holding the row's pointers, or from inside
   `windowWillClose`.
   A new popover needs the `"closed"` seam, not a hand-rolled regrab.
   The bar is on the GRAB, not on the dismissal, so it covers every OTHER grab an opener makes too:
   `showRowContextMenu`'s select-on-right-click branch calls `showActive(focus: false)`, because that grab
-  lands in the same rebuild and frees the `GtkListBox` it is about to parent the menu to.
+  re-enters the same sidebar sync it is about to parent the menu inside.
   A REPLACEMENT opener also reads the capture before its own dismissal and hands it to
   `popupPopover(_:keepingCapture:)`, because re-reading the entry there answers `false` — the outgoing
   popover, not the entry, holds the keyboard at that moment.
@@ -268,16 +300,18 @@ paths:
   This keeps the unconditional dismissal repair needed by reactivating WMs while making the explicit
   transfer win without timing or dismissal-time focus inference.
 - **A path that hands the keyboard back after a MODE CHANGE goes through `focusActiveSurface()`, never
-  `showActive()`'s own focus leg.**
-  `showActive(focus:)` resolves overlay → scratch → split → primary for the active session and knows nothing
-  about the surfaces that sit ON TOP of the deck: a visible quick terminal, a zoom host, an open dashboard.
+  `showActive()`'s ordinary focus leg.**
+  `showActive(focus:)` follows zoom targets when zoom is active; otherwise its ordinary leg resolves
+  overlay → scratch → split → primary for the active session and knows nothing about a visible quick terminal
+  or an open dashboard.
   A path that ALSO has to refresh deck presentation uses `showActiveFocusingVisibleSurface()`, the two-call
   shape (`showActive(focus: false)` then `focusActiveSurface()`); it is behaviour-preserving in the plain
   case, because `focusActiveSurface`'s fallback is `searchTargetSurface(for:)`, byte-for-byte what
   `showActive` inlines.
-  Its three call sites are `setTerminalZoom`'s exit leg (`AppControllerZoom.swift`), where nothing on the
-  zoom path clears `quickVisible`, so `restoreZoomedSurface(.quick)` re-shows the quick card and the old
-  grab landed on the deck pane behind it; `closeDashboard(refocus:)`, whose `mountDashboard` grabbed the
+  `setTerminalZoom` likewise calls `focusActiveSurface()` on exit, because nothing on the zoom path clears
+  `quickVisible`: leaving a `.quick` zoom returns the card to its size, and a deck-only grab would land
+  behind it.
+  `closeDashboard(refocus:)`, whose `mountDashboard` grabbed the
   dashboard host, so the close destroys the keyboard's owner and MUST hand it back — its old
   split-or-primary `focusedSurface()` leg could grab an UNMAPPED widget, a silent no-op that leaves the
   keyboard nowhere at all; and `becameFrontmost()`, the masking path for a popover dismissal, which must
@@ -302,9 +336,10 @@ paths:
   GTK does NOT emit `"closed"` during that destroy, so `windowWillClose` calls `dismissContextMenu()`
   itself alongside `dismissSessionPicker()`.
   Because `contextMenuDidClose` clears `contextMenuPopover`, the handle is non-nil only while the menu is
-  genuinely open — which is what lets `sidebarInteractionInProgress` defer the two deferred rebuilds
-  whenever a menu is up, making the context-menu half of `rebuildSidebar()`'s tail repair unreachable from
-  a deferred job.
+  genuinely open — which is what lets `sidebarInteractionInProgress` defer the forced rebuild and the
+  trailing soft-close reconcile whenever a menu is up.
+  An in-place sync takes a menu down only when it detaches the widget hosting it (`detachGuard`;
+  `agterm-linux/docs/sidebar.md`).
 - **A GTK4 container holds the ONLY reference to a sunk child, so detaching one FREES it — every reparent
   goes through `withWidgetRefHeld` (`GtkInterop.swift`).**
   Except its FOCUS CHILD, which carries a second reference: a reparent that survives may only have been
@@ -324,8 +359,8 @@ paths:
   The hold keeps the widget ALIVE but not REALIZED, so a subtree containing a `GtkGLArea` must not be
   moved at all ([[libghostty]]).
 - **A teardown path clears its own zoom target BEFORE freeing the surface.**
-  While zoomed, the surface's `GtkGLArea` lives in `zoomHost` and `splitView` is hidden, so a surface torn down
-  under the host stays MAPPED (the refocus guard correctly declines) over a deck nothing can reach.
+  While zoomed, the sidebar and content header are hidden and the zoom strip is shown, so a surface torn
+  down under a live zoom target leaves that chrome in place with nothing behind it to focus.
   `setQuick(_:)`'s hide leg and `closeQuick()` both start with
   `if terminalZoom.target == .quick { setTerminalZoom(.off, target: .quick) }`; that is what lets
   `refocusIfStranded`'s zoom branch assume its target's surface is live.

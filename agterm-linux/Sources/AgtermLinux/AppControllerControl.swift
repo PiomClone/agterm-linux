@@ -17,14 +17,14 @@ extension AppController {
             guard let text = req.args?.text else {
                 return ControlResponse(ok: false, error: "session.type requires text")
             }
-            let pane = req.args?.pane.flatMap(StatusPane.init(rawValue:))
-            if req.args?.pane != nil, pane == nil {
-                return ControlResponse(ok: false, error: "--pane must be left, right, or scratch")
+            let pane = req.args?.pane.flatMap(StatusPane.init(controlName:))
+            if let rawPane = req.args?.pane, pane == nil {
+                return ControlResponse(ok: false, error: "invalid pane: \(rawPane)")
             }
             return typeSessionSync(req.target, window: req.args?.window,
                                    options: ControlSessionTypeOptions(text: text,
                                                                       select: req.args?.select ?? false,
-                                                                      pane: pane))
+                                                                      pane: pane, paneID: req.args?.paneID))
         case .sessionSearch:
             guard let id = resolveSession(req.target) else { return sessionResolveError(req.target) }
             if req.args?.to == "close" {

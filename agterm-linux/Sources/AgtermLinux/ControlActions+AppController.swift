@@ -75,14 +75,17 @@ extension AppController: ControlActions {
     }
 
     func controlTree(window: String?) -> ControlResponse {
+        let zmxSnapshot = gZmxForegroundResolver?.passSnapshot(for: store.workspaces.flatMap(\.sessions), timeout: nil)
         let baseTree = store.controlTree(
-            paneForeground: { ($0.surface as? GhosttySurface)?.paneForeground() },
-            splitPaneForeground: { ($0.splitSurface as? GhosttySurface)?.paneForeground() },
+            paneForeground: { ($0.surface as? GhosttySurface)?.paneForeground(zmxSnapshot: zmxSnapshot) },
+            splitPaneForeground: { ($0.splitSurface as? GhosttySurface)?.paneForeground(zmxSnapshot: zmxSnapshot) },
             fontSize: { ($0.surface as? GhosttySurface)?.currentFontSize() },
             splitFontSize: { ($0.splitSurface as? GhosttySurface)?.currentFontSize() },
             scratchFontSize: { [weak self] in self?.scratchSurfaces[$0.id]?.currentFontSize() },
             quickVisible: { [weak self] in self?.quickVisible ?? false },
             zoomedSurface: { [weak self] in self?.terminalZoom.target?.controlID },
+            pickPending: { [weak self] in self?.pickController.pending?.id },
+            askPending: { [weak self] in self?.pickController.pendingAsk?.id },
             dashboardMembers: { [weak self] in self?.dashboard.isOpen == true
                 ? self?.dashboard.members.map(\.controlRef) : nil },
             dashboardHighlighted: { [weak self] in self?.dashboard.highlighted?.controlRef },
@@ -94,7 +97,9 @@ extension AppController: ControlActions {
                 case .fixed: return "fixed"
                 case .auto: return "auto"
                 }
-            }, app: LinuxAppMetadata.identity
+            }, app: LinuxAppMetadata.identity,
+            flaggedLayout: linuxSettingsStore().load().effectiveFlaggedViewLayout,
+            htmlZoom: linuxSettingsStore().load().effectiveHtmlOverlayZoom
         )
         let tree = projectingLinuxAutoFollow(baseTree)
         return ControlResponse(ok: true, result: ControlResult(tree: tree))
@@ -289,7 +294,7 @@ extension AppController: ControlActions {
                 store.moveSession(id, toWorkspace: location.workspace, at: location.index + (after ? 1 : 0))
             }
         }
-        reconcile()
+        reconcile(preferMoving: [id])
         return ok(id)
     }
 
@@ -333,7 +338,7 @@ extension AppController: ControlActions {
                 affected = 0
             }
         }
-        reconcile()
+        reconcile(preferMoving: Set(ids))
         return ControlResponse(ok: true, result: ControlResult(affected: affected))
     }
 
@@ -342,7 +347,7 @@ extension AppController: ControlActions {
         case .failure(let response): return response
         case .success(let id):
             store.reorderWorkspace(id, direction)
-            rebuildSidebarKeepingKeyboard()
+            syncSidebar(preferMoving: [id])
             syncSidebarSelection()
             return ok(id)
         }
@@ -353,14 +358,14 @@ extension AppController: ControlActions {
         case .failure(let response): return response
         case .success(let id):
             store.applyFocusMode(mode, to: id)
-            rebuildSidebarKeepingKeyboard()
+            syncSidebar()
             return ok(id)
         }
     }
 
     func setWorkspaceFilter(window: String?, mode: ControlToggleMode) -> ControlResponse {
         store.applyWorkspaceFilter(mode)
-        rebuildSidebarKeepingKeyboard()
+        syncSidebar()
         return ok()
     }
 
@@ -375,7 +380,7 @@ extension AppController: ControlActions {
             guard let parsed = ControlToggleMode.parse(mode) else { return err("invalid flag mode: \(mode ?? "toggle")") }
             let current = store.session(withID: id)?.flagged ?? false
             store.setFlag(parsed.desiredValue(current: current), forSession: id)
-            rebuildSidebarKeepingKeyboard()
+            syncSidebar()
             return ok(id)
         }
     }
@@ -385,7 +390,7 @@ extension AppController: ControlActions {
         case .failure(let response): return response
         case .success(let id):
             store.clearUnseen(id)
-            rebuildSidebarKeepingKeyboard()
+            syncSidebar()
             return ok(id)
         }
     }
@@ -400,15 +405,17 @@ extension AppController: ControlActions {
             let wasBlocked = store.session(withID: id)?.agentIndicator.status == .blocked
             let pane = update.paneID.flatMap { store.session(withID: id)?.paneRole(forToken: $0) }
                 ?? update.pane
-            store.setAgentIndicator(AgentIndicator(status: update.status, blink: update.blink ?? false,
-                                                   autoReset: update.autoReset ?? false,
-                                                   color: update.color, statusPane: pane), forSession: id)
+            let indicator = AgentIndicator(status: update.status, blink: update.blink ?? false,
+                                           autoReset: update.autoReset ?? false,
+                                           color: update.color, shape: update.shape, statusPane: pane)
+            if case .refused(let owner) = store.applyControlStatus(indicator, forSession: id) {
+                return err("blocked status owned by pane \(owner.rawValue)")
+            }
             let blockedDefault = wasBlocked ? nil : linuxSettingsStore().load().blockedStatusSoundName
             if let sound = update.status.effectiveSound(perCall: update.sound, blockedDefault: blockedDefault) {
                 StatusSoundPlayer.shared.play(sound)
             }
-            rebuildSidebarKeepingKeyboard()
-            updateAttentionButton()
+            syncSidebar()
             return ok(id)
         }
     }
@@ -428,7 +435,7 @@ extension AppController: ControlActions {
             case .off: store.setSplitVisibility(id, shown: false)
             case .toggle: store.toggleSplit(id, axis: axis)
             }
-            reconcile(rebuildSidebar: false)
+            reconcile(syncSidebar: false)
             if store.selectedSessionID == id {
                 sessionFocusTarget(for: id)?.grabFocus(supersedingPopoverCapture: true)
             }
@@ -477,7 +484,7 @@ extension AppController: ControlActions {
                                             primaryInEndSlot: primaryInEndSlot(id))
             store.setPaneFocus(toSplit, forSession: id)
             syncSplit(session)
-            rebuildSidebar()
+            syncSidebar()
             updateTitle()
             if store.selectedSessionID == id {
                 sessionFocusTarget(for: id, wantSplit: toSplit)?
@@ -592,6 +599,10 @@ extension AppController: ControlActions {
                 }
                 surface = scratch
             }
+            if store.session(withID: id)?.htmlHidesTerminal(pane) == true {
+                LinuxHtmlOverlayRegistry.shared.stepZoom(action)
+                return ok(id)
+            }
             guard let surface else { return err("session not realized") }
             surface.performBindingAction(action)
             return ok(id)
@@ -625,17 +636,19 @@ extension AppController: ControlActions {
             id = store.selectedSessionID
         }
         if let id {
+            let effectiveTitle = store.recordNotificationEvent(
+                forSession: id, title: title ?? "", body: body, origin: .control) ?? title ?? ""
             _ = store.recordTerminalNotification(TerminalNotificationRecord(sessionID: id, windowID: windowID, pane: .main,
-                                                                            title: title ?? "", body: body,
+                                                                            title: effectiveTitle, body: body,
                                                                             firingIsFocused: false,
                                                                             appActive: false))
-            rebuildSidebarKeepingKeyboard()
+            syncSidebar()
+            let target = TerminalNotification.identity(windowID: windowID, sessionID: id, pane: .main)
+            NotificationManager.send(title: effectiveTitle, body: body, target: target)
+            return ok(id)
         }
-        let notificationTarget = id.map { TerminalNotification.identity(windowID: windowID, sessionID: $0, pane: .main) }
-        if NotificationManager.bannersEnabled {
-            NotificationManager.send(title: title ?? "", body: body, target: notificationTarget)
-        }
-        return ok(id)
+        NotificationManager.send(title: title ?? "", body: body)
+        return ok()
     }
 
     func setTheme(args: ControlArgs?) -> ControlResponse {
@@ -705,7 +718,7 @@ extension AppController: ControlActions {
         case .toggle: want = store.sidebarMode == .tree ? .flagged : .tree
         }
         store.setSidebarMode(want)
-        rebuildSidebarKeepingKeyboard()
+        syncSidebar()
         syncSidebarSelection()
         return ok()
     }
@@ -769,6 +782,13 @@ extension AppController: ControlActions {
         case .failure(let response): return response
         case .success(let id):
             guard let session = store.session(withID: id) else { return err("session not found") }
+            let addressed: StatusPane?
+            switch session.paneAddress(token: options.paneID, pane: options.pane) {
+            case .unknownToken(let token): return err("unknown pane id: \(token)")
+            case .pane(let value): addressed = value
+            }
+            let options = ControlSessionTypeOptions(text: options.text, select: options.select,
+                                                    pane: addressed, paneID: options.paneID)
             switch options.pane {
             case nil, .left: break
             case .right where !session.hasSplit: return err("session has no split pane")
@@ -786,8 +806,13 @@ extension AppController: ControlActions {
                 case .right: splitSurfaces[id]
                 case .scratch: scratchSurfaces[id]
                 }
+                if let surface, var response = leadType(options.text, surface: surface, session: id) {
+                    if response.ok { response.result?.pane = (options.pane ?? .left).rawValue }
+                    return response
+                }
                 if let surface, surface.inject(text: options.text) {
-                    return ok(id)
+                    return ControlResponse(ok: true, result: ControlResult(id: id.uuidString,
+                        pane: (options.pane ?? .left).rawValue))
                 }
                 usleep(30_000)
             }
@@ -799,6 +824,9 @@ extension AppController: ControlActions {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
         case .success(let id):
+            if let surface = focusedSurface(for: id), let refusal = coveredPaneRefusal(surface) {
+                return refusal
+            }
             guard let text = focusedSurface(for: id)?.readSelection(), !text.isEmpty else {
                 return err("no selection")
             }
@@ -807,32 +835,27 @@ extension AppController: ControlActions {
     }
 
     func pasteSession(_ target: String?, window: String?, pane: StatusPane?) -> ControlResponse {
-        guard let pane else { return performSessionBinding(target, action: "paste_from_clipboard") }
-        switch resolveSessionResponse(target) {
-        case .failure(let response): return response
-        case .success(let id):
-            let surface: GhosttySurface? = switch pane {
-            case .left: surfaces[id]
-            case .right: splitSurfaces[id]
-            case .scratch: scratchSurfaces[id]
-            }
-            guard let surface, surface.isRealized else { return err("session not realized") }
-            surface.performBindingAction("paste_from_clipboard")
-            return ok(id)
-        }
+        performSessionBinding(target, action: "paste_from_clipboard", pane: pane)
     }
 
     func selectAllSession(_ target: String?, window: String?) -> ControlResponse {
         performSessionBinding(target, action: "select_all")
     }
 
-    private func performSessionBinding(_ target: String?, action: String) -> ControlResponse {
+    private func performSessionBinding(_ target: String?, action: String, pane: StatusPane? = nil) -> ControlResponse {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
         case .success(let id):
-            guard let surface = focusedSurface(for: id), surface.isRealized else {
+            let surface: GhosttySurface? = switch pane {
+            case nil: focusedSurface(for: id)
+            case .left: surfaces[id]
+            case .right: splitSurfaces[id]
+            case .scratch: scratchSurfaces[id]
+            }
+            guard let surface, surface.isRealized else {
                 return err("session not realized")
             }
+            if let refusal = coveredPaneRefusal(surface) { return refusal }
             surface.performBindingAction(action)
             return ok(id)
         }
@@ -856,6 +879,7 @@ extension AppController: ControlActions {
                 owner = searchTargetSurface(for: id)
             }
             guard let owner, owner.isRealized else { return err("session not realized") }
+            if let refusal = coveredPaneRefusal(owner) { return refusal }
             searchSurface = owner
             owner.startSearch()
             let hasQuery = text.map { !$0.isEmpty } ?? false
@@ -884,107 +908,37 @@ extension AppController: ControlActions {
         }
     }
 
-    func openSessionOverlay(_ target: String?, window: String?,
-                            options: ControlSessionOverlayOpenOptions) -> ControlResponse {
-        switch resolveSessionResponse(target) {
-        case .failure(let response): return response
-        case .success(let id):
-            if let pane = options.pane {
-                switch store.openPaneOverlay(id, pane: pane, command: options.command, cwd: options.cwd,
-                                             wait: options.wait, backgroundColor: options.backgroundColor) {
-                case nil:
-                    if options.follow { selectSession(id, userInitiated: false) }
-                    reconcile()
-                    return ok(id)
-                case .unknownSession: return err("no such session")
-                case .alreadyOpen: return err(PaneOverlayError.alreadyOpen)
-                case .paneNotVisible: return err(PaneOverlayError.paneNotVisible)
-                }
-            }
-            guard store.openOverlay(id, command: options.command, cwd: options.cwd, wait: options.wait,
-                                    sizePercent: options.sizePercent,
-                                    backgroundColor: options.backgroundColor) else {
-                return err("overlay already open")
-            }
-            if options.follow { selectSession(id, userInitiated: false) }
-            reconcile()
-            return ok(id)
-        }
-    }
-
-    func closeSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?) -> ControlResponse {
-        switch resolveSessionResponse(target) {
-        case .failure(let response): return response
-        case .success(let id):
-            let hud = pane == nil && store.session(withID: id)?.hudActive == true
-            let closed = pane.map { store.closePaneOverlay(id, pane: $0) } ?? store.closeOverlay(id)
-            guard closed else { return err("no overlay") }
-            reconcile(focusActive: !hud)
-            return ok(id)
-        }
-    }
-
-    func resizeSessionOverlay(_ target: String?, window: String?, sizePercent: Int?) -> ControlResponse {
-        switch resolveSessionResponse(target) {
-        case .failure(let response): return response
-        case .success(let id):
-            guard let session = store.session(withID: id) else { return err("no such session") }
-            let hud = session.hudActive
-            if hud, sizePercent == nil { return err(OverlayHudError.fullResize) }
-            let previousSize = session.overlaySizePercent
-            guard store.resizeOverlay(id, sizePercent: sizePercent) else { return err("no overlay") }
-            if hud, !writeHudBody(session, pane: hudPaneMetrics(for: session)) {
-                store.resizeOverlay(id, sizePercent: previousSize)
-                return err(OverlayHudError.writeFailed)
-            }
-            reconcile(focusActive: !hud)
-            return ok(id)
-        }
-    }
-
-    func sessionOverlayResult(_ target: String?, window: String?, pane: OverlayPane?) -> ControlResponse {
-        switch resolveSessionResponse(target) {
-        case .failure(let response): return response
-        case .success(let id):
-            guard let session = store.session(withID: id) else { return err("no such session") }
-            if let pane {
-                if session.paneOverlay(pane) != nil { return err(OverlayResultError.stillRunning) }
-                guard let code = session.paneOverlayExitCode(pane) else { return err(OverlayResultError.noResult) }
-                return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, exitCode: code))
-            }
-            if session.hudActive { return err(OverlayHudError.noResult) }
-            if session.overlayActive { return err(OverlayResultError.stillRunning) }
-            guard let code = session.overlayExitCode else { return err(OverlayResultError.noResult) }
-            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, exitCode: code))
-        }
-    }
-
-    func setSessionBackground(_ target: String?, window: String?,
-                              options: ControlSessionBackgroundOptions) -> ControlResponse {
-        switch resolveSessionResponse(target) {
-        case .failure(let response): return response
-        case .success(let id):
-            _ = store.setBackgroundWatermark(options.watermark, forSession: id)
-            applySessionWatermark(id)
-            return ok(id)
-        }
-    }
-
     func readSessionText(_ target: String?, window: String?, options: ControlSessionTextOptions) -> ControlResponse {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
         case .success(let id):
+            guard let session = store.session(withID: id) else { return err("session not realized") }
+            let pane: StatusPane?
+            switch session.paneAddress(token: options.paneID, pane: options.pane) {
+            case .unknownToken(let token): return err("unknown pane id: \(token)")
+            case .pane(let value): pane = value
+            }
             let surface: GhosttySurface?
-            switch options.pane {
-            case nil: surface = store.session(withID: id)?.onScreenSurface as? GhosttySurface
+            switch pane {
+            case nil: surface = session.onScreenSurface as? GhosttySurface
             case .left: surface = surfaces[id]
-            case .right: surface = splitSurfaces[id]
-            case .scratch: surface = scratchSurfaces[id]
+            case .right:
+                guard session.splitSurface != nil else { return err("session has no split pane") }
+                surface = splitSurfaces[id]
+            case .scratch:
+                guard session.scratchSurface != nil else { return err("session has no scratch terminal") }
+                surface = scratchSurfaces[id]
+            }
+            if let surface, var response = leadText(surface, session: id,
+                                                    all: options.all, lines: options.lines) {
+                if response.ok { response.result?.pane = session.paneRole(forToken: surface.paneToken)?.rawValue }
+                return response
             }
             guard let text = surface?.readScreenText(all: options.all, lines: options.lines) else {
                 return err("session not realized")
             }
-            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, text: text))
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, text: text,
+                pane: surface.flatMap { session.paneRole(forToken: $0.paneToken)?.rawValue }))
         }
     }
 

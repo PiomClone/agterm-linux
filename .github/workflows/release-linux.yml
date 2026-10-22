@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag, for example linux-v0.12.1"
+        description: "Existing release tag, for example linux-v0.33.1"
         required: true
         type: string
 
@@ -21,24 +21,20 @@ permissions:
   attestations: write
 
 env:
-  UPSTREAM_BASE_TAG: "v0.26.1"
-  UPSTREAM_BASE_COMMIT: "c215430d1cb56bfca4e062274947cde6d237c18d"
+  UPSTREAM_BASE_TAG: "v0.35.1"
+  UPSTREAM_BASE_COMMIT: "ca50a8ee09ba3cc9315ad3d597e1783e64c6f298"
   SWIFTLINT_VERSION: "0.65.0"
   SWIFTLINT_SHA256: "79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b"
   LINUX_SOURCEKIT_LIB_PATH: "/usr/lib/libsourcekitdInProc.so"
   ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
   NFPM_VERSION: "2.47.0"
   NFPM_SHA256: "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
-  LINUXDEPLOY_SHA256: "36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62"
-  LINUXDEPLOY_GTK_COMMIT: "7a3fbc31a9e5075073ff8790f26effbac5f84453"
-  LINUXDEPLOY_GTK_SHA256: "b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171"
-  APPIMAGE_RUNTIME_SHA256: "1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf"
-  LDAI_RUNTIME_FILE: "/usr/local/share/appimage/runtime-x86_64"
 
 jobs:
   release-linux:
     name: Build Linux x86_64 release
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     container: swift:6.3.2-noble
     defaults:
       run:
@@ -88,7 +84,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev libepoxy-dev pkg-config \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libepoxy-dev pkg-config \
             librsvg2-dev libgirepository1.0-dev gobject-introspection \
             git curl jq ca-certificates xz-utils unzip zsh file imagemagick ripgrep \
             rpm cpio desktop-file-utils patchelf ncurses-bin \
@@ -114,24 +110,7 @@ jobs:
           echo "${NFPM_SHA256}  /tmp/nfpm.tar.gz" | sha256sum --check
           tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
 
-          curl -fsSLo /usr/local/bin/linuxdeploy-x86_64.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          echo "${LINUXDEPLOY_SHA256}  /usr/local/bin/linuxdeploy-x86_64.AppImage" | sha256sum --check
-          chmod 0755 /usr/local/bin/linuxdeploy-x86_64.AppImage
-
-          curl -fsSLo /usr/local/bin/linuxdeploy-plugin-gtk.sh \
-            "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/${LINUXDEPLOY_GTK_COMMIT}/linuxdeploy-plugin-gtk.sh"
-          echo "${LINUXDEPLOY_GTK_SHA256}  /usr/local/bin/linuxdeploy-plugin-gtk.sh" | sha256sum --check
-          chmod 0755 /usr/local/bin/linuxdeploy-plugin-gtk.sh
-
-          mkdir -p "$(dirname "$LDAI_RUNTIME_FILE")"
-          curl -fsSLo "$LDAI_RUNTIME_FILE" \
-            https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-          echo "${APPIMAGE_RUNTIME_SHA256}  ${LDAI_RUNTIME_FILE}" | sha256sum --check
-          chmod 0755 "$LDAI_RUNTIME_FILE"
-
           nfpm --version
-          linuxdeploy-x86_64.AppImage --appimage-extract-and-run --version
 
       # The Swift container is root, but persistence failure tests intentionally depend on normal-user
       # POSIX write permissions. Run them at the same privilege level as the desktop application.
@@ -140,7 +119,7 @@ jobs:
         run: |
           useradd --create-home --user-group agterm-test
           chown -R agterm-test:agterm-test "$GITHUB_WORKSPACE"
-          runuser --user agterm-test -- env HOME=/home/agterm-test swift test
+          runuser --user agterm-test -- env HOME=/home/agterm-test swift test --no-parallel
 
       - name: Reject Linux CLI parser drift
         run: scripts/check-linux-cli-drift.sh
@@ -176,7 +155,7 @@ jobs:
           path: |
             agterm-linux/vendor/ghostty
             agterm-linux/vendor/zmx
-          key: linux-runtimes-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-zmx-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/zmx.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
+          key: linux-runtimes-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-zmx-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'scripts/zmx-patches/**/*.patch', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/zmx.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
 
       - name: Verify restored libghostty cache
         if: steps.ghostty-cache.outputs.cache-hit == 'true'

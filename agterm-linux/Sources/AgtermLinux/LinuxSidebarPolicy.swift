@@ -11,8 +11,39 @@ enum LinuxSidebarPolicy {
         let rowHeight = Int(AppSettings.sidebarRowHeight(fontSize: size))
         return """
             .agterm-sidebar label { font-size: \(size)pt; }
+            .agterm-sidebar entry.agterm-rename > text { font-size: \(size)pt; }
             .agterm-sidebar .navigation-sidebar > row { min-height: \(rowHeight)px; }
             """
+    }
+
+    /// Where to scroll the sidebar so a row is visible, or nil when it already fits. Pure geometry:
+    /// `scrollRetry` is the single predicate for whether a row can be scrolled to at all.
+    static func scrollOffset(rowY: Double, rowHeight: Double,
+                             value: Double, pageSize: Double) -> Double? {
+        if rowY < value { return rowY }
+        if rowY + rowHeight > value + pageSize { return rowY + rowHeight - pageSize }
+        return nil
+    }
+
+    enum ScrollRetry: Equatable {
+        case scroll, wait, giveUp
+    }
+
+    /// Frames a declined scroll waits for the row's allocation: a best-effort budget, not a layout bound.
+    /// Attempt zero runs from the idle and the first tick may read that same geometry, so the allocation
+    /// the reveal queued normally lands within the two that follow. `SessionSwitcherReveal` shares it.
+    static let scrollRetryTicks = 3
+
+    /// What a scroll attempt should do now. `.wait` is the one case a retry buys anything: the row is on
+    /// screen but its geometry is not current — a fresh row has no height, and a list box re-shown after
+    /// a collapse zeroed its own size on hide while its unmapped rows kept their stale one. A row that
+    /// left the sidebar or is not mapped gives up: scrolling to a hidden row is meaningless, and the
+    /// selection sync that follows its reveal issues a fresh request.
+    static func scrollRetry(rowMapped: Bool, rowHeight: Double, listBoxHeight: Double, rowInSidebar: Bool,
+                            ticksElapsed: Int) -> ScrollRetry {
+        guard rowInSidebar, rowMapped else { return .giveUp }
+        guard rowHeight <= 0 || listBoxHeight <= 0 else { return .scroll }
+        return ticksElapsed < scrollRetryTicks ? .wait : .giveUp
     }
 
     @MainActor
@@ -147,4 +178,12 @@ enum LinuxSidebarPolicy {
     /// Installed by `installAppCSS` (`App.swift`); the selector is string-pinned in `LinuxPolicyTests`.
     static let sidebarHoverCSS =
         ".agterm-sidebar .navigation-sidebar > row:hover { background-color: alpha(currentColor, 0.07); }"
+
+    /// Keeps the rename editor in the label's box: a stock Adwaita entry (34px, 8px side padding, own fill
+    /// and focus ring) grew the row and moved the text. The outline is the editing cue; native caret and
+    /// selection colors stay. Contract in `agterm-linux/docs/sidebar.md`; the font rule is in `sidebarCSS`.
+    static let sidebarRenameCSS = """
+        .agterm-sidebar entry.agterm-rename { min-height: 0; padding: 0; border: none; box-shadow: none; \
+        background: none; border-radius: 3px; outline: 1px solid alpha(currentColor, 0.5); outline-offset: 1px; }
+        """
 }

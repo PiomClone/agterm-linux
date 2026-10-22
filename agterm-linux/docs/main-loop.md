@@ -36,7 +36,7 @@ The Linux theme picker's live preview was dead for exactly this reason (the debo
 times and fired 0 times), along with every debounced save, the tree-change control events, and the
 soft-close grace finalizer.
 
-## The three ways to defer work
+## The four ways to defer work
 
 **Hop to the main thread now** — use `runOnMain` (`GhosttyApp.swift`), which wraps `g_idle_add`.
 This is for callbacks that fire off-main (libghostty's C callbacks, worker-queue jobs) and need to touch
@@ -57,12 +57,25 @@ default.
 Each schedule becomes one one-shot `g_timeout_add_full` source (`GLibMainTimerSource`), retained as the
 source's user data and released by its destroy notify on both the fire and the cancel path.
 
-**Own a repeating or long-lived timer** — call `g_timeout_add` directly from the Linux target, as
-`LinuxAutoFollowCoordinator` (the idle tick) and `SplitRatioRestoreCoordinator` do; the latter's 50 ms
-divider-restore poll (`AppControllerSurfaces.scheduleSplitRatioRestore`) returns `G_SOURCE_CONTINUE` until
-the paned has a width, and each coordinator owns its `guint` source id plus its own `g_source_remove` cancel.
+**Own a repeating or long-lived timer** — call `g_timeout_add` directly from the Linux target, as three
+coordinators do: `LinuxAutoFollowCoordinator` (the idle tick), `SplitRatioRestoreCoordinator` (a 50 ms
+divider-restore poll, `AppControllerSurfaces.scheduleSplitRatioRestore`, returning `G_SOURCE_CONTINUE`
+until the paned has a width), and `BlinkPhaseCoordinator` (the status glyph's pulse, which
+`windowWillClose` cancels only AFTER emptying the glyph maps, so the cancel's normalizing pass and any
+later resync resolve nothing).
+Each owns its `guint` source id plus its own `g_source_remove` cancel.
 `MainTimer` is deliberately one-shot; a subsystem that owns a re-arming timer keeps that logic on the Linux
 side rather than growing the shared seam.
+
+**Retry after the next frame** — call `gtk_widget_add_tick_callback`, which runs in the frame clock's UPDATE
+phase ahead of LAYOUT; a second `g_idle_add` carries no ordering guarantee against the layout it is waiting
+for.
+`SidebarScrollRetryCoordinator` uses it to scroll a just-revealed sidebar row into view once GTK has
+allocated both the row and its containing list box (why both: `agterm-linux/docs/sidebar.md`), bounded by
+`LinuxSidebarPolicy.scrollRetryTicks` — a best-effort budget, not a guarantee that layout completes within it.
+The id is WIDGET-scoped — `gtk_widget_remove_tick_callback(widget, id)`, never `g_source_remove` — so the
+coordinator holds the row alongside the id, keeps at most one request, supersedes it on the next request,
+and is cancelled when its own row detaches, before a sidebar rebuild, and in `windowWillClose`.
 
 ## Rules
 
@@ -121,9 +134,10 @@ Reviving the timers unmasked a second Linux-specific hazard, worth knowing befor
 preview.
 
 A preview applies settings that are deliberately **not** persisted.
-But applying them makes libghostty emit `config_change` and OSC color-change actions, and those handlers
-re-derive chrome/palette by reading settings from disk — so every preview immediately repainted itself with
+But applying them makes libghostty emit `config_change` actions, and that handler re-derives chrome colors
+by reading settings from disk — so every preview immediately repainted itself with
 the OLD persisted theme (the sidebar flashed the new theme, then reverted).
+A program's OSC 11 during a preview likewise rebuilds its surface's overlay config without explicit settings.
 
 The fix is an in-memory override that every preview-path reader resolves through:
 `AppController.themePreviewSettings` (declared in `GhosttyConfigTheme.swift` next to its readers) holds the

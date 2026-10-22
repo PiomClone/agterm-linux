@@ -106,7 +106,7 @@ struct LinuxCustomCommandProcessTests {
             command: command, context: context, baseEnvironment: [:], launcher: running
         ) { failure in failures.withValue { $0.append(failure) } }
         running.finish(status: 19)
-        #expect(failures.value.last == .exit(19))
+        #expect(failures.value.last == .exit(19, nil))
     }
 
     @Test("Foundation launcher rejects a missing executable")
@@ -157,6 +157,22 @@ struct LinuxCustomCommandProcessTests {
                 try? await Task.sleep(for: .milliseconds(200))
             }
         }
+    }
+
+    @Test("opt-in failure HUD captures the final stderr diagnostic from a real child")
+    func realStderrCapture() async {
+        let command = CustomCommand(
+            name: "capture", command: "printf 'first\\n\\033[31mfinal diagnostic\\033[0m\\n' >&2; exit 23",
+            shortcut: "", errorHud: true)
+        let failure = await withCheckedContinuation { (continuation: CheckedContinuation<LinuxCustomCommandFailure, Never>) in
+            LinuxCustomCommandProcess.launch(
+                command: command, context: CommandContext(sessionPWD: "/tmp"),
+                baseEnvironment: [:], launcher: FoundationLinuxProcessLauncher()
+            ) { continuation.resume(returning: $0) }
+        }
+        #expect(failure == .exit(23, "final diagnostic"))
+        #expect(failure.reason == "exit 23")
+        #expect(failure.toast(commandName: command.name) == "command failed (exit 23): capture")
     }
 
     @Test("closing and reopening the same window id cannot reactivate an old origin")

@@ -2,26 +2,12 @@ import Foundation
 import agtermCore
 
 extension AppSettings {
-    static let themeResetOSC = "\u{1B}]110\u{7}\u{1B}]111\u{7}"
-
     static let agtermThemeLines = [
         "background = #303030",
         "foreground = #ffffff",
         "selection-background = #5b5b5b",
         "selection-foreground = #dfdfff",
     ]
-
-    static func themeOSC(from lines: [String]) -> String {
-        let colors = ThemeColorResolver.colors(fromLines: lines)
-        var osc = ""
-        if let background = colors.background {
-            osc += "\u{1B}]11;\(background)\u{7}"
-        }
-        if let foreground = colors.foreground {
-            osc += "\u{1B}]10;\(foreground)\u{7}"
-        }
-        return osc
-    }
 }
 
 struct ThemeColors: Equatable, Sendable {
@@ -130,7 +116,8 @@ enum ThemeColorResolver {
         .agterm-sidebar label { color: \(foreground); }
         /* exact row-content path: a row-parented popover must not inherit the selection foreground */
         .agterm-sidebar row.agterm-selected > .agterm-session-row-content > label,
-        .agterm-sidebar row.agterm-selected > .agterm-session-row-content > image { color: \(selectionForeground); }
+        .agterm-sidebar row.agterm-selected > .agterm-session-row-content > image,
+        .agterm-sidebar row.agterm-selected > .agterm-session-row-content > entry { color: \(selectionForeground); }
         .agterm-sidebar button { color: \(foreground); }
         .agterm-sidebar separator { background-color: alpha(\(foreground), 0.22); }
         toolbarview.agterm-sidebar-column > .top-bar,
@@ -138,6 +125,7 @@ enum ThemeColorResolver {
         paned.agterm-sidebar-split > separator {
             min-width: 1px; padding: 0 4px; background-color: alpha(\(foreground), 0.18); background-clip: content-box; box-shadow: none;
         }
+        .agterm-switcher-row.agterm-switcher-current { background-color: \(selectionBackground); color: \(selectionForeground); }
         """
     }
 }

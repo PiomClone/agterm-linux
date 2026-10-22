@@ -22,6 +22,10 @@ extension AppController {
         adw_preferences_page_add(cast(page), cast(mouse))
 
         let sessions = preferencesGroup("Sessions")
+        adw_preferences_group_add(cast(sessions), W(preferencesCombo(
+            "New sessions are added", values: ["At the end", "After the current session"],
+            selected: settings.effectiveNewSessionPlacement == .afterCurrent ? 1 : 0,
+            handler: unsafeBitCast(onSettingsSessionPlacement, to: GCallback.self))))
         let modes = ["Home directory", "Current session's directory", "Custom directory"]
         let currentMode =
             AppSettings.NewSessionDirectory(rawValue: settings.newSessionDirectory ?? "") ?? .home
@@ -74,6 +78,12 @@ extension AppController {
                     "Allow undo after closing sessions and workspaces",
                     active: settings.closeGraceUndoEnabled ?? true,
                     handler: unsafeBitCast(onSettingsCloseUndo, to: GCallback.self))))
+        adw_preferences_group_add(
+            cast(sessions),
+            W(preferencesCombo(
+                "Flagged view layout", values: ["Flat list", "Workspace tree"],
+                selected: settings.effectiveFlaggedViewLayout == .tree ? 1 : 0,
+                handler: unsafeBitCast(onSettingsFlaggedLayout, to: GCallback.self))))
         adw_preferences_page_add(cast(page), cast(sessions))
 
         let ghostty = preferencesGroup("Ghostty Config")
@@ -137,6 +147,11 @@ private let onSettingsConfirmClose: @MainActor @convention(c) (OpaquePointer?, O
 private let onSettingsCloseUndo: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated { controllerForWidget(row)?.setCloseGraceUndo(adw_switch_row_get_active(row) != 0) }
 }
+private let onSettingsFlaggedLayout: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+    MainActor.assumeIsolated {
+        _ = controllerForWidget(row)?.setFlaggedViewLayout(adw_combo_row_get_selected(cast(row)) == 1 ? .tree : .flat)
+    }
+}
 private let onSettingsSessionDirectory: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
     MainActor.assumeIsolated {
         controllerForWidget(row)?.setNewSessionDirectoryAtIndex(Int(adw_combo_row_get_selected(cast(row))))
@@ -176,3 +191,12 @@ private let onSessionDirectoryChosen: @MainActor @convention(c) (UnsafeMutablePo
         controller.rebuildSettings(page: .general)
     }
 }
+
+private let onSettingsSessionPlacement: @MainActor @convention(c)
+    (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { row, _, _ in
+        guard let row, controllerForWidget(row) != nil else { return }
+        let settingsStore = linuxSettingsStore()
+        var settings = settingsStore.load()
+        settings.newSessionPlacement = adw_combo_row_get_selected(cast(row)) == 1 ? "afterCurrent" : nil
+        try? settingsStore.save(settings)
+    }

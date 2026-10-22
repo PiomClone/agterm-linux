@@ -14,7 +14,7 @@ extension AppController {
             store.clearUnseen(id)
             if hadUnseen {
                 NotificationManager.withdraw(windowID: windowID, sessionID: id)
-                rebuildSidebar()
+                syncSidebar()
             }
             // Reactivation can preempt a popover dismissal's own refocus, so it must be no coarser — and
             // must decline while a live search entry holds the keyboard.
@@ -34,9 +34,8 @@ extension AppController {
         if confirmedClose { return true }
         let counts = library.openCounts()
         guard counts.windows <= 1, counts.sessions > 0 else { return true }
-        let body = QuitPrompt.message(
-            windows: counts.windows, sessions: counts.sessions,
-            mode: linuxSettingsStore().load().effectiveRestoreMode)
+        let body = QuitPrompt.message(windows: counts.windows, sessions: counts.sessions,
+                                      mode: gRestoreLaunchDecision.active)
         let dialog = OpaquePointer("Quit agterm?".withCString { h in body.withCString { b in adw_alert_dialog_new(h, b) } })
         attachControllerContext(to: dialog, windowID: windowID)
         "cancel".withCString { i in "Cancel".withCString { l in adw_alert_dialog_add_response(cast(dialog), i, l) } }
@@ -56,15 +55,27 @@ extension AppController {
         gtk_window_close(WIN(window))
     }
 
+    func applyExitCapture(_ action: LinuxExitCapturePolicy.Action) {
+        switch action {
+        case .capture(let preserve): Self.captureForegroundCommands(in: [self], preserveUnconsumedPending: preserve)
+        case .clear: store.workspaces.flatMap(\.sessions).forEach { $0.clearCapturedForegroundCommands() }
+        case .skip: break
+        }
+    }
+
     /// The window is closing: capture its size for restore-on-reopen, then tear down its surfaces and
     /// drop it from the library + registry.
     func windowWillClose() {
+        LinuxHtmlOverlayRegistry.shared.releasePages(in: store)
         customCommandOrigin.invalidate()
         commitBackgroundOpacity()
         // `refocus: false` throughout: the widget tree is about to be destroyed, and the control pick's
         // deferred grab would fire after that against a finalized window.
         dismissSessionPicker(refocus: false)
         dismissControlPick(retainResultThroughRegistry: true, refocus: false)
+        dismissGUIAsk()
+        for session in store.workspaces.flatMap(\.sessions) { session.cancelPendingAsk() }
+        for id in Array(terminalAskSurfaces.keys) { removeTerminalAskSurface(id) }
         // Not optional cleanup: a popover left parented at destroy hangs the close, and GTK emits no
         // `"closed"` then, so this call is the only notice.
         dismissContextMenu(refocus: false)
@@ -94,19 +105,22 @@ extension AppController {
         // finalizer's teardown sweeps (see `.claude/rules/main-loop.md`).
         store.finalizeAllPendingCloses()
         cancelPendingWorkspaceToggle()
-        cancelLeaderDeadlineForWindowClose()
+        abandonLeader()
         cancelSessionSwitch()
         splitRatioRestore.cancelAll()
+        sidebarRuntime.scrollRetry.cancelAll()
         cancelFullscreenTransitionTimeout()
         setTerminalZoom(.off, target: nil)
         TerminalZoomRegistry.shared.unregister(windowID)
         closeDashboard(refocus: false)
         DashboardControllerRegistry.shared.unregister(windowID)
         PickRegistry.shared.unregister(windowID)
+        stopRemotePresentations()
         autoFollowCoordinator.stop()
         let w = gtk_widget_get_width(W(window)), h = gtk_widget_get_height(W(window))
         if w > 0, h > 0 { library.setGeometry(WindowGeometry.Size(width: Double(w), height: Double(h)), forWindow: windowID) }
-        if linuxSettingsStore().load().effectiveRestoreMode == .rerun { captureForegroundCommands() }
+        applyExitCapture(gExitCapture.windowClosing(windowID, isTerminating: library.isTerminating,
+                                                     openIDs: library.openIDs()))
         store.save()
         store.discardHudBodies()
         quickSurface?.teardown()
@@ -118,8 +132,15 @@ extension AppController {
         for s in overlaySurfaces.values { s.teardown() }
         for s in leftOverlaySurfaces.values { s.teardown() }
         for s in rightOverlaySurfaces.values { s.teardown() }
+        // Last, and in this order: the maps are what a resync resolves, so emptying them first makes any
+        // later one compute "nothing blinks" and the cancel's normalization pass touch nothing.
+        sidebarRuntime.rows.removeAll()
+        sidebarRuntime.sections.removeAll()
+        sidebarRuntime.pickerGlyphs.removeAll()
+        sidebarRuntime.blinkPhase.cancel()
         library.closeWindow(windowID)
         gWindows[windowID] = nil
         if gController === self { gController = gWindows.values.first }
+        for controller in gWindows.values { controller.updateAttentionButton(refocusOnDismiss: false) }
     }
 }

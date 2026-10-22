@@ -543,7 +543,6 @@ extension AppStore {
         HtmlOverlayReleases.shared.release(overlay.html)
         session.setPaneOverlay(nil, pane: pane)
         session.paneOverlaySurface(pane)?.teardown()
-        session.setPaneOverlay(nil, pane: pane)
         session.setPaneOverlaySurface(nil, pane: pane)
         if let replica = overlay.replica { session.onReplicaOverlayClosed?(replica.job) }
         return true

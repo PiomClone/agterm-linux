@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import LinuxIntegrations
+import agtermCore
 
 struct Integration: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -39,6 +40,9 @@ struct Integration: ParsableCommand {
         @Argument(help: "Integration to install: hooks or skill.")
         var integration: String
 
+        @Option(name: .long, help: "Choose the OpenCode plugin major when detection is unavailable: v1, v2, or skip.")
+        var opencodeVersion: String?
+
         @Flag(name: .long, help: "Print the exact plan without changing files.")
         var dryRun = false
 
@@ -49,13 +53,17 @@ struct Integration: ParsableCommand {
         var socket: String?
 
         func validate() throws {
+            if let opencodeVersion, !["v1", "v2", "skip"].contains(opencodeVersion) {
+                throw ValidationError("opencode-version must be v1, v2, or skip")
+            }
             guard ["hooks", "skill"].contains(integration) else {
                 throw ValidationError("integration must be hooks or skill")
             }
         }
 
         func run() throws {
-            let service = IntegrationService()
+            let service = IntegrationService(openCodeVersion: opencodeVersion.flatMap(AgentHooksInstall.OpenCode.Version.init(rawValue:)),
+                                             skipOpenCode: opencodeVersion == "skip")
             let plan = try integration == "hooks" ? service.planHooks() : service.planSkill()
             if dryRun {
                 if json { try printJSON(PlanPreview(plan)) } else { print(plan.summary) }

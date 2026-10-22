@@ -3,9 +3,14 @@ import agtermCore
 
 public struct IntegrationService: Sendable {
     public let environment: IntegrationEnvironment
+    public let openCodeVersion: AgentHooksInstall.OpenCode.Version?
+    public let skipOpenCode: Bool
 
-    public init(environment: IntegrationEnvironment = .process()) {
+    public init(environment: IntegrationEnvironment = .process(), openCodeVersion: AgentHooksInstall.OpenCode.Version? = nil,
+                skipOpenCode: Bool = false) {
         self.environment = environment
+        self.openCodeVersion = openCodeVersion
+        self.skipOpenCode = skipOpenCode
     }
 
     public func status() -> IntegrationSnapshot {

@@ -146,10 +146,10 @@ extension AppController {
         case .collapseWorkspaces: return { self.collapseOtherWorkspaces() }
         case .editKeymap: return { self.editKeymap() }
         case .reloadKeymap: return { reloadKeymapAllWindows(reportingIn: self) }
+        case .editHooks: return { self.editHooks() }
+        case .reloadHooks: return { _ = self.reloadHooks() }
         case .editGhosttyConfig: return { self.editGhosttyConfig() }
         case .reloadConfig: return { self.reloadConfig() }
-        case .editHooks: return { self.editHooks() }
-        case .reloadHooks: return { self.reloadConfig() }
         case .clearFlagged: return { self.clearFlagged() }
         case .clearFocus: return { self.focusWorkspace(nil) }
         case .addWorkspaceToFocus: return { self.addActiveWorkspaceToFocus() }
@@ -180,9 +180,21 @@ extension AppController {
         }
     }
 
+    private func attentionRows() -> [LinuxPaletteItem] {
+        library.attentionAcrossWindows.map { entry in
+            let subtitle = library.attentionSubtitle(entry)
+            return (row: LinuxPaletteRow(title: "\(entry.session.displayName)  —  \(subtitle)"), run: {
+                MainTimer.schedule(after: 0) { [weak self] in
+                    self?.selectAttention(windowID: entry.window.id, sessionID: entry.session.id)
+                }
+            })
+        }
+    }
+
     func showPalette(sessions: Bool = false, recent: Bool = false, attention: Bool = false) {
         if paletteWindow != nil { closePalette(); return }   // re-invoking toggles the palette closed
         guard let win = op(gtk_window_new()) else { return }
+        installPaneLeadReleaseCapture(on: win)
         attachControllerContext(to: win, windowID: windowID)
         paletteWindow = win
         suppressAutoFollow()
@@ -221,7 +233,7 @@ extension AppController {
         gtk_widget_add_controller(W(win), kc)
 
         if attention {
-            paletteAll = LinuxPaletteList(items: sessionRows(store.attentionSessions), preservesNaturalOrder: true)
+            paletteAll = LinuxPaletteList(items: attentionRows(), preservesNaturalOrder: true)
         } else if recent {
             let sessions = store.navigableRecentSessions(limit: 10).compactMap(store.session(withID:))
             paletteAll = LinuxPaletteList(items: sessionRows(sessions), preservesNaturalOrder: true)
@@ -343,21 +355,13 @@ extension AppController {
         return gtk_scrolled_window_get_vadjustment(OpaquePointer(scroller))
     }
 
-    /// Keep the keyboard-selected row visible: the search entry keeps focus, so GtkListBox won't auto-scroll
-    /// to a programmatic selection — clamp the scrolled window to the (uniform-height) row's extent ourselves.
-    /// Clamp a list box's scrolled window so the row at `index` is fully visible. Shared by the command
-    /// palette + theme picker (both keep focus in their search entry, so GtkListBox won't auto-scroll a
-    /// programmatic selection). Uses the row's ACTUAL position — uniform index×height underestimated the
-    /// offset, so scrolling DOWN lagged a row behind the selection. clamp_page brings [y, y+h] into view.
+    /// Clamp a list box's scrolled window so the row at `index` is fully visible. The palette and pickers keep
+    /// focus in their search entry, so GtkListBox won't auto-scroll a programmatic selection.
     func scrollListBoxRowIntoView(_ lb: OpaquePointer, toIndex index: Int) {
         guard let scroller = gtk_widget_get_ancestor(W(lb), gtk_scrolled_window_get_type()),
-              let vadj = gtk_scrolled_window_get_vadjustment(OpaquePointer(scroller)),
-              let row = gtk_list_box_get_row_at_index(lb, Int32(index)) else { return }
-        var origin = graphene_point_t()
-        var translated = graphene_point_t()
-        guard gtk_widget_compute_point(W(OpaquePointer(row)), W(lb), &origin, &translated) != 0 else { return }
-        let ry = Double(translated.y)
-        gtk_adjustment_clamp_page(vadj, ry, ry + max(1, Double(gtk_widget_get_height(W(OpaquePointer(row))))))
+              let row = gtk_list_box_get_row_at_index(lb, Int32(index)),
+              let rowWidget = W(OpaquePointer(row)) else { return }
+        revealVertically(rowWidget, in: OpaquePointer(scroller))
     }
 }
 
@@ -373,7 +377,9 @@ private let onPaletteActivate: @MainActor @convention(c) (OpaquePointer?, gpoint
 private let onPaletteRow: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { list, row, _ in
     MainActor.assumeIsolated { controllerForWidget(list)?.runPaletteRow(row) }
 }
-private let onPaletteKey: @MainActor @convention(c) (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> gboolean = { keys, keyval, _, _, _ in
+private let onPaletteKey: @MainActor @convention(c) (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> gboolean = { keys, originalKeyval, _, state, _ in
+    let keyval: UInt32 = state & UInt32(GDK_CONTROL_MASK.rawValue) != 0
+        ? (originalKeyval == 106 ? 0xFF54 : (originalKeyval == 107 ? 0xFF52 : originalKeyval)) : originalKeyval
     switch keyval {
     case 0xFF1B: MainActor.assumeIsolated { controllerForEventController(keys)?.closePalette() }; return 1
     case 0xFF52: MainActor.assumeIsolated { controllerForEventController(keys)?.paletteMove(down: false) }; return 1

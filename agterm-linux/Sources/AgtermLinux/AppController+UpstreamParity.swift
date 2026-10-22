@@ -39,6 +39,15 @@ extension AppController {
               let split = session.splitSurface as? GhosttySurface else {
             return ControlResponse(ok: false, error: "session closed during swap")
         }
+        syncSwappedPaneAdapters(id, primary: primary, split: split)
+        NotificationManager.withdraw(windowID: windowID, sessionID: id)
+        syncSidebar()
+        updateTitle()
+        sessionFocusTarget(for: id)?.grabFocus(supersedingPopoverCapture: true)
+        return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+    }
+
+    func syncSwappedPaneAdapters(_ id: UUID, primary: GhosttySurface, split: GhosttySurface) {
         // The realized GtkGLArea widgets never move. Rebind the role-indexed maps (and their fixed host
         // widgets) to the model's newly exchanged surface slots instead.
         surfaces[id] = primary
@@ -50,11 +59,6 @@ extension AppController {
             (rightOverlayWashes[id], leftOverlayWashes[id])
         (leftOverlayWashProviders[id], rightOverlayWashProviders[id]) =
             (rightOverlayWashProviders[id], leftOverlayWashProviders[id])
-        NotificationManager.withdraw(windowID: windowID, sessionID: id)
-        refreshSidebar()
-        updateTitle()
-        sessionFocusTarget(for: id)?.grabFocus(supersedingPopoverCapture: true)
-        return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
     }
 
     func swapActiveSessionPanes() {
@@ -88,8 +92,8 @@ extension AppController {
 
     func toggleCurrentWorkspaceCollapse() {
         guard store.sidebarMode == .tree, let id = store.currentWorkspaceID else { return }
-        store.setWorkspaceExpanded(id, expanded: store.isCurrentWorkspaceCollapsed)
-        rebuildSidebarKeepingKeyboard()
+        setWorkspaceExpanded(id, expanded: store.isCurrentWorkspaceCollapsed)
+        syncSidebar()
     }
 
     func navigateWindow(_ direction: WorkspaceNavigation) {

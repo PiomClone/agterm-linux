@@ -11,6 +11,12 @@ import agtermCore
     }
 }
 
+/// Status color and shape ride inline Pango markup on each live glyph, so an appearance change reaches
+/// them only through a sync — whose tail repaints the dashboard tiles and the attention picker too.
+@MainActor private func refreshLiveStatusGlyphs() {
+    for controller in gWindows.values { controller.syncSidebar() }
+}
+
 @MainActor
 extension AppController {
     @discardableResult
@@ -24,6 +30,8 @@ extension AppController {
         guard let config = GhosttyApp.shared.buildConfig(extraLines: lines) else { return false }
         let chromeColors = GhosttyConfigTheme.colors(from: config)
         GhosttyApp.shared.currentThemeBackgroundHex = chromeColors.background
+        GhosttyApp.shared.currentThemeForegroundHex = chromeColors.foreground
+        GhosttyApp.shared.currentThemePalette = GhosttyConfigTheme.palette(from: config)
         synchronizeLiveColorScheme(side)
         // The app-level update is the single base application: pinned libghostty propagates it to
         // every surface. Each surface then reasserts only its own overlay/zoom state.
@@ -44,18 +52,15 @@ extension AppController {
             })
         ghostty_config_free(config)
 
-        let osc = AppSettings.themeOSC(from: lines)
         let activeTheme = settings.activeTheme(isDark: side.isDark)
-        let liveOSC = osc.isEmpty && activeTheme == nil ? AppSettings.themeResetOSC : osc
-        GhosttyApp.shared.currentThemeOSC = liveOSC
         for controller in gWindows.values {
             for surface in controller.configurableSurfaces {
-                surface.feed(liveOSC)
                 surface.queueRender()
             }
             controller.applyWindowThemeColors(for: activeTheme, resolvedColors: chromeColors)
             controller.updateAllPaneDimming(windowOpacity: settings.backgroundOpacity ?? 1)
         }
+        LinuxHtmlOverlayRegistry.shared.refreshThemes()
         recordAppliedColorSchemeSide(side)
         return true
     }
@@ -103,8 +108,7 @@ extension AppController {
     func setNotificationBadge(_ enabled: Bool) {
         persist(\.notificationBadgeEnabled, enabled ? nil : false)
         for controller in gWindows.values {
-            controller.badgeEnabled = enabled
-            controller.rebuildSidebar()
+            controller.syncSidebar()
         }
     }
 
@@ -128,7 +132,7 @@ extension AppController {
         try? linuxSettingsStore().save(settings)
         for controller in gWindows.values {
             controller.applyInterfaceElements(settings: settings)
-            controller.rebuildSidebar()
+            controller.syncSidebar()
         }
     }
 
@@ -335,7 +339,7 @@ extension AppController {
         persist(\.sidebarFontSize, size == AppSettings.defaultSidebarFontSize ? nil : size)
         for controller in gWindows.values {
             controller.applySidebarFontSize()
-            controller.rebuildSidebar()
+            controller.syncSidebar(force: true)
         }
     }
 
@@ -372,7 +376,7 @@ extension AppController {
         case .blocked: persist(\.blockedStatusColorHex, hex)
         case .completed: persist(\.completedStatusColorHex, hex)
         }
-        installStatusColorCSS()
+        refreshLiveStatusGlyphs()
     }
 
     func setStatusShape(_ kind: StatusColorKind, at index: Int) {
@@ -384,16 +388,20 @@ extension AppController {
         case .blocked: persist(\.blockedStatusShape, value)
         case .completed: persist(\.completedStatusShape, value)
         }
-        for controller in gWindows.values {
-            controller.rebuildSidebar()
-            controller.updateDashboardStatusIndicators()
-        }
+        refreshLiveStatusGlyphs()
     }
 
     func setBlockedSoundAtIndex(_ index: Int) {
         let value: String? = index == 0 ? nil : "Desktop Bell"
         persist(\.blockedStatusSoundName, value)
         if let value { StatusSoundPlayer.shared.play(value) }
+    }
+
+    func setStatusResetAtIndex(_ index: Int) {
+        let modes = StatusReset.allCases
+        guard modes.indices.contains(index) else { return }
+        let mode = modes[index]
+        persist(\.statusReset, mode == .firstKey ? nil : mode.rawValue)
     }
 
     func setAutoFollowAtIndex(_ index: Int) {
@@ -457,7 +465,7 @@ extension AppController {
             controller.applySidebarFontSize()
             controller.applyInterfaceFontSize()
             controller.updateAllPaneDimming()
-            controller.rebuildSidebar()
+            controller.syncSidebar(force: true)
         }
         rebuildSettings(page: .appearance)
     }
@@ -471,8 +479,9 @@ extension AppController {
         settings.blockedStatusShape = nil
         settings.completedStatusShape = nil
         settings.blockedStatusSoundName = nil
+        settings.statusReset = nil
         try? linuxSettingsStore().save(settings)
-        installStatusColorCSS()
+        refreshLiveStatusGlyphs()
         rebuildSettings(page: .agentStatus)
     }
 }

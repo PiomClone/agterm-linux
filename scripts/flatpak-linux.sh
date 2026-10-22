@@ -18,6 +18,14 @@ mkdir -p "$COMPAT"
 [ -e "$COMPAT/libncurses.so.6" ] || ln -sf /usr/lib/libncursesw.so.6 "$COMPAT/libncurses.so.6"
 [ -e "$COMPAT/libxml2.so.2" ]   || ln -sf "$(ls /usr/lib/libxml2.so.* | sort -V | tail -1)" "$COMPAT/libxml2.so.2"
 export LD_LIBRARY_PATH="$COMPAT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -d "$HOME/.local/lib" ]; then
+  export LD_LIBRARY_PATH="$HOME/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+for pkg_dir in "$HOME/.local/lib/pkgconfig" "$HOME/.local/share/pkgconfig"; do
+  if [ -d "$pkg_dir" ]; then
+    export PKG_CONFIG_PATH="$pkg_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  fi
+done
 
 echo "==> libghostty (idempotent; targets glibc 2.39 so the .so runs in the flatpak runtime)"
 "$ROOT/scripts/setup-linux.sh"

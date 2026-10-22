@@ -44,18 +44,19 @@ extension AppController {
         case .failure(let response): return response
         case .success(let id):
             openWindow(id)
+            library.frontmostWindowID = id
+            if let controller = gWindows[id] { gController = controller }
             return ok(id)
         }
     }
 
     func windowGo(direction: WorkspaceNavigation) -> ControlResponse {
-        let open = library.openIDs()
-        guard open.count > 1, let index = open.firstIndex(of: windowID) else {
+        guard let id = library.navigateWindow(direction) else {
             return err("no other open window to navigate to")
         }
-        let offset = direction == .next ? 1 : open.count - 1
-        let id = open[(index + offset) % open.count]
+        guard gWindows[id] != nil else { return err("window not on screen yet — retry") }
         openWindow(id)
+        library.frontmostWindowID = id
         return ok(id)
     }
 

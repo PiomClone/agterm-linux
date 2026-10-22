@@ -32,6 +32,12 @@ struct AgtermApp {
             FileHandle.standardError.write(Data((line + "\n").utf8))
         }
         AppImageChildEnvironment.sanitizeCurrentProcess()
+        #if DEBUG
+        if let state = DebugStateDirectory.adopted(environment: ProcessInfo.processInfo.environment,
+                                                    liveDirectory: PersistenceStore.defaultDirectory) {
+            setenv(DebugStateDirectory.environmentKey, state, 1)
+        }
+        #endif
         // AGTERM_APP_ID overrides the GApplication id so a dev/test instance registers separately on
         // the session bus and runs ALONGSIDE a deployed one (the Linux analogue of the macOS .debug
         // bundle id) instead of forwarding its launch to the running instance.
@@ -174,6 +180,7 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
     // Route every deferred main-actor job (MainTimer) through g_timeout_add BEFORE any store or
     // controller exists — see `agterm-linux/docs/main-loop.md`.
     installGLibMainTimer()
+    LinuxHtmlOverlayRegistry.shared.install()
     let stateDirectory = linuxStateDirectory()
     let settingsStore = linuxSettingsStore()
     let currentSettings = settingsStore.load()
@@ -190,10 +197,11 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
     let zmxClient = FileManager.default.isExecutableFile(atPath: zmxPath)
         ? LinuxZmxClient(
             executablePath: zmxPath,
-            socketDirectory: ZmxSupport.socketDirectory(forStateDirectory: stateDirectory.path)
+            socketDirectory: ZmxSupport.socketDirectory(forStateDirectory: stateDirectory.path), sweeper: LinuxProcessSweeper()
         ) : nil
     gZmxClient = zmxClient
-    gZmxForegroundResolver = zmxClient.map(LinuxZmxForegroundResolver.init(client:))
+    LinuxRemoteLinkObserver.shared.install()
+    gZmxForegroundResolver = zmxClient.map { LinuxZmxForegroundResolver(client: $0) }
     // The notification click-to-reveal target: an `app.reveal` action carrying a session-id string.
     let revealAction = g_simple_action_new("reveal", g_variant_type_new("s"))
     connect(revealAction, "activate", unsafeBitCast(onRevealAction as @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void, to: GCallback.self))
@@ -202,25 +210,32 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
         directory: stateDirectory,
         paneFinalizer: { identities in
             _ = zmxClient?.kill(paneIdentities: identities)
-            gZmxForegroundResolver?.noteLifecycleChange()
         },
         launchInventorySink: { identities in
             gZmxRunningNames = zmxClient?.reap(
                 knownPaneIdentities: identities,
                 launchDecision: restoreDecision
             ).runningNames
-            gZmxForegroundResolver?.noteLifecycleChange()
         },
         launchPaneDrop: { identities in identities.forEach(gSpawnRegistry.pacer.discard) },
         defaultSessionCwd: ConfigPaths.defaultNewSessionCwd()
     )
+    AskRegistry.shared.resolveOwner = { owner in
+        switch owner {
+        case .window(let id): PickRegistry.shared.controller(for: id)?.pendingAsk
+        case .session(let id, let window): gLibrary.store(for: window)?.session(withID: id)?.askPending
+        }
+    }
     let spawnPlan = gLibrary.launchSpawnPlan()
     gSpawnRegistry.pacer.arm(order: spawnPlan.order, burst: spawnPlan.burst)
     ensureStarterFiles()
     installAppCSS()
-    installStatusColorCSS()
     installAppIcons()
     gControlServer.start()
+    gHooks = LinuxHooks(library: gLibrary, configDirectory: ConfigPaths.configDirectory(
+        setting: currentSettings.configDirectory,
+        stateDir: ProcessInfo.processInfo.environment["AGTERM_STATE_DIR"],
+        home: FileManager.default.homeDirectoryForCurrentUser))
     // Quit cleanly on SIGTERM/SIGINT (session logout, `kill`, Ctrl+C) so flushOnQuit captures the
     // foreground commands + snapshot — without this a signal kills the process and loses the capture
     // (the macOS path runs through applicationWillTerminate). g_application_quit emits "shutdown".
@@ -243,6 +258,7 @@ private let onOpen: @MainActor @convention(c) (OpaquePointer?, UnsafeMutablePoin
             connect(desktopSettings, signal,
                     unsafeBitCast(onDesktopSidebarMetricsChanged, to: GCallback.self), nil)
         }
+        // Separate from that array: these re-derive the blink timer, not the sidebar width floor.
         for signal in ["notify::gtk-enable-animations", "notify::gtk-interface-reduced-motion"] {
             connect(desktopSettings, signal,
                     unsafeBitCast(onReducedMotionChanged, to: GCallback.self), nil)
@@ -297,29 +313,21 @@ private let onShutdown: @MainActor @convention(c) (OpaquePointer?, gpointer?) ->
         colorSchemeChangeDebouncer.cancel()
         gLibrary?.isTerminating = true
         flushOnQuit()
+        gControlServer.shutdownPresentationStreams()
+        gControlServer.shutdownOverlayJobs()
         gControlServer.stop()
     }
 }
 
-private let onReducedMotionChanged: @MainActor @convention(c) (
-    OpaquePointer?, OpaquePointer?, gpointer?
-) -> Void = { _, _, _ in
-    MainActor.assumeIsolated { refreshAppCSS() }
-}
-
 /// The app-wide stylesheet `installAppCSS` loads — internal (not private) so the tests can pin that
-/// interpolated policy constants actually reach the installed string.
-func appCSS(prefersReducedMotion: Bool) -> String {
-    """
-    \(LinuxReduceMotionPolicy.blinkCSS(prefersReducedMotion: prefersReducedMotion))
-    /* one selector per keyframe: GTK 4.14's _gtk_css_keyframes_parse takes a single progress value and then
-       expects the block, so a `0%, 100%` list is a parse error there - and GTK drops @keyframes silently */
-    @keyframes agterm-blink-pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
+/// interpolated policy constants (the sidebar hover rule) actually reach the installed string.
+let appCSS = """
     window.agterm-translucent { background-color: transparent; }   /* terminal translucency: ghostty's alpha reaches the compositor */
     \(LinuxQuickCardPolicy.cardCSS)
-    .agterm-switcher { background-color: alpha(#1e2228, 0.96); padding: 10px; border-radius: 10px; border: 1px solid alpha(#ffffff, 0.12); }
-    .agterm-switcher label { padding: 3px 0; opacity: 0.6; }
-    .agterm-switcher label.agterm-switcher-current { opacity: 1; font-weight: bold; }
+    \(SessionSwitcherPlacement.cardCSS)
+    .agterm-switcher-dim { background-color: alpha(#000000, 0.2); }
+    .agterm-switcher-row { padding: 6px 12px; border-radius: 6px; }
+    .agterm-switcher-row.agterm-switcher-current { background-color: alpha(@popover_fg_color, 0.14); }  /* default theme; windowThemeCSS overrides */
     .agterm-gl-error, .agterm-surface-error { color: #ffffff; background-color: alpha(#1e2228, 0.96); padding: 24px; border-radius: 10px; border: 1px solid alpha(#e5a50a, 0.5); }
     .agterm-dashboard { background-color: @window_bg_color; }
     .agterm-modal-header { border-bottom: 1px solid alpha(@window_fg_color, 0.12); }
@@ -335,47 +343,18 @@ func appCSS(prefersReducedMotion: Bool) -> String {
     .agterm-sidebar-column { background-color: alpha(@window_fg_color, 0.03); }
     paned.agterm-sidebar-split > separator,
     paned.agterm-sidebar-split separator { min-width: 0px; padding: 0; margin: 0; background-color: transparent; background-image: none; border: none; box-shadow: none; outline: none; opacity: 0; }
+    \(LinuxSidebarPolicy.sidebarRenameCSS)
     """
-}
 
-/// Install the app-wide CSS once. The reloadable provider lets a desktop Reduce Motion change stop or
-/// restore the decorative agent-status pulse immediately on every existing glyph.
-@MainActor private var gAppCSSProvider: OpaquePointer?
-
-@MainActor private func refreshAppCSS() {
-    guard let provider = gAppCSSProvider else { return }
-    let css = appCSS(prefersReducedMotion: linuxPrefersReducedMotion(gtk_settings_get_default()))
-    css.withCString { gtk_css_provider_load_from_string(cast(provider), $0) }
-}
-
+/// Install the app-wide CSS once, at the application priority so it layers over the theme without
+/// overriding user CSS.
 @MainActor private func installAppCSS() {
     guard let display = gdk_display_get_default() else { return }
     let provider = OpaquePointer(gtk_css_provider_new())
-    gAppCSSProvider = provider
-    refreshAppCSS()
+    appCSS.withCString { gtk_css_provider_load_from_string(cast(provider), $0) }
     // GTK_STYLE_PROVIDER_PRIORITY_APPLICATION = 600; the macro cast isn't available in Swift, the
     // GtkCssProvider pointer is passed straight through as the GtkStyleProvider.
     gtk_style_context_add_provider_for_display(display, provider, 600)
-}
-
-@MainActor private var gStatusColorProvider: OpaquePointer?
-
-/// Apply the agent-status glyph colors from settings (nil = the Adwaita defaults) via a dedicated,
-/// reloadable provider above the app CSS — re-callable when the Settings color pickers change them.
-@MainActor func installStatusColorCSS() {
-    guard let display = gdk_display_get_default() else { return }
-    let s = linuxSettingsStore().load()
-    let css = """
-    .agterm-status-blocked { color: \(s.blockedStatusColorHex ?? "#e5a50a"); }
-    .agterm-status-completed { color: \(s.completedStatusColorHex ?? "#2ec27e"); }
-    .agterm-status-active { color: \(s.activeStatusColorHex ?? "#DBD9E6"); }
-    """
-    if gStatusColorProvider == nil {
-        let p = OpaquePointer(gtk_css_provider_new())
-        gStatusColorProvider = p
-        gtk_style_context_add_provider_for_display(display, p, 650)   // above the app CSS (600)
-    }
-    if let p = gStatusColorProvider { css.withCString { gtk_css_provider_load_from_string(cast(p), $0) } }
 }
 
 /// Custom symbolic icon search paths, highest priority first. The dist tarball ships them under
@@ -436,20 +415,31 @@ private let onColorSchemeChanged: @MainActor @convention(c) (OpaquePointer?, Opa
     }
 }
 
-/// A desktop text-scale or UI-font change — rebuild every sidebar so its width floor is re-measured.
-/// Deferred through `scheduleSidebarMetadataRefresh`, never a direct `rebuildSidebar()`: it coalesces the
-/// notify burst and gates on `sidebarInteractionInProgress`, so it cannot land on a live inline rename.
+/// A desktop text-scale or UI-font change — FORCE a rebuild of every sidebar so every label is
+/// re-measured under the new CSS. Deferred through `scheduleSidebarMetadataRefresh`, never a direct
+/// sync: it coalesces the notify burst and gates on `sidebarInteractionInProgress`, so a rebuild
+/// cannot land on a live inline rename.
 ///
 /// IMPORTANT: never route it through the shared `AppController.softCloseReconcile` — its `arm()`
 /// supersedes the pending job, stranding held sessions' surfaces. See `agterm-linux/docs/sidebar.md`.
 private let onDesktopSidebarMetricsChanged: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { _, _, _ in
     MainActor.assumeIsolated {
-        // Synchronously, BEFORE the deferred rebuilds: the cached scrollbar reservation is exactly what
+        // Synchronously, BEFORE the deferred rebuild: the cached scrollbar reservation is exactly what
         // `gtk-overlay-scrolling` moves, and the rebuild below is what re-measures through it.
         AppController.invalidateSidebarScrollbarOverhead()
-        for ctl in gWindows.values { ctl.scheduleSidebarMetadataRefresh() }
+        for ctl in gWindows.values { ctl.scheduleSidebarMetadataRefresh(forced: true) }
     }
 }
+
+/// A desktop reduce-motion preference flipped (either signal feeding `linuxPrefersReducedMotion`). The
+/// `agterm-blink` marker survives while the pulse is suppressed — only the timer stops — so restoring
+/// motion resumes it with no status call.
+private let onReducedMotionChanged: @MainActor @convention(c)
+    (OpaquePointer?, OpaquePointer?, gpointer?) -> Void = { _, _, _ in
+        MainActor.assumeIsolated {
+            for ctl in gWindows.values { ctl.resyncBlinkPhase() }
+        }
+    }
 
 /// SIGTERM/SIGINT → quit the GApplication on the main loop so its "shutdown" handler (flushOnQuit) runs.
 /// Returns G_SOURCE_REMOVE (the signal source is one-shot — the app is on its way out).
@@ -517,7 +507,7 @@ private let onRevealAction: @MainActor @convention(c) (OpaquePointer?, OpaquePoi
     guard controller.terminalZoom.target == nil else {
         controller.syncSidebarSelection()
         controller.updateTitle()
-        controller.refreshSidebar()
+        controller.syncSidebar()
         return
     }
     // Prefer the coordinator's pre-selection snapshot. An auto-reset indicator is cleared by

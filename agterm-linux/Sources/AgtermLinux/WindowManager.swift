@@ -10,6 +10,7 @@ import agtermCore
 @MainActor var gWindows: [UUID: AppController] = [:]
 @MainActor var gApp: OpaquePointer?
 @MainActor let gControlServer = ControlServer()
+@MainActor let gExitCapture = LinuxExitCapturePolicy { linuxSettingsStore().load().effectiveRestoreMode }
 
 private struct LinuxSavedWindowSize: Codable {
     let width: Double
@@ -72,7 +73,9 @@ extension WindowLibrary {
         title: title, body: body, firingIsFocused: origin.firingIsFocused,
         appActive: origin.appActive))
     guard let delivery else { return }
-    controller.refreshSidebar()
+    _ = controller.store.recordNotificationEvent(forSession: origin.sessionID,
+                                                 title: delivery.title, body: delivery.body)
+    controller.syncSidebar()
     if NotificationManager.bannersEnabled {
         NotificationManager.send(title: delivery.title, body: delivery.body, target: delivery.identity)
     }
@@ -94,16 +97,22 @@ extension WindowLibrary {
     }
     ensure(ConfigPaths.ghosttyConfigPath(configDirectory: dir), ConfigPaths.starterGhosttyConfig())
     ensure(ConfigPaths.keymapPath(configDirectory: dir), ConfigPaths.starterKeymapConf())
+    ensure(ConfigPaths.hooksPath(configDirectory: dir), ConfigPaths.starterHooksConf())
     ensure(ConfigPaths.restoreDenylistPath(configDirectory: dir), ConfigPaths.starterRestoreDenylist())
 }
 
-/// Capture foreground commands (when restore is on), then flush every open window's snapshot + index.
+/// Capture foreground commands (per `LinuxExitCapturePolicy`), then flush every open window's snapshot + index.
 @MainActor func flushOnQuit() {
     guard let library = gLibrary else { return }
     for controller in gWindows.values { controller.commitBackgroundOpacity() }
-    if linuxSettingsStore().load().effectiveRestoreMode == .rerun {
-        for ctl in gWindows.values { ctl.captureForegroundCommands() }
+    // Only registered windows still have live surfaces; `library.allOpenSessions()` would also cover a window
+    // `windowWillClose` already captured and tore down, overwriting its argv with nil.
+    var capturing: [AppController] = []
+    for (id, action) in gExitCapture.quitting(registeredWindows: Array(gWindows.keys)) {
+        guard let controller = gWindows[id] else { continue }
+        if action == .capture(preserveUnconsumedPending: true) { capturing.append(controller) } else { controller.applyExitCapture(action) }
     }
+    AppController.captureForegroundCommands(in: capturing, preserveUnconsumedPending: true)
     // capture each open window's on-screen size so it restores at the same size on reopen.
     for (id, ctl) in gWindows {
         let w = gtk_widget_get_width(W(ctl.windowPointer))
@@ -153,5 +162,8 @@ extension WindowLibrary {
         return
     }
     _ = gLibrary.loadStore(for: id)
+    gExitCapture.windowOpened(id)
     gWindows[id] = AppController(app: gApp, windowID: id, library: gLibrary)
+    gControlServer.attachPresentationHub()
+    for controller in gWindows.values { controller.updateAttentionButton(refocusOnDismiss: false) }
 }

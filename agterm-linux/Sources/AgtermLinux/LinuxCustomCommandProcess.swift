@@ -3,6 +3,7 @@ import agtermCore
 
 enum LinuxProcessStandardIO: Sendable, Equatable {
     case null
+    case stderrFile(String)
 }
 
 struct LinuxProcessLaunchRequest: Sendable, Equatable {
@@ -69,6 +70,15 @@ struct FoundationLinuxProcessLauncher: LinuxProcessLaunching {
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
+        case .stderrFile(let path):
+            let stderr = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+            defer { try? stderr.close() }
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = stderr
+            process.terminationHandler = { onTermination($0.terminationStatus) }
+            try process.run()
+            return
         }
         process.terminationHandler = { onTermination($0.terminationStatus) }
         try process.run()
@@ -77,12 +87,24 @@ struct FoundationLinuxProcessLauncher: LinuxProcessLaunching {
 
 enum LinuxCustomCommandFailure: Sendable, Equatable {
     case launch(String)
-    case exit(Int32)
+    case exit(Int32, String?)
+
+    var reason: String {
+        switch self {
+        case .launch(let detail): detail
+        case .exit(let status, _): "exit \(status)"
+        }
+    }
+
+    var detail: String? {
+        if case .exit(_, let detail) = self { return detail }
+        return nil
+    }
 
     func toast(commandName: String) -> String {
         switch self {
         case .launch(let detail): "command failed to launch: \(commandName) — \(detail)"
-        case .exit(let status): "command failed (exit \(status)): \(commandName)"
+        case .exit(let status, _): "command failed (exit \(status)): \(commandName)"
         }
     }
 }
@@ -94,7 +116,8 @@ enum LinuxCustomCommandProcess {
     /// mutated process environment, so losing to the caller would hand the child the overrides straight
     /// back.
     static func request(
-        command: CustomCommand, context: CommandContext, baseEnvironment: [String: String]
+        command: CustomCommand, context: CommandContext, baseEnvironment: [String: String],
+        stderrPath: String? = nil, localWorkingDirectory: String? = nil
     ) -> LinuxProcessLaunchRequest {
         var environment = baseEnvironment.merging(context.environment()) { _, commandValue in commandValue }
         let home = baseEnvironment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
@@ -106,25 +129,57 @@ enum LinuxCustomCommandProcess {
             executablePath: "/bin/sh",
             arguments: ["-c", context.expand(command.command)],
             environment: environment,
-            currentDirectoryPath: context.sessionPWD.isEmpty ? nil : context.sessionPWD,
-            standardIO: .null)
+            currentDirectoryPath: (localWorkingDirectory ?? context.sessionPWD).isEmpty
+                ? nil : (localWorkingDirectory ?? context.sessionPWD),
+            standardIO: stderrPath.map(LinuxProcessStandardIO.stderrFile) ?? .null)
     }
 
+    @discardableResult
     static func launch(
         command: CustomCommand,
         context: CommandContext,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        localWorkingDirectory: String? = nil,
         launcher: any LinuxProcessLaunching,
         onFailure: @escaping @Sendable (LinuxCustomCommandFailure) -> Void
-    ) {
-        let request = request(command: command, context: context, baseEnvironment: baseEnvironment)
+    ) -> Bool {
+        let capture = command.errorHud ? LinuxCommandStderrCapture() : nil
+        let request = request(command: command, context: context, baseEnvironment: baseEnvironment,
+                              stderrPath: capture?.path, localWorkingDirectory: localWorkingDirectory)
         do {
             try launcher.launch(request) { status in
-                if status != 0 { onFailure(.exit(status)) }
+                let detail = capture?.consume()
+                if status != 0 { onFailure(.exit(status, detail)) }
             }
+            return true
         } catch {
+            _ = capture?.consume()
             onFailure(.launch(error.localizedDescription))
+            return false
         }
+    }
+}
+
+/// A file lets a command's descendants keep stderr after the app exits without inheriting a broken pipe.
+/// Read only the bounded tail on completion, then unlink it even after a successful command.
+private final class LinuxCommandStderrCapture: @unchecked Sendable {
+    let path: String
+
+    init?() {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agterm-command-\(UUID().uuidString).err").path
+        guard FileManager.default.createFile(atPath: path, contents: nil) else { return nil }
+        self.path = path
+    }
+
+    func consume() -> String? {
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        guard let reader = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
+        defer { try? reader.close() }
+        let size = (try? reader.seekToEnd()) ?? 0
+        let wanted = min(size, UInt64(CommandFailure.tailLimit))
+        try? reader.seek(toOffset: size - wanted)
+        return CommandFailure.detail(fromTail: [UInt8]((try? reader.read(upToCount: Int(wanted))) ?? Data()))
     }
 }
 

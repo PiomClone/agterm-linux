@@ -25,7 +25,8 @@ enum LinuxZmxLaunch {
         }
     }
 
-    static func configuration(paneIdentity: UUID, baseEnvironment: [String: String])
+    static func configuration(paneIdentity: UUID, baseEnvironment: [String: String],
+                              lead: ZmxLeadAttachment? = nil)
         -> Result<ZmxSupport.Configuration, ZmxSupport.Rejection> {
         let environment = ProcessInfo.processInfo.environment
         let resources = GhosttyResourceResolver(
@@ -39,7 +40,7 @@ enum LinuxZmxLaunch {
             stateDirectory: linuxStateDirectory().path,
             paneIdentity: paneIdentity,
             baseEnvironment: baseEnvironment,
-            inheritedZdotdir: environment["ZDOTDIR"]
+            inheritedZdotdir: environment["ZDOTDIR"], lead: lead
         ))
     }
 

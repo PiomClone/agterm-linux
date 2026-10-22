@@ -20,13 +20,7 @@ extension AppController {
             return err("restore.capture requires rerun mode; configured restore mode is "
                 + configuredMode.rawValue)
         }
-        for controller in gWindows.values { controller.captureForegroundCommands() }
-        let captured = gWindows.values.reduce(into: 0) { count, controller in
-            for session in controller.store.workspaces.flatMap(\.sessions) {
-                if session.foregroundCommand != nil { count += 1 }
-                if session.splitForegroundCommand != nil { count += 1 }
-            }
-        }
+        let captured = Self.captureForegroundCommands(in: Array(gWindows.values), preserveUnconsumedPending: false)
         let paneSuffix = captured == 1 ? "" : "s"
         guard gLibrary.saveAllOpenChecked() else {
             return err("captured \(captured) pane\(paneSuffix) but at least one window's save "
@@ -37,10 +31,15 @@ extension AppController {
         return ControlResponse(ok: true, result: result)
     }
 
-    func applySessionWatermark(_ id: UUID) {
-        surfaces[id]?.applyWatermarkFromSession()
-        splitSurfaces[id]?.applyWatermarkFromSession()
-        scratchSurfaces[id]?.applyWatermarkFromSession()
+    func applySessionWatermark(_ id: UUID, pane: StatusPane?) {
+        guard let session = store.session(withID: id) else { return }
+        let surfacesByPane: [(StatusPane, GhosttySurface?)] = [
+            (.left, surfaces[id]), (.right, splitSurfaces[id]), (.scratch, scratchSurfaces[id])
+        ]
+        for (slot, surface) in surfacesByPane
+            where pane == slot || (pane == nil && session.paneBackgrounds[slot] == nil) {
+            surface?.applyWatermarkFromSession()
+        }
     }
 
     func readEvents(_ options: ControlEventReadOptions) -> ControlResponse {
@@ -54,7 +53,7 @@ extension AppController {
             guard store.session(withID: id) != nil else { return err("no such session") }
             _ = store.setContext(context, forSession: id)
             updateTitle()
-            refreshSidebar()
+            syncSidebar()
             return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
         }
     }
@@ -69,14 +68,17 @@ extension AppController {
         switch resolveWorkspaceResponse(target) {
         case .failure(let response): return response
         case .success(let id):
-            store.setWorkspaceExpanded(id, expanded: expanded)
-            rebuildSidebarKeepingKeyboard()
+            setWorkspaceExpanded(id, expanded: expanded)
+            syncSidebar()
             syncSidebarSelection()
             return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
         }
     }
 
     private func overlayReadSurface(_ session: Session, pane: OverlayPane?) -> LinuxOverlayReadSurface {
+        if session.htmlCovers(pane) {
+            return .failure(ControlResponse(ok: false, error: OverlayHtmlError.noRead))
+        }
         let occupied: Bool
         let surface: GhosttySurface?
         if let pane {
@@ -150,6 +152,7 @@ extension AppController {
             return err("surface not available: \(resolved.controlID)")
         }
         guard surface.isRealized else { return err("surface not realized") }
+        if let response = leadCursor(surface, controlID: resolved.controlID) { return response }
         guard let column = surface.readCursorColumn() else { return err("failed to read cursor position") }
         return ControlResponse(
             ok: true,
@@ -197,10 +200,8 @@ extension AppController {
                 error: "failed to save the restore override, the previous value is still in effect"
             )
         }
-        var result = ControlResult(id: id.uuidString)
-        if case .pin = update.pin, linuxSettingsStore().load().effectiveRestoreMode != .rerun {
-            result.text = "saved, but \"Restore running commands on restart\" is off, so the override will not run"
-        }
+        var result = ControlResult(id: id.uuidString, pane: pane.rawValue)
+        result.text = Self.restorePinNotice(update.pin, launchMode: gRestoreLaunchDecision.active)
         return ControlResponse(ok: true, result: result)
     }
 
@@ -214,5 +215,11 @@ extension AppController {
         }
         gLibrary.saveAllOpen()
         return ok()
+    }
+
+    /// Names the launch-latched mode, as upstream does, never the configured one.
+    nonisolated static func restorePinNotice(_ pin: ControlRestoreOverride, launchMode: RestoreMode) -> String? {
+        guard pin != .unpin, launchMode != .rerun else { return nil }
+        return "saved for rerun mode; active restore mode is \(launchMode.rawValue)"
     }
 }

@@ -1,6 +1,7 @@
 import CGtk
 import Foundation
 import LinuxIntegrations
+import agtermCore
 
 @MainActor
 extension AppController {
@@ -65,7 +66,8 @@ extension AppController {
         integrationRefreshGeneration &+= 1
         let generation = integrationRefreshGeneration
         DispatchQueue.global(qos: .userInitiated).async {
-            let snapshot = IntegrationService().status()
+            let snapshot = IntegrationService(environment: .process(
+                environment: gdkEnvironment.restoringChildEnvironment(ProcessInfo.processInfo.environment))).status()
             runOnMain {
                 MainActor.assumeIsolated {
                     guard let controller = gWindows[id], controller.settingsDialog != nil,
@@ -103,7 +105,7 @@ extension AppController {
         }
     }
 
-    func prepareIntegration(_ kind: IntegrationPlanKind) {
+    func prepareIntegration(_ kind: IntegrationPlanKind, openCodeSelection: String? = nil) {
         guard !integrationOperationInFlight else {
             showToast("Finish the current integration change first")
             return
@@ -112,7 +114,14 @@ extension AppController {
         showToast("Inspecting integration files…")
         let id = windowID
         DispatchQueue.global(qos: .userInitiated).async {
-            let service = IntegrationService()
+            let service = IntegrationService(
+                environment: .process(environment: gdkEnvironment.restoringChildEnvironment(ProcessInfo.processInfo.environment)),
+                openCodeVersion: openCodeSelection.flatMap(AgentHooksInstall.OpenCode.Version.init(rawValue:)),
+                skipOpenCode: openCodeSelection == "skip")
+            if kind == .hooks, openCodeSelection == nil, service.needsOpenCodeVersionChoice {
+                runOnMain { MainActor.assumeIsolated { gWindows[id]?.chooseOpenCodeVersion() } }
+                return
+            }
             do {
                 let plan: IntegrationPlan
                 switch kind {

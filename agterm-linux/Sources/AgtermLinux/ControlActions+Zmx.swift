@@ -97,7 +97,6 @@ extension AppController {
         }
         let outcomes = client.killObservedOrphan(names: names)
         let killed = outcomes.values.filter { $0 == .killed }.count
-        gZmxForegroundResolver?.noteLifecycleChange()
         return ControlResponse(ok: true, result: ControlResult(
             text: Self.zmxPruneReport(outcomes), affected: killed
         ))
@@ -148,7 +147,6 @@ extension AppController {
         case .failed(let reason):
             return ControlResponse(ok: false, error: "could not kill \(row.daemon): \(reason)")
         }
-        gZmxForegroundResolver?.noteLifecycleChange()
         if let controller = gWindows[claim.windowID],
            let session = controller.store.session(withID: claim.sessionID) {
             let surface = (claim.pane == .left ? session.surface : session.splitSurface) as? GhosttySurface
@@ -209,15 +207,16 @@ extension AppController {
         }
         let primary: String
         let split: String?
+        let leads = (left: ZmxLeadAttachment(claim: true), right: ZmxLeadAttachment(claim: true))
         do {
             primary = try RemoteSession.attachPaneCommand(
                 host: host, endpoint: tree.endpoint, daemon: left,
-                session: remote.name, pane: .left
+                session: remote.name, pane: .left, lead: leads.left
             )
             split = try byRole[.right].map {
                 try RemoteSession.attachPaneCommand(
                     host: host, endpoint: tree.endpoint, daemon: $0,
-                    session: remote.name, pane: .right
+                    session: remote.name, pane: .right, lead: leads.right
                 )
             }
         } catch {
@@ -237,6 +236,16 @@ extension AppController {
                 axis: remote.splitAxis.flatMap(SplitAxis.init(rawValue:)) ?? .leftRight
             )
         }
+        var daemons = [created.paneIdentity: left]
+        ZmxLeadBook.shared.begin(leads.left, pane: created.paneIdentity)
+        if let right = byRole[.right], let local = created.splitPaneIdentity {
+            daemons[local] = right
+            ZmxLeadBook.shared.begin(leads.right, pane: local)
+        }
+        let origin = RemoteBinding.Origin(host: host, endpoint: tree.endpoint, sessionName: remote.name)
+        store.bindRemote(RemoteBinding(remoteSessionID: remote.id, daemonsByLocalPane: daemons,
+                                       presentationVersion: tree.presentation, origin: origin),
+                         forSession: created.id)
         reconcile()
         sessionFocusTarget(for: created.id, wantSplit: created.splitFocused)?.grabFocus()
         return ControlResponse(ok: true, result: ControlResult(id: created.id.uuidString))

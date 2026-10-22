@@ -35,13 +35,13 @@ final class GhosttySurface: PaneRoleMutableSurface {
 
     /// The owning session's id (so the host can route close/title back to the model).
     let sessionID: UUID
-    fileprivate weak var controller: AppController?
+    weak var controller: AppController?
     /// Concrete host role; unlike a split boolean this distinguishes notification and focus behavior
     /// for main, split, overlay, scratch, and quick surfaces.
     private(set) var role: LinuxSurfaceRole
     var isSplitPane: Bool { role == .split }
     /// The shell's working directory.
-    private let cwd: String
+    let cwd: String
     /// Optional explicit command; nil runs the user's default login shell.
     var command: String?
     /// A fixed background owned by an overlay surface rather than the underlying session.
@@ -54,6 +54,9 @@ final class GhosttySurface: PaneRoleMutableSurface {
     /// Scratch/overlay/quick terminals are transient covers; their OSC title/PWD must not overwrite the
     /// owning session's primary/split pane state.
     private let reportsPaneState: Bool
+    var leadCover: OpaquePointer?
+    var reconnectNote: OpaquePointer?
+    var preservesReconnectOnTeardown = false
     /// Per-session font-size override (points) to seed at creation, restoring a persisted ⌘+/⌘− zoom;
     /// nil uses the config default.
     private let fontSize: Double?
@@ -99,6 +102,7 @@ final class GhosttySurface: PaneRoleMutableSurface {
 
     /// Set by the host: the shell process exited.
     var onExit: (() -> Void)?
+    var onExitHeld: (() -> Void)?
     private var exitCodeFile: String?
     private var onExitCodeCaptured: ((Int) -> Void)?
     var didHandleProcessExit = false
@@ -146,6 +150,7 @@ final class GhosttySurface: PaneRoleMutableSurface {
         let me = Unmanaged.passRetained(self).toOpaque()
         connect(glArea, "destroy", unsafeBitCast(surfaceDestroy as @convention(c) (OpaquePointer?, gpointer?) -> Void, to: GCallback.self), me)
         connect(glArea, "realize", unsafeBitCast(surfaceRealize as @convention(c) (OpaquePointer?, gpointer?) -> Void, to: GCallback.self), me)
+        installVisibilityTracking()
         connect(glArea, "render", unsafeBitCast(surfaceRender as @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> gboolean, to: GCallback.self), me)
         connect(glArea, "resize", unsafeBitCast(surfaceResize as @convention(c) (OpaquePointer?, Int32, Int32, gpointer?) -> Void, to: GCallback.self), me)
 
@@ -281,15 +286,12 @@ final class GhosttySurface: PaneRoleMutableSurface {
             return
         }
         clearCreationFailure()
+        syncRendererVisibility()
         ghostty_surface_set_content_scale(surface, Double(scale), Double(scale))
         pushSize()
         ghostty_surface_set_focus(surface, true)
         applyColorScheme(appearanceSide)   // report the system light/dark scheme (OSC color-scheme queries)
-        feed(GhosttyApp.shared.currentThemeOSC)   // push theme colors the embedded GL renderer won't adopt from config
-        if fixedBackgroundColor != nil
-                || usesSessionWatermark && controller?.store.session(withID: sessionID)?.backgroundWatermark != nil {
-            applyWatermarkFromSession()
-        }
+        reapplyWatermarkIfNeeded()
     }
 
     private func showCreationFailure() {
@@ -356,10 +358,21 @@ final class GhosttySurface: PaneRoleMutableSurface {
     /// ghostty_surface_text, whose bracketed-paste wrapping suppresses Enter.
     @discardableResult
     func inject(text: String) -> Bool {
-        guard let surface else { return false }
+        guard surface != nil else { return false }
         // Split into printable runs + Return keys via the shared segmenter (one typing policy for both
         // platforms); send each run as text and each line break as a real Return key press.
-        for segment in KeystrokeSegments.split(text) {
+        let paced = KeystrokeSegments.paced(text)
+        inject(segments: paced.head)
+        if paced.pacedReturn {
+            usleep(UInt32(KeystrokeSegments.submitGap * 1_000_000))
+            inject(segments: [.returnKey])
+        }
+        return true
+    }
+
+    private func inject(segments: [KeystrokeSegment]) {
+        guard let surface else { return }
+        for segment in segments {
             switch segment {
             case .text(let run):
                 run.withCString { ptr in
@@ -377,15 +390,6 @@ final class GhosttySurface: PaneRoleMutableSurface {
                 _ = ghostty_surface_key(surface, ke)
             }
         }
-        return true
-    }
-
-    /// Feed raw bytes into the terminal as if read from the pty — used to push theme colors (OSC 11/10/4/…)
-    /// that the embedded OpenGL renderer doesn't adopt from the config. `ghostty_surface_feed` runs them
-    /// through the terminal parser under the renderer lock, so it's safe from the main thread.
-    func feed(_ bytes: String) {
-        guard let surface, !bytes.isEmpty else { return }
-        bytes.withCString { ghostty_surface_feed(surface, $0, UInt(bytes.utf8.count)) }
     }
 
     // MARK: - In-terminal search (libghostty replies via the START/END/TOTAL/SELECTED actions)
@@ -401,34 +405,36 @@ final class GhosttySurface: PaneRoleMutableSurface {
                                           force: Bool = false) {
         guard let surface else { return }
         let session = controller?.store.session(withID: sessionID)
-        let watermark = oscBackgroundColorHex.map {
-            BackgroundWatermark(kind: .color, colorHex: $0)
-        } ?? fixedBackgroundColor.map {
-            BackgroundWatermark(kind: .color, colorHex: $0)
-        } ?? (usesSessionWatermark ? session?.backgroundWatermark : nil)
-        guard force || watermark != nil || dashboardFontOverride != nil || session?.fontSize != nil else { return }
-        let resolvedImagePath = session.flatMap {
-            WatermarkRenderer.materialize(watermark, sessionID: $0.id)
+        let pane = role.statusPane
+        let watermark = LinuxBackgroundOverlayPolicy.watermark(
+            oscLatch: oscBackgroundColorHex, fixedBackground: fixedBackgroundColor,
+            sessionBackground: usesSessionWatermark ? pane.flatMap { session?.effectiveBackground(for: $0) } : nil)
+        guard LinuxBackgroundOverlayPolicy.shouldReapply(
+            force: force, oscLatch: oscBackgroundColorHex, watermark: watermark,
+            hasFontOverride: dashboardFontOverride != nil || session?.fontSize != nil) else { return }
+        let resolvedImagePath = session.flatMap { session in
+            let paneKey = pane.flatMap { session.paneBackgrounds[$0] == nil ? nil : session.backgroundFileKey(for: $0) }
+            return WatermarkRenderer.materialize(watermark, sessionID: session.id, paneKey: paneKey)
         }
         let effectiveWindowOpacity = windowOpacity ?? linuxSettingsStore().load().backgroundOpacity ?? 1
-        let overlay = WatermarkConfig.overlayText(watermark: watermark,
-                                                  resolvedImagePath: resolvedImagePath,
-                                                  fontSize: dashboardFontOverride ?? session?.fontSize ?? fontSize,
-                                                  windowOpacity: effectiveWindowOpacity)
+        let effectiveFontSize = dashboardFontOverride ?? session?.fontSize ?? fontSize
+        let overlay = LinuxBackgroundOverlayPolicy.overlayText(
+            oscLatch: oscBackgroundColorHex, watermark: watermark, resolvedImagePath: resolvedImagePath,
+            fontSize: effectiveFontSize, windowOpacity: effectiveWindowOpacity)
         guard let config = GhosttyApp.shared.configWithOverlay(overlay, settings: settings) else { return }
         ghostty_surface_update_config(surface, config)
         ownedConfigs.forEach { ghostty_config_free($0) }
         ownedConfigs = [config]
-        let osc = AppSettings.themeOSC(from: overlay.split(separator: "\n", omittingEmptySubsequences: true).map(String.init))
-        if !osc.isEmpty { feed(osc) }
         queueRender()
     }
 
     func reapplyWatermarkIfNeeded(windowOpacity: Double? = nil, settings: AppSettings? = nil) {
+        let inherited = role.statusPane.flatMap { pane in
+            controller?.store.session(withID: sessionID)?.effectiveBackground(for: pane)
+        }
         guard oscBackgroundColorHex != nil
                 || fixedBackgroundColor != nil
-                || usesSessionWatermark
-                    && controller?.store.session(withID: sessionID)?.backgroundWatermark != nil else { return }
+                || usesSessionWatermark && inherited != nil else { return }
         reapplyBackgroundOverlay(windowOpacity: windowOpacity, settings: settings)
     }
 
@@ -444,7 +450,7 @@ final class GhosttySurface: PaneRoleMutableSurface {
     func applyOSCBackground(red: UInt8, green: UInt8, blue: UInt8) {
         let hex = String(format: "#%02X%02X%02X", red, green, blue)
         let inheritedColor = usesSessionWatermark
-            ? controller?.store.session(withID: sessionID)?.backgroundWatermark
+            ? role.statusPane.flatMap { controller?.store.session(withID: sessionID)?.effectiveBackground(for: $0) }
                 .flatMap { $0.kind == .color ? $0.colorHex : nil }
             : nil
         let sessionColor = fixedBackgroundColor ?? inheritedColor
@@ -642,8 +648,10 @@ final class GhosttySurface: PaneRoleMutableSurface {
         let hasOtherModifiers = (state & ((1 << 0) | (1 << 3) | (1 << 26))) != 0
         let baseScalar = Unicode.Scalar(gdk_keyval_to_unicode(gdk_keyval_to_lower(keyval)))
         let isInterrupt = keyval == 0xFF1B || (control && !hasOtherModifiers && baseScalar?.value == 0x63)
+        let keystroke: StatusKeystroke = isInterrupt ? .interrupt
+            : (keyval == 0xFF0D || keyval == 0xFF8D ? .submit : .other)
         if let pane = role.statusPane {
-            controller?.clearAttentionStatus(sessionID, pane: pane, isInterrupt: isInterrupt)
+            controller?.clearAttentionStatus(sessionID, pane: pane, keystroke: keystroke)
         }
 
         // App-level shortcuts run first via the shared keymap (rebindable built-ins + custom commands +
@@ -654,6 +662,10 @@ final class GhosttySurface: PaneRoleMutableSurface {
                                  context: shortcutKeyContext(event: event, keycode: keycode)) == true {
             return true
         }
+        if state & (ModifierKeyMods.controlBit | ModifierKeyMods.superBit | ModifierKeyMods.altBit) == 0,
+           ModifierKeyMods.modifierBit(forKeyval: keyval) == nil,
+           controller?.retryRemotePane(self, keycode: keycode) == true { return true }
+        if controller?.paneLeadConsumesPress(self, keyval: keyval, keycode: keycode, state: state) == true { return true }
 
         // Route through the IM context: a dead-key/compose/CJK sequence is CONSUMED here (its result
         // arrives via the `commit` signal → imCommit). Plain keys pass through (filter returns false) and
@@ -743,9 +755,17 @@ final class GhosttySurface: PaneRoleMutableSurface {
     // MARK: - Actions from libghostty
 
     func applyTitle(_ title: String) {
+        if let notice = RemoteLinkNotice(title: title) {
+            controller?.remoteLinkLost(notice, surface: self)
+            return
+        }
+        if let notice = ZmxLeadNotice(title: title) {
+            controller?.reportPaneLead(notice, from: self)
+            return
+        }
         guard reportsPaneState, !title.isEmpty else { return }
         controller?.sessionDidReportTitle(
-            sessionID, title, isSplit: isSplitPane, loginShell: loginShellName)
+            sessionID, GhosttyApp.shared.staticTitle ?? title, isSplit: isSplitPane, loginShell: loginShellName)
     }
 
     func applyPwd(_ pwd: String) {
@@ -780,6 +800,13 @@ final class GhosttySurface: PaneRoleMutableSurface {
         let exit = onExit
         onExit = nil
         exit?()
+    }
+
+    func handleHeldProcessExit() {
+        guard waitAfterCommand, let pane = UUID(uuidString: paneToken) else { return }
+        ZmxLeadBook.shared.forget(pane: pane)
+        syncLeadCover()
+        controller?.store.leadRoleChanged()
     }
 
     func captureExitCode(from file: String, onCapture: @escaping (Int) -> Void) {
@@ -827,7 +854,9 @@ final class GhosttySurface: PaneRoleMutableSurface {
     // MARK: - TerminalSurface
 
     func teardown() {
+        if !preservesReconnectOnTeardown, let pane = UUID(uuidString: paneToken) { RemoteReconnectBook.shared.cancel(pane: pane) }
         onExit = nil
+        onExitHeld = nil
         if let spawnKey { gSpawnRegistry.cancel(spawnKey) }
         spawnPacer = nil
         spawnKey = nil
@@ -875,19 +904,6 @@ private let surfaceKeyPressed: @MainActor @convention(c) (OpaquePointer?, UInt32
         ) ?? false) ? 1 : 0
     }
 }
-/// Modifier-only releases reach libghostty (macOS `flagsChanged` parity) BEFORE the Ctrl-Tab commit: the
-/// commit moves focus and rebuilds widgets, and this surface's own release must not queue behind it.
-private let surfaceKeyReleased: @MainActor @convention(c) (OpaquePointer?, UInt32, UInt32, UInt32, gpointer?) -> Void = { _, keyval, keycode, state, data in
-    let bit = ModifierKeyMods.modifierBit(forKeyval: keyval)
-    if bit != nil {
-        MainActor.assumeIsolated { wrap(data)?.modifierKeyReleased(keyval: keyval, keycode: keycode, state: state) }
-    }
-    if bit == ModifierKeyMods.controlBit {
-        MainActor.assumeIsolated {
-            wrap(data)?.controller?.scheduleSessionSwitchCommit(releasing: keycode)
-        }
-    }
-}
 private let surfaceFocusEnter: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void = { _, data in
     MainActor.assumeIsolated {
         guard let surface = wrap(data) else { return }
@@ -903,7 +919,7 @@ private let surfaceFocusLeave: @MainActor @convention(c) (OpaquePointer?, gpoint
     MainActor.assumeIsolated {
         wrap(data)?.setFocus(false)
         wrap(data)?.imFocus(false)
-        wrap(data)?.controller?.resetLeader()
+        wrap(data)?.controller?.leaderFocusLeft()
         wrap(data)?.controller?.cancelSessionSwitch()
     }
 }

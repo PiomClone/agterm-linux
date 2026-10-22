@@ -13,6 +13,7 @@ struct LinuxControlDispatcher {
     let actions: AppController
 
     func dispatch(_ request: ControlRequest) -> ControlResponse? {
+        if let response = dispatchNewParityCommand(request) { return response }
         switch request.cmd {
         case .tree:
             return actions.controlTree(window: request.args?.window)
@@ -21,10 +22,11 @@ struct LinuxControlDispatcher {
         case .sessionNew, .sessionDuplicate, .sessionSelect, .sessionGo, .sessionClose, .sessionRename, .sessionReveal,
                 .sessionMove, .sessionFlag, .sessionContext, .sessionSeen, .sessionStatus, .sessionRestore:
             return dispatchSessionCommand(request)
-        case .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionScratch, .sessionFocus, .sessionResize,
+        case .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionLead, .sessionScratch, .sessionFocus, .sessionResize,
                 .surfaceZoom, .surfaceCursor,
                 .sessionCopy, .sessionPaste, .sessionSelectAll, .sessionOverlayOpen,
                 .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayResult,
+                .sessionOverlayReload, .sessionOverlayNavigate,
                 .sessionOverlayCopy, .sessionOverlayText, .sessionBackground, .sessionText:
             return dispatchSessionSurfaceCommand(request)
         case .sessionHudOpen, .sessionHudUpdate, .sessionHudClose:
@@ -35,13 +37,17 @@ struct LinuxControlDispatcher {
                 .workspaceMove, .workspaceFocus, .workspaceFilter, .workspaceCollapse, .workspaceExpand:
             return dispatchWorkspaceCommand(request)
         case .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .configReload, .notify,
-                .themeSet, .themeList, .sidebar, .sidebarMode, .sidebarExpand,
+                .themeSet, .themeList, .sidebar, .sidebarMode, .sidebarFlaggedLayout, .sidebarExpand,
                 .sidebarCollapse, .sidebarWidth, .restoreClear, .restoreCapture, .recentClear, .version:
             return dispatchAppCommand(request)
         case .windowGo, .windowRename, .windowResize, .windowMove, .windowZoom, .windowFullscreen, .windowMinimize:
             return dispatchWindowCommand(request)
         case .pickOpen, .pickResult, .pickCancel:
             return dispatchPickCommand(request)
+        case .askOpen, .askResult, .askCancel:
+            return dispatchAskCommand(request)
+        case .hooksReload: return actions.reloadHooks()
+        case .hooksList: return actions.listHooks()
         case .dashboard:
             return dispatchDashboard(request)
         case .restoreMode, .zmxList, .zmxPrune, .zmxKill, .zmxTree, .zmxAttach:
@@ -91,7 +97,11 @@ struct LinuxControlDispatcher {
     private func dispatchPickCommand(_ request: ControlRequest) -> ControlResponse {
         switch request.cmd {
         case .pickOpen:
-            guard let items = request.args?.items, !items.isEmpty else {
+            guard let items = request.args?.items else {
+                return ControlResponse(ok: false, error: "pick.open requires items")
+            }
+            let allowCustom = request.args?.allowCustom == true
+            guard !items.isEmpty || allowCustom else {
                 return ControlResponse(ok: false, error: "pick.open requires at least one item")
             }
             guard items.count <= ControlPickItem.maxItems else {
@@ -110,12 +120,18 @@ struct LinuxControlDispatcher {
             }) else {
                 return ControlResponse(ok: false, error: "item text must not contain control characters")
             }
+            let selection = request.args?.selection
+            if let selection, !items.contains(where: { $0.id == selection }) {
+                return ControlResponse(ok: false, error: "pick select must name an item id")
+            }
             return actions.openPick(
                 PendingPick(
                     id: UUID().uuidString,
                     items: items,
                     prompt: request.args?.prompt,
-                    allowCustom: request.args?.allowCustom == true
+                    query: request.args?.query,
+                    allowCustom: allowCustom,
+                    selection: selection
                 ),
                 window: request.args?.window,
                 follow: request.args?.follow == true
@@ -246,6 +262,13 @@ struct LinuxControlDispatcher {
             if let color = request.args?.color, !WatermarkConfig.isValidColorHex(color) {
                 return ControlResponse(ok: false, error: "invalid color (expected #rrggbb)")
             }
+            var shape: StatusShape?
+            if let raw = request.args?.shape {
+                guard let parsed = StatusShape(rawValue: raw) else {
+                    return ControlResponse(ok: false, error: "invalid shape: \(raw) (\(StatusShape.validNamesList))")
+                }
+                shape = parsed
+            }
             var pane: StatusPane?
             if let rawPane = request.args?.pane {
                 guard let parsed = StatusPane(rawValue: rawPane) else {
@@ -256,6 +279,7 @@ struct LinuxControlDispatcher {
             let update = ControlSessionStatusUpdate(status: status, blink: request.args?.blink,
                                                     autoReset: request.args?.autoReset,
                                                     sound: request.args?.sound, color: request.args?.color,
+                                                    shape: shape,
                                                     pane: pane, paneID: request.args?.paneID)
             return actions.setSessionStatus(request.target, window: request.args?.window, update: update)
         case .sessionRestore:
@@ -374,6 +398,15 @@ struct LinuxControlDispatcher {
             return actions.closeSessionSplit(request.target, window: request.args?.window)
         case .sessionSwap:
             return actions.swapSessionPanes(request.target, window: request.args?.window)
+        case .sessionLead:
+            let pane: StatusPane?
+            if let raw = request.args?.pane {
+                guard let parsed = StatusPane(controlName: raw) else {
+                    return ControlResponse(ok: false, error: "invalid pane: \(raw)")
+                }
+                pane = parsed
+            } else { pane = nil }
+            return actions.sessionLead(request.target, window: request.args?.window, pane: pane)
         case .sessionScratch:
             return actions.scratchSession(request.target, window: request.args?.window, mode: request.args?.mode,
                                           command: request.args?.command)
@@ -421,32 +454,9 @@ struct LinuxControlDispatcher {
             }
             return actions.setSurfaceZoom(request.target, window: request.args?.window, mode: mode)
         case .surfaceCursor:
-            return actions.readSurfaceCursor(request.target, window: request.args?.window)
-        case .sessionOverlayOpen:
-            guard let command = request.args?.command, !command.isEmpty else {
-                return ControlResponse(ok: false, error: "session.overlay.open requires a command")
-            }
-            if let color = request.args?.color, !WatermarkConfig.isValidColorHex(color) {
-                return ControlResponse(ok: false, error: "invalid color: \(color) (#rrggbb)")
-            }
-            let pane: OverlayPane?
-            switch parseOverlayPane(request.args?.pane) {
-            case .rejected(let response): return response
-            case .pane(let parsed): pane = parsed
-            }
-            if pane != nil, request.args?.sizePercent != nil {
-                return ControlResponse(ok: false, error: PaneOverlayError.sizePercentConflict)
-            }
-            return actions.openSessionOverlay(request.target, window: request.args?.window,
-                                              options: ControlSessionOverlayOpenOptions(
-                                                command: command,
-                                                cwd: request.args?.cwd,
-                                                wait: request.args?.wait ?? false,
-                                                sizePercent: request.args?.sizePercent,
-                                                backgroundColor: request.args?.color,
-                                                follow: request.args?.follow ?? false,
-                                                pane: pane
-                                              ))
+            return actions.readSurfaceCursor(request.target, window: request.args?.window, paneID: request.args?.paneID)
+        case .sessionOverlayOpen, .sessionOverlayReload, .sessionOverlayNavigate:
+            return dispatchHtmlOverlayCommand(request)
         case .sessionOverlayClose:
             switch parseOverlayPane(request.args?.pane) {
             case .rejected(let response): return response
@@ -500,12 +510,12 @@ struct LinuxControlDispatcher {
         }
     }
 
-    private enum OverlayPaneParse {
+    enum OverlayPaneParse {
         case pane(OverlayPane?)
         case rejected(ControlResponse)
     }
 
-    private func parseOverlayPane(_ raw: String?) -> OverlayPaneParse {
+    func parseOverlayPane(_ raw: String?) -> OverlayPaneParse {
         guard let raw else { return .pane(nil) }
         guard let pane = OverlayPane(controlName: raw) else {
             return .rejected(ControlResponse(ok: false, error: PaneOverlayError.invalidPane))
@@ -517,15 +527,23 @@ struct LinuxControlDispatcher {
         if request.cmd == .sessionHudClose {
             return actions.closeHud(request.target, window: request.args?.window)
         }
+        let pane: OverlayPane?
+        switch parseOverlayPane(request.args?.pane) {
+        case .rejected:
+            return ControlResponse(ok: false, error: "--pane must be left or right")
+        case .pane(let parsed):
+            pane = parsed
+        }
+        let placement = ControlHudPlacement(pane: pane, paneID: request.args?.paneID)
         let spec: HudSpec
         switch parseHudSpec(request) {
         case .rejected(let response): return response
         case .spec(let parsed): spec = parsed
         }
         if request.cmd == .sessionHudOpen {
-            return actions.openHud(request.target, window: request.args?.window, spec: spec)
+            return actions.openHud(request.target, window: request.args?.window, spec: spec, placement: placement)
         }
-        return actions.updateHud(request.target, window: request.args?.window, spec: spec)
+        return actions.updateHud(request.target, window: request.args?.window, spec: spec, placement: placement)
     }
 
     private enum HudSpecParse {
@@ -535,15 +553,21 @@ struct LinuxControlDispatcher {
 
     private func parseHudSpec(_ request: ControlRequest) -> HudSpecParse {
         let args = request.args
-        guard let message = args?.message, !message.trimmingCharacters(in: .whitespaces).isEmpty else {
+        let markdown = args?.markdown ?? false
+        guard let message = args?.message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .rejected(ControlResponse(ok: false, error: "\(request.cmd.rawValue) requires a message"))
         }
-        guard !containsControlCharacters(message), !containsControlCharacters(args?.detail ?? "") else {
+        let messageIsSafe = markdown ? !containsMarkdownControlCharacters(message) : !containsControlCharacters(message)
+        guard messageIsSafe, !containsControlCharacters(args?.detail ?? "") else {
             return .rejected(ControlResponse(ok: false, error: "hud text must not contain control characters"))
         }
-        guard hudTextLength(message) <= HudSpec.maxTextLength else {
+        let cap = markdown ? HudSpec.maxMarkdownLength : HudSpec.maxTextLength
+        guard hudTextLength(message) <= cap else {
             return .rejected(ControlResponse(
-                ok: false, error: "hud message too long (max \(HudSpec.maxTextLength) characters)"))
+                ok: false, error: "hud message too long (max \(cap) characters)"))
+        }
+        guard !markdown || HudMarkdown.rendersVisibleText(message) else {
+            return .rejected(ControlResponse(ok: false, error: "\(request.cmd.rawValue) requires a message"))
         }
         guard hudTextLength(args?.detail ?? "") <= HudSpec.maxTextLength else {
             return .rejected(ControlResponse(
@@ -555,9 +579,23 @@ struct LinuxControlDispatcher {
         if let textColor = args?.textColor, !WatermarkConfig.isValidColorHex(textColor) {
             return .rejected(ControlResponse(ok: false, error: "invalid text color: \(textColor) (#rrggbb)"))
         }
+        if let fontSize = args?.fontSize {
+            guard request.cmd == .sessionHudOpen else {
+                return .rejected(ControlResponse(ok: false,
+                    error: "session.hud.update: --font-size is fixed at open; reopen the hud to change it"))
+            }
+            guard HudSpec.isValidFontSize(fontSize) else {
+                return .rejected(ControlResponse(ok: false,
+                    error: "session.hud.open: --font-size must be \(Int(HudSpec.fontSizeRange.lowerBound))...\(Int(HudSpec.fontSizeRange.upperBound)) points"))
+            }
+        }
         if let percent = args?.sizePercent, !(1...100).contains(percent) {
             return .rejected(ControlResponse(
                 ok: false, error: "\(request.cmd.rawValue): --size-percent must be 1...100"))
+        }
+        if let hideAfter = args?.hideAfter, !HudSpec.isValidHideAfter(hideAfter) {
+            return .rejected(ControlResponse(ok: false,
+                error: "\(request.cmd.rawValue): --hide-after must be 0...\(Int(HudSpec.maxHideAfter)) seconds"))
         }
         let position: HudPosition
         if let raw = args?.position {
@@ -579,7 +617,12 @@ struct LinuxControlDispatcher {
         }
         return .spec(HudSpec(message: message, detail: args?.detail, spinner: spinner,
                              backgroundColor: args?.color, textColor: args?.textColor,
-                             sizePercent: args?.sizePercent, position: position))
+                             sizePercent: args?.sizePercent, position: position,
+                             hideAfter: args?.hideAfter, markdown: markdown, fontSize: args?.fontSize))
+    }
+
+    private func containsMarkdownControlCharacters(_ text: String) -> Bool {
+        text.unicodeScalars.contains { ($0.value < 0x20 && $0 != "\n" && $0 != "\t") || $0.value == 0x7f }
     }
 
     private func hudTextLength(_ text: String) -> Int {
@@ -592,15 +635,17 @@ struct LinuxControlDispatcher {
             return ControlResponse(ok: false, error: "--pane must be left, right, or scratch")
         }
         switch request.cmd {
+        case .sidebarFlaggedLayout:
+            guard let mode = ControlFlaggedLayoutMode.parse(request.args?.mode) else {
+                return ControlResponse(ok: false, error: "invalid flagged layout mode: \(request.args?.mode ?? "")")
+            }
+            return actions.setFlaggedViewLayout(mode)
         case .fontInc:
-            return actions.font(request.target, window: request.args?.window, pane: pane,
-                                action: FontBindingAction.increase)
+            return dispatchFont(request, action: FontBindingAction.increase)
         case .fontDec:
-            return actions.font(request.target, window: request.args?.window, pane: pane,
-                                action: FontBindingAction.decrease)
+            return dispatchFont(request, action: FontBindingAction.decrease)
         case .fontReset:
-            return actions.font(request.target, window: request.args?.window, pane: pane,
-                                action: FontBindingAction.reset)
+            return dispatchFont(request, action: FontBindingAction.reset)
         case .keymapReload:
             return actions.reloadKeymap()
         case .keymapList:
@@ -701,8 +746,12 @@ struct LinuxControlDispatcher {
             return ControlResponse(ok: false,
                                    error: "invalid background mode: \(request.args?.mode ?? "") (image|text|color|clear)")
         }
+        let pane = request.args?.pane.flatMap(StatusPane.init(controlName:))
+        if let rawPane = request.args?.pane, pane == nil {
+            return ControlResponse(ok: false, error: "invalid pane: \(rawPane)")
+        }
         return actions.setSessionBackground(request.target, window: request.args?.window,
-                                            options: ControlSessionBackgroundOptions(watermark: watermark))
+                                            options: ControlSessionBackgroundOptions(watermark: watermark, pane: pane))
     }
 
     private func dispatchSessionText(_ request: ControlRequest) -> ControlResponse {
@@ -719,7 +768,8 @@ struct LinuxControlDispatcher {
             return ControlResponse(ok: false, error: "--pane must be left, right, or scratch")
         }
         return actions.readSessionText(request.target, window: request.args?.window,
-                                       options: ControlSessionTextOptions(pane: pane, paneID: request.args?.paneID,
+                                       options: ControlSessionTextOptions(pane: pane,
+                                                                          paneID: request.args?.paneID,
                                                                           all: all,
                                                                           lines: lines))
     }
@@ -743,84 +793,15 @@ struct LinuxControlDispatcher {
             )
         }
     }
+}
 
-    private func dispatchWindowCommand(_ request: ControlRequest) -> ControlResponse {
-        switch request.cmd {
-        case .windowGo:
-            guard let direction = request.args?.to.flatMap(WorkspaceNavigation.init(wire:)) else {
-                return ControlResponse(ok: false, error: "window.go requires --to next|prev")
-            }
-            return actions.windowGo(direction: direction)
-        case .windowRename:
-            guard let name = request.args?.name?.linuxTrimmedOrNil else {
-                return ControlResponse(ok: false, error: "window.rename requires a name")
-            }
-            return actions.windowRename(request.target, name: name)
-        case .windowResize:
-            guard let width = request.args?.width, let height = request.args?.height,
-                  width > 0, height > 0 else {
-                return ControlResponse(ok: false, error: "window.resize requires positive width and height")
-            }
-            return actions.windowResize(request.target, width: width, height: height)
-        case .windowMove:
-            guard let x = request.args?.x, let y = request.args?.y else {
-                return ControlResponse(ok: false, error: "window.move requires x and y")
-            }
-            return actions.windowMove(request.target, x: x, y: y, display: request.args?.display)
-        case .windowZoom:
-            return actions.windowZoom(request.target)
-        case .windowFullscreen:
-            return actions.windowFullscreen(request.target)
-        case .windowMinimize:
-            guard let mode = ControlToggleMode.parse(request.args?.mode) else {
-                return ControlResponse(ok: false,
-                                       error: "invalid minimize mode: \(request.args?.mode ?? "toggle")")
-            }
-            return actions.windowMinimizeSync(request.target, mode: mode)
-        default:
-            preconditionFailure("unexpected window command: \(request.cmd.rawValue)")
-        }
-    }
+extension LinuxControlDispatcher {
 
-    private func dispatchDashboard(_ request: ControlRequest) -> ControlResponse {
-        let args = request.args
-        let targets = args?.targets ?? []
-        let fontSize = args?.fontSize
-        let autoSize = args?.autoSize ?? false
-        let mru = args?.mru ?? false
-        if args?.close == true {
-            guard targets.isEmpty, !mru, fontSize == nil, !autoSize else {
-                return ControlResponse(ok: false,
-                                       error: "dashboard --close takes no ids, --mru, or font options")
-            }
-            return actions.setDashboard(targets: [], window: args?.window, close: true,
-                                        fontMode: .untouched, mru: false)
+    private func dispatchFont(_ request: ControlRequest, action: String) -> ControlResponse {
+        let pane = request.args?.pane.flatMap(StatusPane.init(controlName:))
+        if let rawPane = request.args?.pane, pane == nil {
+            return ControlResponse(ok: false, error: "invalid pane: \(rawPane)")
         }
-        if fontSize != nil, autoSize {
-            return ControlResponse(ok: false,
-                                   error: "dashboard: --font-size is mutually exclusive with --auto-size")
-        }
-        if let fontSize, !fontSize.isFinite || fontSize <= 0 {
-            return ControlResponse(ok: false, error: "dashboard --font-size must be a positive number")
-        }
-        let mode: DashboardFontMode = autoSize ? .auto : (fontSize.map(DashboardFontMode.fixed) ?? .untouched)
-        if mru {
-            guard targets.isEmpty else {
-                return ControlResponse(ok: false,
-                                       error: "dashboard --mru cannot be combined with explicit session ids")
-            }
-            return actions.setDashboard(targets: [], window: args?.window, close: false,
-                                        fontMode: mode, mru: true)
-        }
-        guard !targets.isEmpty else {
-            return ControlResponse(ok: false, error: "dashboard requires at least one session id")
-        }
-        if let malformed = targets.first(where: { DashboardTarget(rawValue: $0) == nil }) {
-            return ControlResponse(
-                ok: false,
-                error: "dashboard: invalid session id '\(malformed)' — use <id>, <id>:left, or <id>:right")
-        }
-        return actions.setDashboard(targets: targets, window: args?.window, close: false,
-                                    fontMode: mode, mru: false)
+        return actions.font(request.target, window: request.args?.window, pane: pane, action: action)
     }
 }

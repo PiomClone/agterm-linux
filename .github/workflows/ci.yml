@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UPSTREAM_BASE_TAG: "v0.26.1"
-  UPSTREAM_BASE_COMMIT: "c215430d1cb56bfca4e062274947cde6d237c18d"
+  UPSTREAM_BASE_TAG: "v0.35.1"
+  UPSTREAM_BASE_COMMIT: "ca50a8ee09ba3cc9315ad3d597e1783e64c6f298"
   SWIFTLINT_VERSION: "0.65.0"
   SWIFTLINT_SHA256: "79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b"
   LINUX_SOURCEKIT_LIB_PATH: "/usr/lib/libsourcekitdInProc.so"
@@ -85,7 +85,7 @@ jobs:
         run: |
           useradd --create-home --user-group agterm-test
           chown -R agterm-test:agterm-test "$GITHUB_WORKSPACE"
-          runuser --user agterm-test -- env HOME=/home/agterm-test swift test
+          runuser --user agterm-test -- env HOME=/home/agterm-test swift test --no-parallel
       - name: Enforce host-free core boundary
         run: scripts/check-linux-core-boundary.sh "$UPSTREAM_BASE_TAG"
       - name: Reject Linux CLI parser drift
@@ -134,6 +134,7 @@ jobs:
     needs: [changes, test-linux, lint-linux]
     if: needs.changes.outputs.swift == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     # Compile-check the GTK port. The official Swift image carries the toolchain; apt adds GTK4,
     # libadwaita, GL deps, and zig builds libghostty.
     container: swift:6.3.2-noble
@@ -148,8 +149,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev libepoxy-dev pkg-config git curl ca-certificates xz-utils ncurses-bin \
-            ripgrep zsh file at-spi2-core dbus-x11 gir1.2-atspi-2.0 openbox python3-gi xdotool xvfb xauth \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libepoxy-dev pkg-config git curl ca-certificates xz-utils ncurses-bin \
+            ripgrep zsh gcc file at-spi2-core dbus-x11 gir1.2-atspi-2.0 openbox python3-gi xdotool xvfb xauth \
             libatk-bridge2.0-0 libgl1-mesa-dri libegl-mesa0 mesa-utils
           curl -fsSLo /tmp/zig.tar.xz \
             https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
@@ -179,7 +180,7 @@ jobs:
           path: |
             agterm-linux/vendor/ghostty
             agterm-linux/vendor/zmx
-          key: linux-runtimes-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-zmx-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/zmx.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
+          key: linux-runtimes-${{ steps.linux-architecture.outputs.host }}-${{ hashFiles('scripts/setup-linux.sh', 'scripts/verify-linux-vendor-cache.sh', 'scripts/verify-linux-zmx-cache.sh', 'scripts/verify-linux-architecture.sh', 'scripts/verify-linux-resources.sh', 'scripts/zmx-patches/**/*.patch', 'linux/arch.sh', 'linux/ghostty-resources.env', 'linux/zmx.env', 'linux/patches/ghostty-embedded-opengl.patch', 'linux/patches/ghostty-embedded-input-handoff.patch', 'linux/patches/ghostty-lib-resources.patch') }}
       - name: Verify restored libghostty cache
         if: steps.ghostty-cache.outputs.cache-hit == 'true'
         run: scripts/verify-linux-vendor-cache.sh agterm-linux/vendor/ghostty

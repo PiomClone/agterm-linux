@@ -13,6 +13,7 @@ extension AppController {
         if themeWindow != nil { return }
         themeCommitted = currentTheme
         guard let win = op(gtk_window_new()) else { return }
+        installPaneLeadReleaseCapture(on: win)
         attachControllerContext(to: win, windowID: windowID)
         themeWindow = win
         noteUserActivity()
