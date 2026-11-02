@@ -8,14 +8,31 @@ public protocol ControlActions {
     func controlTree(window: String?) -> ControlResponse
     func readEvents(_ options: ControlEventReadOptions) -> ControlResponse
     func createSession(_ options: ControlSessionCreateOptions) -> ControlResponse
+    /// createSession with a creation tint; the default keeps tintless hosts working and refuses a tint.
+    func createSession(_ options: ControlSessionCreateOptions, tint: SidebarTint?) -> ControlResponse
     func duplicateSession(_ target: String?, window: String?) -> ControlResponse
+    /// Creates a companion of the target session, or a sibling when the target is itself a companion.
+    func createCompanion(_ target: String?, options: CompanionOptions, window: String?) async -> ControlResponse
+    /// Creates a page companion of the target session showing `options.page` full size.
+    func createPageCompanion(_ target: String?, window: String?, options: ControlSessionOverlayOpenOptions) async -> ControlResponse
+    /// Creates a companion copying the target's layout and running another copy of each pane's program.
+    func duplicateAsCompanion(_ target: String?, window: String?, select: Bool) async -> ControlResponse
+    /// Hands out one attachment of the target page companion to another Mac.
+    func attachCompanionPage(_ target: String?, window: String?) -> ControlResponse
+    /// Folds or unfolds a parent's companions in the sidebar tree.
+    func setSessionExpansion(_ target: String?, window: String?, expanded: Bool) -> ControlResponse
     func selectSession(_ target: String?, window: String?) -> ControlResponse
     func goSession(window: String?, direction: SessionNavigation) -> ControlResponse
     func closeSession(_ target: String?, window: String?) -> ControlResponse
     func closeSessions(_ targets: [String], window: String?) -> ControlResponse
+    /// The `session.close --undoable` forms; their defaults refuse an undoable request.
+    func closeSession(_ target: String?, window: String?, undoable: Bool) -> ControlResponse
+    func closeSessions(_ targets: [String], window: String?, undoable: Bool) -> ControlResponse
     func renameSession(_ target: String?, window: String?, name: String) -> ControlResponse
     func revealSession(_ target: String?, window: String?) -> ControlResponse
     func createWorkspace(window: String?, name: String?, collapsed: Bool) -> ControlResponse
+    /// createWorkspace with a creation tint; the default keeps tintless hosts working and refuses a tint.
+    func createWorkspace(window: String?, name: String?, collapsed: Bool, tint: SidebarTint?) -> ControlResponse
     func selectWorkspace(_ target: String?, window: String?) -> ControlResponse
     /// Step the placement store's CURRENT workspace one place through the sidebar's visible order, selecting
     /// the destination's first session when it has one — an EMPTY destination becomes current with the
@@ -34,9 +51,17 @@ public protocol ControlActions {
     /// Flags or unflags every session of the target workspace as one value; `toggle` unflags only when all are.
     func setWorkspaceFlag(_ target: String?, window: String?, mode: ControlToggleMode) -> ControlResponse
     func setSessionFlag(_ target: String?, window: String?, mode: String?) -> ControlResponse
+    /// moveFlaggedSession moves the flagged target just before or after the flagged `anchor` in its window's
+    /// saved flagged order.
+    func moveFlaggedSession(_ target: String?, window: String?, anchor: String,
+                            placement: FlaggedOrderPlacement) -> ControlResponse
     /// Sets or clears the session's title-bar context; `context` is already trimmed and validated, and nil
     /// means clear.
     func setSessionContext(_ target: String?, window: String?, context: String?) -> ControlResponse
+    /// Sets or clears a session's sidebar tint; the dispatcher has parsed the color and parts.
+    func setSessionTint(_ target: String?, window: String?, update: ControlTintUpdate) -> ControlResponse
+    /// Sets or clears a workspace row's own tint.
+    func setWorkspaceTint(_ target: String?, window: String?, update: ControlTintUpdate) -> ControlResponse
     func markSessionSeen(_ target: String?, window: String?) -> ControlResponse
     func setSessionStatus(_ target: String?, window: String?, update: ControlSessionStatusUpdate) async -> ControlResponse
     /// Write a pane's PERSISTED restore-command override (consumed on the NEXT launch, never this run).
@@ -122,6 +147,9 @@ public protocol ControlActions {
                             options: ControlSessionOverlayOpenOptions) -> ControlResponse
     func closeSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?) -> ControlResponse
     func resizeSessionOverlay(_ target: String?, window: String?, sizePercent: Int?) -> ControlResponse
+    /// resizeSessionOverlay with `points` re-sizes from `sizePercent` with exactly those axes, or alone changes only them.
+    func resizeSessionOverlay(_ target: String?, window: String?, sizePercent: Int?,
+                              points: OverlayPointSize) -> ControlResponse
     func reloadSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?, current: Bool) -> ControlResponse
     func navigateSessionOverlay(_ target: String?, window: String?, pane: OverlayPane?,
                                 navigation: HtmlNavigation) -> ControlResponse
@@ -240,6 +268,8 @@ public struct ControlDispatcher {
                 .sessionReveal, .sessionMove, .sessionFlag, .sessionContext, .sessionSeen, .sessionStatus,
                 .sessionRestore:
             return await dispatchSessionCommand(request)
+        case .sessionTint, .workspaceTint:
+            return dispatchTint(request)
         case .sessionRestart:
             return await dispatchSessionRestart(request)
         case .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionLead, .sessionScratch, .sessionFocus,
@@ -252,13 +282,16 @@ public struct ControlDispatcher {
             return await dispatchSessionSurfaceCommand(request)
         case .sessionOverlayJobRun, .sessionOverlayPageServe:
             return dispatchSessionOverlayCommand(request)
+        case .sessionCompanionNew, .sessionCompanionPage, .sessionCompanionDuplicate, .sessionCompanionPageAttach, .sessionCollapse, .sessionExpand:
+            return await dispatchCompanionCommand(request)
         case .workspaceNew, .workspaceSelect, .workspaceGo, .workspaceRename, .workspaceDelete,
                 .workspaceMove, .workspaceFocus, .workspaceFilter, .workspaceCollapse, .workspaceExpand,
                 .workspaceFlag:
             return dispatchWorkspaceCommand(request)
         case .quick, .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .keymapRun,
-                .configReload, .notify, .themeSet, .themeList, .sidebar, .sidebarMode, .sidebarFlaggedLayout,
-                .sidebarExpand, .sidebarCollapse, .sidebarWidth, .restoreClear, .restoreCapture, .version:
+                .configReload, .notify, .themeSet, .themeList, .sidebar, .sidebarMode, .sidebarExpand,
+                .sidebarCollapse, .sidebarFlaggedLayout, .sidebarWidth, .restoreClear, .restoreCapture,
+                .version:
             return dispatchAppCommand(request)
         case .restoreMode, .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent, .zmxScreen:
             return await dispatchZmxCommand(request)
@@ -345,6 +378,11 @@ public struct ControlDispatcher {
             if args?.wait == true, args?.command == nil {
                 return ControlResponse(ok: false, error: "--wait requires --command")
             }
+            let tint: SidebarTint?
+            switch Self.creationTint(args) {
+            case .success(let value): tint = value
+            case .failure(let rejection): return ControlResponse(ok: false, error: rejection.message)
+            }
             return actions.createSession(ControlSessionCreateOptions(
                 window: args?.window,
                 cwd: args?.cwd,
@@ -357,7 +395,7 @@ public struct ControlDispatcher {
                 after: args?.after,
                 before: args?.before,
                 noSelect: args?.noSelect == true
-            ))
+            ), tint: tint)
         case .sessionDuplicate:
             // no options: the source session names its own workspace AND its cwd, so a duplicate is fully
             // described by the target. The GUI half is the sidebar row's "Duplicate".
@@ -370,13 +408,17 @@ public struct ControlDispatcher {
             }
             return actions.goSession(window: request.args?.window, direction: dir)
         case .sessionClose:
+            let window = request.args?.window
+            let undoable = request.args?.undoable == true
             if let targets = request.args?.targets {
                 guard !targets.isEmpty else {
                     return ControlResponse(ok: false, error: "session.close requires at least one --target")
                 }
-                return actions.closeSessions(targets, window: request.args?.window)
+                return undoable ? actions.closeSessions(targets, window: window, undoable: true)
+                    : actions.closeSessions(targets, window: window)
             }
-            return actions.closeSession(request.target, window: request.args?.window)
+            return undoable ? actions.closeSession(request.target, window: window, undoable: true)
+                : actions.closeSession(request.target, window: window)
         case .sessionRename:
             guard let name = request.args?.name else {
                 return ControlResponse(ok: false, error: "session.rename requires a name")
@@ -425,7 +467,7 @@ public struct ControlDispatcher {
             }
             return actions.moveSession(request.target, window: args?.window, move: move)
         case .sessionFlag:
-            return actions.setSessionFlag(request.target, window: request.args?.window, mode: request.args?.mode)
+            return dispatchSessionFlag(request)
         case .sessionContext:
             return dispatchSessionContext(request)
         case .sessionSeen:
@@ -536,33 +578,6 @@ public struct ControlDispatcher {
             command: command, pane: pane, paneID: paneID))
     }
 
-    /// `session.context`: `set` takes `text`, `clear` takes none. An invalid value is REJECTED, never
-    /// normalized, so `clear` stays the only route to nil and a refused call leaves the previous context
-    /// standing. The mode is required rather than inferred from `text`, which is what makes "both" and
-    /// "neither" reachable errors for a raw socket client that never sees the CLI's own exclusivity check.
-    private func dispatchSessionContext(_ request: ControlRequest) -> ControlResponse {
-        let args = request.args
-        let context: String?
-        switch args?.mode ?? "" {
-        case "set":
-            guard let text = args?.text else {
-                return ControlResponse(ok: false, error: "session.context set requires text")
-            }
-            switch Session.validateContext(text) {
-            case .valid(let value): context = value
-            case .invalid(let message): return ControlResponse(ok: false, error: message)
-            }
-        case "clear":
-            guard args?.text == nil else {
-                return ControlResponse(ok: false, error: "session.context clear takes no text")
-            }
-            context = nil
-        default:
-            return ControlResponse(ok: false, error: "invalid context mode: \(args?.mode ?? "") (set|clear)")
-        }
-        return actions.setSessionContext(request.target, window: args?.window, context: context)
-    }
-
     /// Non-nil when `text` carries a NUL: libghostty's key-text field is NUL-terminated and slices at the
     /// first zero, dropping the run's tail while the Return after it still submits the shortened line (#455).
     private func nulRejection(_ text: String) -> ControlResponse? {
@@ -583,8 +598,13 @@ public struct ControlDispatcher {
     private func dispatchWorkspaceCommand(_ request: ControlRequest) -> ControlResponse {
         switch request.cmd {
         case .workspaceNew:
-            return actions.createWorkspace(window: request.args?.window, name: request.args?.name,
-                                           collapsed: request.args?.collapsed ?? false)
+            switch Self.creationTint(request.args) {
+            case .failure(let rejection):
+                return ControlResponse(ok: false, error: rejection.message)
+            case .success(let tint):
+                return actions.createWorkspace(window: request.args?.window, name: request.args?.name,
+                                               collapsed: request.args?.collapsed ?? false, tint: tint)
+            }
         case .workspaceSelect:
             return actions.selectWorkspace(request.target, window: request.args?.window)
         case .workspaceGo:

@@ -174,8 +174,9 @@ extension WindowContentView {
         // the quick terminal owns it while it covers the window, and its own hide re-grabs the cover.
         //
         // Keyed on `visibleCover`, not the slots: a HUD, a hidden overlay closing, or the other pane's overlay
-        // toggling changes nothing the user types into, and `retryReparentFocus` would yank focus out of an
-        // open ⌘F search field or an in-progress sidebar rename for ~0.36s.
+        // toggling (unless it keeps the session cover out of sight) changes nothing the user types into, and
+        // `retryReparentFocus` would yank focus out of an open ⌘F search field or an in-progress sidebar
+        // rename for ~0.36s.
         .onChange(of: session.visibleCover) { _, _ in
             guard deckInteractive, isActive, !quickTerminal.holdsKey else { return }
             HtmlOverlayRegistry.shared.refocus(session)
@@ -220,7 +221,7 @@ extension WindowContentView {
         deckPane(session, pane: .left, focused: !session.splitFocused, gates: gates)
             .background {
                 SplitRatioAccessor(session: session, titlebarHeight: titlebarHeight,
-                                   suspended: !deckInteractive,
+                                   dividerColor: splitDividerColor, suspended: !deckInteractive,
                                    deckVisible: gates.visible && !gates.overlaid,
                                    onPersist: { store.save() })
             }
@@ -249,7 +250,8 @@ extension WindowContentView {
         // revision, so its id needs the token to change when the occupants exchange.
         let hostPrefix = pane == .left ? primarySurfaceID(session) : "\(session.id.uuidString)-split"
         ZStack {
-            if deckHostsSurface(session: session, surface: pane.paneZoomSurface) {
+            // a page companion has no terminal: its full page panel paints over this empty slot
+            if session.content == .terminal, deckHostsSurface(session: session, surface: pane.paneZoomSurface) {
                 TerminalView(session: session, surfaceKeyPath: slot,
                              makeSurface: pane == .left ? makeSurface : makeSplitSurface,
                              isActive: gates.focusable && focused && !gates.overlaid && !covered,
@@ -288,7 +290,7 @@ extension WindowContentView {
         // a HUD is passive: it neither takes first responder nor absorbs the clicks around it, so the panel
         // stays inert as a whole and the session underneath keeps both. A hidden program or page is inert the
         // same way while its host stays mounted, so it keeps running and comes back without a re-host.
-        let shown = !session.overlayHidden
+        let shown = session.sessionSlotShown
         let live = isActive && style.interactive && shown
         GeometryReader { geo in
             let detailFrame = CGRect(origin: .zero, size: geo.size)
@@ -321,7 +323,10 @@ extension WindowContentView {
                         if let page = session.htmlOverlay, session.htmlOverlayActive {
                             HtmlOverlayView(store: store, session: session, overlay: page,
                                             backgroundColor: session.overlayBackgroundColor, isActive: live,
-                                            visible: live, foreground: chromeText, background: terminalColor)
+                                            visible: live, toolTipsShown: live && !chromeCovered && !session.askCoversAnyPane,
+                                            hideShown: shows(.overlayToggle) && session.content == .terminal,
+                                            onClose: session.content == .page ? { actions.closeSession(session.id, in: store) } : nil,
+                                            foreground: chromeText, background: terminalColor)
                         } else {
                             TerminalView(session: session, surfaceKeyPath: \.overlaySurface,
                                          makeSurface: { makeOverlaySurface($0, nil) },
@@ -414,7 +419,9 @@ extension WindowContentView {
                     // keyed on the page, so a swap or promotion moves its web view instead of reusing a host
                     HtmlOverlayView(store: store, session: session, overlay: page,
                                     backgroundColor: session.paneOverlay(pane)?.backgroundColor, isActive: isActive,
-                                    visible: deckVisible, foreground: chromeText, background: terminalColor)
+                                    visible: deckVisible,
+                                    toolTipsShown: deckVisible && !chromeCovered && !session.askCovers(pane),
+                                    hideShown: shows(.overlayToggle), foreground: chromeText, background: terminalColor)
                         .overlay { paneDim(!focused, session: session, color: overlayWashColor(session, pane: pane)) }
                         .id("\(session.id.uuidString)-html-\(page.id.uuidString)")
                 } else if active {
@@ -499,6 +506,9 @@ struct OverlayPanelStyle: Equatable {
     /// a HUD's height in points, which wins over `heightFraction` when set: a fraction of the pane grows
     /// the panel with the window while its text stays the same size.
     var heightPoints: CGFloat?
+    /// a floating program or page sized in points on some axis, laid out by `OverlayPointSize.panelSize`, the
+    /// math the tree's read-back uses; nil leaves both fractions in charge.
+    var pointSizing: PointSizing?
     /// pane fraction held clear at an edge the panel is anchored to; 0 for a sticky HUD.
     var edgeMargin = CGFloat(HudPosition.edgeMarginPercent) / 100
     /// opaque backing: both framed variants, never the chromeless full overlay.
@@ -531,11 +541,17 @@ struct OverlayPanelStyle: Equatable {
         guard session.hudActive else {
             // the full overlay is chromeless: no radius, no border, no shadow.
             let floating = session.overlaySizePercent != nil
-            return OverlayPanelStyle(widthFraction: fraction, heightFraction: fraction, framed: floating,
-                                     cornerRadius: floating ? floatingCornerRadius : 0,
-                                     borderOpacity: floating ? floatingBorderOpacity : 0,
-                                     shadowRadius: floating ? floatingShadowRadius : 0,
-                                     backdrop: floating && !session.overlayHidden, interactive: true, position: .center)
+            var style = OverlayPanelStyle(widthFraction: fraction, heightFraction: fraction, framed: floating,
+                                          cornerRadius: floating ? floatingCornerRadius : 0,
+                                          borderOpacity: floating ? floatingBorderOpacity : 0,
+                                          shadowRadius: floating ? floatingShadowRadius : 0,
+                                          backdrop: floating && session.sessionSlotShown, interactive: true,
+                                          position: .center)
+            if let percent = session.overlaySizePercent, !session.overlayPoints.isEmpty {
+                style.pointSizing = PointSizing(sizePercent: percent, points: session.overlayPoints,
+                                                chrome: session.htmlOverlay?.chrome ?? 0)
+            }
+            return style
         }
         // a HUD with no measured height has not been through `openHud` yet; falling back to the width would
         // put the square back for exactly the frame that would be seen first.
@@ -569,23 +585,44 @@ struct OverlayPanelStyle: Equatable {
                band: position.verticalBand)
     }
 
-    func panelHeight(paneHeight: CGFloat) -> CGFloat { heightPoints ?? paneHeight * heightFraction }
+    func panelHeight(paneHeight: CGFloat) -> CGFloat {
+        if let pointSizing { return pointSizing.size(in: CGSize(width: 1, height: paneHeight)).height }
+        return heightPoints ?? paneHeight * heightFraction
+    }
+
+    func panelWidth(paneWidth: CGFloat) -> CGFloat {
+        guard let pointSizing else { return paneWidth * widthFraction }
+        return pointSizing.size(in: CGSize(width: paneWidth, height: 1)).width
+    }
 
     /// The same math across the pane's WIDTH, positive rightward, off the anchor's column. The margin always
     /// fits here too: `HudLayout.clampSizePercent(_:for:)` bounds every width, the caller's `--size-percent`
     /// included, at the `maxSizePercent` two margins fill the rest of, and past it only for a sticky panel,
     /// which holds no margin.
     func horizontalOffset(paneWidth: CGFloat) -> CGFloat {
-        offset(along: paneWidth, fraction: widthFraction, band: position.horizontalBand)
+        offset(along: paneWidth, fraction: panelWidth(paneWidth: paneWidth) / max(paneWidth, 1),
+               band: position.horizontalBand)
     }
 
     /// Applies the panel's size and anchor inside one session or pane bounds rect.
     func panelFrame(in pane: CGRect) -> CGRect {
-        let size = CGSize(width: pane.width * widthFraction, height: panelHeight(paneHeight: pane.height))
+        let size = CGSize(width: panelWidth(paneWidth: pane.width), height: panelHeight(paneHeight: pane.height))
         let center = CGPoint(x: pane.midX + horizontalOffset(paneWidth: pane.width),
                              y: pane.midY + verticalOffset(paneHeight: pane.height))
         return CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
                       width: size.width, height: size.height)
+    }
+
+    struct PointSizing: Equatable {
+        let sizePercent: Int
+        let points: OverlayPointSize
+        let chrome: Double
+
+        func size(in bounds: CGSize) -> CGSize {
+            let size = OverlayPointSize.panelSize(in: (Double(bounds.width), Double(bounds.height)),
+                                                  sizePercent: sizePercent, points: points, chrome: chrome)
+            return CGSize(width: size.width, height: size.height)
+        }
     }
 
     /// One axis' travel: half the free room left after the panel and its edge margin, signed by the band.

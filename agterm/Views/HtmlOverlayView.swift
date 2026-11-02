@@ -14,6 +14,12 @@ struct HtmlOverlayView: View {
     let isActive: Bool
     /// visible is whether the page is on screen, which decides drop registration apart from focus.
     let visible: Bool
+    /// toolTipsShown is `visible` minus what covers the strip without hiding the page: a window modal or an ask.
+    let toolTipsShown: Bool
+    /// hideShown follows the title-bar overlays button; without it nothing on screen shows how to get a hidden page back.
+    let hideShown: Bool
+    /// onClose replaces the strip's close for a page companion, whose close is the session's own.
+    var onClose: (() -> Void)?
     let foreground: Color
     let background: Color
 
@@ -63,17 +69,19 @@ struct HtmlOverlayView: View {
                     EmptyView()
                 }
             }
-            button("minus", "Hide", "htmlOverlay.hide", enabled: true) {
-                store.hideHtmlOverlay(overlay.id)
+            if hideShown {
+                button("minus", "Hide", "htmlOverlay.hide", enabled: true) {
+                    store.hideHtmlOverlay(overlay.id)
+                }
             }
             button("xmark", "Close", "htmlOverlay.close", enabled: true) {
-                store.closeHtmlOverlay(overlay.id)
+                if let onClose { onClose() } else { store.closeHtmlOverlay(overlay.id) }
             }
         }
         .font(.system(size: 12))
         .foregroundStyle(foreground)
         .padding(.horizontal, 10)
-        .frame(height: 28)
+        .frame(height: HtmlOverlay.stripHeight)
         .background(foreground.opacity(0.06))
         .background(background)
     }
@@ -86,7 +94,7 @@ struct HtmlOverlayView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .layoutPriority(1)
-                .help(overlay.current?.page ?? sourceText)
+                .toolTip(overlay.current?.page ?? sourceText, isShown: toolTipsShown)
                 .accessibilityIdentifier("htmlOverlay.identity")
             if let title = overlay.current?.title {
                 Text("·")
@@ -95,7 +103,7 @@ struct HtmlOverlayView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .foregroundStyle(foreground.opacity(0.55))
-                    .help(title)
+                    .toolTip(title, isShown: toolTipsShown)
                     .accessibilityIdentifier("htmlOverlay.title")
             }
         }
@@ -144,7 +152,7 @@ struct HtmlOverlayView: View {
         }
         .buttonStyle(HtmlToolbarButtonStyle(tint: foreground))
         .disabled(!enabled)
-        .help(label)
+        .toolTip(label, isShown: toolTipsShown)
         .accessibilityLabel(label)
         .accessibilityIdentifier(identifier)
     }

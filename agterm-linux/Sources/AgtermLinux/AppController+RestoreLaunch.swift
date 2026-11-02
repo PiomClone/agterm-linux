@@ -84,10 +84,10 @@ extension AppController {
             return LinuxLaunchSeed(
                 command: Self.wrappedAttachCommand(
                     configuration, replay: session.takePendingForegroundCommand(pane: pane),
-                    durable: durableCommand(session: session, pane: pane), denylist: policy.denylist
+                    durable: durableCommand(session: session, pane: pane), denylist: policy.denylist, endsWithCommand: !session.wasRestored
                 ),
                 initialInput: nil,
-                waitAfterCommand: false
+                waitAfterCommand: !session.wasRestored && requestedWait(session: session, pane: pane)
             )
         case .ordinary:
             let capture = session.takePendingForegroundCommand(pane: pane)
@@ -119,9 +119,10 @@ extension AppController {
 
     /// A captured argv, even a denylisted one, preempts the durable creation command after daemon loss.
     nonisolated static func wrappedAttachCommand(_ configuration: ZmxSupport.Configuration, replay: [String]?,
-                                                 durable: String?, denylist: Set<String>) -> String {
+                                                 durable: String?, denylist: Set<String>, endsWithCommand: Bool = false) -> String {
         ZmxSupport.attachCommand(configuration, replaying: replay,
-                                 creationCommand: replay == nil ? durable : nil, denylist: denylist)
+                                 creationCommand: replay == nil && !endsWithCommand ? durable : nil,
+                                 paneCommand: replay == nil && endsWithCommand ? durable : nil, denylist: denylist)
     }
 
     private func shouldPace(session: Session, pane: StatusPane,
@@ -198,7 +199,7 @@ extension AppController {
                                waitAfterCommand: false)
     }
 
-    private func restoreDenylist() -> Set<String> {
+    func restoreDenylist() -> Set<String> {
         let path = ConfigPaths.restoreDenylistPath(configDirectory: configDirectory())
         return (try? String(contentsOf: path, encoding: .utf8)).map(CommandRestore.parseDenylist)
             ?? ["tmux", "screen", "zellij"]

@@ -249,21 +249,23 @@ let onRowActivated: @MainActor @convention(c) (OpaquePointer?, OpaquePointer?, g
 // Only the PRESS reads modifier state: the release consumes the press's remembered decision
 // (`SessionClickTracker`), so a modifier lifted between press and release changes nothing.
 
-let onSessionRowPress: @MainActor @convention(c) (OpaquePointer?, Int32, Double, Double, gpointer?) -> Void = { gesture, presses, _, _, data in
+let onSessionRowPress: @MainActor @convention(c) (OpaquePointer?, Int32, Double, Double, gpointer?) -> Void = { gesture, presses, x, y, data in
     guard presses == 1, let gesture, let data else { return }
     MainActor.assumeIsolated {
         guard let controller = controllerForEventController(gesture),
-              let id = controller.session(forRow: OpaquePointer(data)) else { return }
+              let id = controller.session(forRow: OpaquePointer(data)),
+              !controller.companionDisclosureHit(id, row: OpaquePointer(data), x: x, y: y) else { return }
         let modifiers = gtk_event_controller_get_current_event_state(gesture).rawValue
         controller.handleSessionRowPress(id, modifiers: modifiers)
     }
 }
 
-let onSessionRowRelease: @MainActor @convention(c) (OpaquePointer?, Int32, Double, Double, gpointer?) -> Void = { gesture, presses, _, _, data in
+let onSessionRowRelease: @MainActor @convention(c) (OpaquePointer?, Int32, Double, Double, gpointer?) -> Void = { gesture, presses, x, y, data in
     guard presses == 1, let gesture, let data else { return }
     MainActor.assumeIsolated {
         guard let controller = controllerForEventController(gesture),
-              let id = controller.session(forRow: OpaquePointer(data)) else { return }
+              let id = controller.session(forRow: OpaquePointer(data)),
+              !controller.companionDisclosureHit(id, row: OpaquePointer(data), x: x, y: y) else { return }
         controller.handleSessionRowRelease(id)
     }
 }

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 import gi
 
@@ -46,7 +47,7 @@ def collect(node, role=None, name=None, out=None):
         node_name = node.get_name() or ""
         node_role = node.get_role_name()
         role_matches = role is None or node_role == role or (
-            role == "button" and node_role == "push button"
+            role in ("button", "push button") and node_role in ("button", "push button")
         )
         if role_matches and (name is None or node_name == name):
             out.append(node)
@@ -1242,12 +1243,9 @@ def check_keymap_reload_fanout(app, process_id, env, first_title, second_title):
         return rows
 
     chorded_row = ["Chorded Demo", "custom", "ctrl+shift+e"]
-    # ctrl+shift+y is free everywhere the parser looks, the same reasoning as the seeded ctrl+shift+e:
-    # isReservedMonitorChord covers only ctrl+tab / ctrl+1 / ctrl+2, isLinuxReservedChord adds only
-    # ctrl+comma, the Linux default table binds no `y`, and no shared default uses key "y" — so
-    # cross-section validation never clears this shortcut and it reaches the row as the raw token.
+    # Keep the reload probe distinct from the Alternative Demo chord and all built-in shortcuts.
     with open(keymap, "a", encoding="utf-8") as target:
-        target.write('command "Late Demo" ctrl+shift+y true\n')
+        target.write('command "Late Demo" ctrl+shift+f12 true\n')
 
     for title in (first_title, second_title):
         rows = filtered_rows(title, "Demo", chorded_row,
@@ -1259,7 +1257,7 @@ def check_keymap_reload_fanout(app, process_id, env, first_title, second_title):
     # Bug one: `agtermctl keymap reload` used to rebuild only the controller it resolved.
     control_json(env, "keymap", "reload", "--json")
     for title in (first_title, second_title):
-        filtered_rows(title, "Demo", ["Late Demo", "custom", "ctrl+shift+y"],
+        filtered_rows(title, "Demo", ["Late Demo", "custom", "ctrl+shift+f12"],
                       f"agtermctl keymap reload did not reach {title}'s palette")
 
     # Bug two: the palette's own `Reload Keymap` row — driven in the FIRST window, asserted in the SECOND.
@@ -3107,7 +3105,7 @@ def verify_custom_command_failures(env):
             # is free in both the Linux and the upstream default chord tables, so it survives keymap
             # validation and reaches the row as the user's own raw token.
             'command "Chorded Demo" ctrl+shift+e true\n'
-            f'command "Alternative Demo" ctrl+shift+u|ctrl+shift+r printf fired > {alternative_marker}\n'
+            f'command "Alternative Demo" ctrl+shift+u|ctrl+shift+y printf fired > {alternative_marker}\n'
         )
     process, app = launch(env)
     try:
@@ -3131,7 +3129,7 @@ def verify_custom_command_failures(env):
 
         wait_for(lambda: frame("command-origin-a"), "first command window did not become accessible")
         wait_for(lambda: frame("command-origin-b"), "second command window did not become accessible")
-        press_x11_key("ctrl+shift+r", process.pid, window_title="command-origin-a")
+        press_x11_key("ctrl+shift+y", process.pid, window_title="command-origin-a")
         wait_for(lambda: os.path.exists(alternative_marker),
                  "the second custom-command alternative did not dispatch")
         check_palette_row_layout(app, process.pid, "command-origin-a")
@@ -7308,10 +7306,11 @@ def verify_recent_clear(env):
 
         created = control_json(env, "session", "new", "--json")["result"]["id"]
         control_json(env, "session", "close", "--target", created, "--json")
+        before = control_json(env, "recent", "list", "--json")["result"]["recent"]
+        assert len(before) == 1, before
         response = control_json(env, "recent", "clear", "--json")
-        assert response["result"]["affected"] == 1, (
-            "recent clear did not report the one item it removed"
-        )
+        assert response["ok"], response
+        assert control_json(env, "recent", "list", "--json")["result"].get("recent", []) == []
         print("OK: palette and control clear recently closed items")
     except AssertionError:
         describe_tree(app)
@@ -7445,7 +7444,9 @@ def main():
     if scenario is None:
         failures = []
         for child_scenario in (
-            "normal", "upstream-controls", "html-overlay", "live-restart", "dashboard-modal", "context-menu",
+            "normal", "upstream-controls", "upstream-v0391", "remote-v0391", "html-overlay", "overlay-visual", "live-restart", "live-fish-restart",
+            "live-wait-output", "startup-environment",
+            "dashboard-modal", "context-menu",
             "window-key-dispatch",
             "split-exit", "split-primary-exit", "window-ownership", "preferences-pages",
             "notification-reveal", "notification-focus", "session-pickers",
@@ -7456,14 +7457,15 @@ def main():
             "custom-command-failures", "remote-presentation", "control-hooks",
             "surface-lifetimes", "surface-failures",
             "background-overlay-grid", "zoom-floating-overlay",
-            "sidebar-row-height",
+            "sidebar-row-height", "companion-layout", "companion-identity", "ibus-lifecycle",
             "sidebar-narrow-clipping",
             "sidebar-width-floor",
             "sidebar-click-rename", "sidebar-session-drag", "sidebar-workspace-drag",
             "sidebar-incremental",
             "sidebar-multiselect",
             "chrome-focus-buttons", "chrome-focus-sidebar", "chrome-focus-popovers",
-            "recent-clear", "control-picker", "control-ask", "auto-follow", "hidden-toolbar", "desktop-actions",
+            "recent-clear", "control-picker", "control-ask", "ask-visual", "palette-lifecycle", "palette-layout-navigation",
+            "auto-follow", "hidden-toolbar", "desktop-actions",
             "theme-many-sessions",
         ):
             child_env = dict(os.environ, AGTERM_ATSPI_SCENARIO=child_scenario)
@@ -7527,16 +7529,51 @@ def main():
             verify_window_key_dispatch(env)
         elif scenario == "upstream-controls":
             verify_upstream_control_parity(env)
+        elif scenario == "upstream-v0391":
+            from atspi_v0391 import verify_v0391
+            verify_v0391(env, state)
+        elif scenario == "companion-layout":
+            from atspi_companion_layout import verify_companion_layout
+            verify_companion_layout(env, state)
+        elif scenario == "ibus-lifecycle":
+            from atspi_ibus_lifecycle import verify_ibus_lifecycle
+            verify_ibus_lifecycle(env)
+        elif scenario == "companion-identity":
+            from atspi_companion_identity import verify_companion_identity
+            verify_companion_identity(env)
+        elif scenario == "remote-v0391":
+            from atspi_v0391_remote import verify_remote_v0391
+            verify_remote_v0391(env, state)
         elif scenario == "html-overlay":
             from atspi_html_overlay import verify_html_overlay
             verify_html_overlay(env, state)
             from atspi_html_v0351 import verify_html_v0351
             verify_html_v0351(env, state)
-        elif scenario == "live-restart":
+        elif scenario == "overlay-visual":
+            from atspi_overlay_visual import verify_overlay_visual
+            verify_overlay_visual(env, state)
+        elif scenario in ("live-restart", "live-fish-restart"):
             from atspi_restart_v0351 import verify_restart_v0351
+            if scenario == "live-fish-restart":
+                env = dict(env, AGTERM_TEST_LOGIN_SHELL="/usr/bin/fish")
             verify_restart_v0351(env, state)
+        elif scenario == "live-wait-output":
+            from atspi_live_wait_output import verify_live_wait_output
+            verify_live_wait_output(env, state)
+        elif scenario == "startup-environment":
+            from atspi_startup_environment import verify_startup_environment
+            verify_startup_environment(env, state)
         elif scenario == "control-ask":
             verify_control_ask(env)
+        elif scenario == "ask-visual":
+            from atspi_ask_visual import verify_ask_visual
+            verify_ask_visual(env, state)
+        elif scenario == "palette-lifecycle":
+            from atspi_palette_lifecycle import verify_palette_lifecycle
+            verify_palette_lifecycle(env)
+        elif scenario == "palette-layout-navigation":
+            from atspi_palette_layout import verify_palette_layout_navigation
+            verify_palette_layout_navigation(env)
         elif scenario == "dashboard-modal":
             verify_dashboard_modal(env)
         elif scenario == "context-menu":
@@ -7638,6 +7675,7 @@ def main():
         print(f"PASS: {scenario}")
         return 0
     except (AssertionError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as error:
+        traceback.print_exc()
         print(f"FAIL: {error}")
         return 1
     finally:

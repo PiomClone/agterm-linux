@@ -38,10 +38,14 @@ final class GhosttyApp: @unchecked Sendable {
     var currentThemePalette: [String] = []
     @MainActor private var appliedAppearanceSide: LinuxAppearanceSide?
 
-    @MainActor func start(appearanceSide: LinuxAppearanceSide) {
+    /// Process environment and locale initialization must precede GTK's worker threads.
+    /// Called once from main(), after the GDK policy assignments and before GTK initializes.
+    func initializeRuntime() {
         setGhosttyResourcesEnv()   // export GHOSTTY_RESOURCES_DIR before init + buildConfig read it
         ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv)
+    }
 
+    @MainActor func start(appearanceSide: LinuxAppearanceSide) {
         // Persisted settings (font/size/theme/scroll) are layered on at launch so they survive
         // relaunch. Translucency is omitted: Linux has no window-level compositing yet.
         let saved = linuxSettingsStore().load()
@@ -256,7 +260,7 @@ final class GhosttyApp: @unchecked Sendable {
             case GHOSTTY_ACTION_OPEN_URL:
                 let value = action.action.open_url
                 if let raw = GhosttyActionDecoder.utf8String(value.url, length: value.len) {
-                    Self.openTerminalURL(raw)
+                    if Self.wrapper(fromTarget: target)?.openLink(raw) != true { Self.openTerminalURL(raw) }
                 }
                 return true
             case GHOSTTY_ACTION_MOUSE_OVER_LINK:

@@ -87,10 +87,13 @@ struct AskTextEditor: NSViewRepresentable {
         switch mode {
         case .line:
             let field = AskTextField(box: box)
-            field.isBordered = style == .gui
-            field.bezelStyle = .roundedBezel
-            field.drawsBackground = style == .gui
-            field.focusRingType = style == .gui ? .default : .none
+            field.isBordered = false
+            field.isBezeled = false
+            field.drawsBackground = false
+            field.focusRingType = .none
+            (field.cell as? AskTextFieldCell)?.textInset = style == .gui ? 6 : 0
+            // let the gui field grow to its drawn box, so a click anywhere in the box lands on it
+            if style == .gui { field.setContentHuggingPriority(.defaultLow, for: .vertical) }
             field.usesSingleLineMode = true
             field.cell?.isScrollable = true
             field.cell?.wraps = false
@@ -215,7 +218,7 @@ struct AskTextEditor: NSViewRepresentable {
 /// Whether replacing `range` (UTF-16, as AppKit gives it) with `replacement` keeps the editor within the text
 /// cap and free of controls the mode forbids; marked text counts, so a composition can never push the field past
 /// what the draft keeps. A paste carrying a forbidden control is refused whole.
-func askEditAllowed(_ textView: NSTextView, range: NSRange, replacement: String?, mode: ControlAskInputMode) -> Bool {
+@MainActor func askEditAllowed(_ textView: NSTextView, range: NSRange, replacement: String?, mode: ControlAskInputMode) -> Bool {
     guard let replacement else { return true }
     guard !AskInputForm.hasForbiddenControls(replacement, mode: mode) else { return false }
     let replaced = (textView.string as NSString).substring(with: range).utf8.count
@@ -239,6 +242,32 @@ final class AskTextFieldCell: NSTextFieldCell {
     }()
 
     override func fieldEditor(for _: NSView) -> NSTextView? { editor }
+
+    var textInset: CGFloat = 0
+
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        guard textInset > 0 else { return super.drawingRect(forBounds: rect) }
+        let line = font.map { ceil(NSLayoutManager().defaultLineHeight(for: $0)) } ?? rect.height
+        let height = min(rect.height, line)
+        return NSRect(x: rect.minX + textInset, y: rect.minY + (rect.height - height) / 2,
+                      width: max(0, rect.width - textInset * 2), height: height)
+    }
+
+    // the placeholder is drawn through the title rect, and the field editor is placed from the rect passed to
+    // select and edit, so all three take the inset
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        textInset > 0 ? drawingRect(forBounds: rect) : super.titleRect(forBounds: rect)
+    }
+
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?,
+                         start selStart: Int, length selLength: Int) {
+        super.select(withFrame: titleRect(forBounds: rect), in: controlView, editor: textObj, delegate: delegate,
+                     start: selStart, length: selLength)
+    }
+
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: titleRect(forBounds: rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
 }
 
 /// The one-line field; it tells its box it is the live editor only while it sits in a window, since a
@@ -337,7 +366,7 @@ struct AskChoiceList: View {
 
     /// rowID tags a caller item's id; `scrollPosition` matches the ForEach identity and `scrollTo` the
     /// explicit id, so both use it, and the free-form row's `otherRowID` lacks the prefix every caller row has.
-    static func rowID(_ id: String) -> String { "ask-choice-\(id)" }
+    nonisolated static func rowID(_ id: String) -> String { "ask-choice-\(id)" }
     static let otherRowID = "ask-other"
 
     private struct Row: Identifiable {

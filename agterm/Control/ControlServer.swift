@@ -183,6 +183,18 @@ final class ControlServer {
     var liveReset: LiveResetCoordinator?
     /// The scheduler's rows for `hooks.list`, wired by `agtermApp` once the controller exists.
     var hookStatus: () -> [ControlHookEntry] = { [] }
+    /// companionPageTokens are page-companion attachments handed to another Mac and not claimed yet, by token.
+    var companionPageTokens: [String: CompanionPageToken] = [:]
+    /// pendingCompanionClaims are claimed attachments whose channel is not adopted yet, by claim id.
+    var pendingCompanionClaims: [UUID: CompanionPageServing] = [:]
+    /// companionPageStreams are the live channels of page-companion attachments, by claim id.
+    var companionPageStreams: [UUID: PageServeStream] = [:]
+    /// originEpoch names this app run in respawn counts, so a viewer never reads a restarted counter as older.
+    let originEpoch = UUID().uuidString
+    /// respawnGenerations counts each session's pane respawns by daemon name, for the presentation snapshot.
+    var respawnGenerations: [UUID: [String: Int]] = [:]
+    /// The wait between polls of the origin for a remote companion it created; injectable like the clocks.
+    var remoteCompanionPause: () async -> Void = { try? await Task.sleep(for: .seconds(1)) }
     /// The last launch's reset outcome for the read-back; injectable so a hosted test stages one.
     var liveResetOutcome: () -> LiveReset.Outcome? = { GhosttyApp.shared.liveResetOutcome }
     init(library: WindowLibrary, actions: AppActions, settingsModel: SettingsModel, identity: AppIdentity,
@@ -506,7 +518,9 @@ final class ControlServer {
     /// carries the same wait; local `zmx.list` blocks too, but bounded, and stays inline to keep cache order.
     /// `session.restart` waits on process exits for seconds, while the shell it starts calls this socket.
     nonisolated private static func waitsOnNetwork(_ cmd: Command) -> Bool {
-        cmd == .zmxTree || cmd == .zmxAttach || cmd == .sessionRestart
+        // companion creation may ssh to a remote parent's origin, which can be this Mac's own socket
+        [.zmxTree, .zmxAttach, .sessionRestart, .sessionCompanionNew, .sessionCompanionDuplicate,
+         .sessionCompanionPage].contains(cmd)
     }
 
     /// Read bytes from `conn` up to (and excluding) the first newline. Returns nil on EOF-before-newline, a
@@ -576,6 +590,7 @@ final class ControlServer {
         // refresh the read cache in this same main-actor execution, so the background fast path sees the new
         // state without a separate, stallable hop.
         defer { refreshWindowCache() }
+        if let refusal = pageCompanionRefusal(request) { return refusal }
         if let response = await ControlDispatcher(actions: self).dispatch(request) {
             return response
         }
@@ -585,10 +600,12 @@ final class ControlServer {
                 .workspaceNew, .workspaceSelect, .workspaceGo, .workspaceRename, .workspaceDelete, .workspaceMove,
                 .workspaceFocus,
                 .workspaceFilter, .workspaceCollapse, .workspaceExpand, .workspaceFlag,
+                .sessionCollapse, .sessionExpand, .sessionCompanionNew, .sessionCompanionPage, .sessionCompanionDuplicate,
+                .sessionCompanionPageAttach,
                 .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionLead, .sessionRestart, .sessionScratch, .sessionFocus,
                 .sessionResize, .surfaceZoom,
                 .surfaceCursor,
-                .sessionStatus, .sessionFlag, .sessionContext, .sessionSeen, .sessionRestore, .notify,
+                .sessionStatus, .sessionFlag, .sessionContext, .sessionTint, .workspaceTint, .sessionSeen, .sessionRestore, .notify,
                 .fontInc, .fontDec, .fontReset, .keymapReload, .keymapList, .keymapRun, .hooksReload, .hooksList, .browserClear,
                 .browserLinks,
                 .configReload, .themeSet, .themeList,
@@ -890,12 +907,13 @@ final class ControlServer {
     /// Session while a background `--window` target keeps focus. `at` is the anchor-relative
     /// `--after`/`--before` slot (clamped in `AppStore`), nil appends; `options.noSelect` creates in the
     /// background, selection and focus untouched.
-    func makeSessionResponse(in store: AppStore, workspaceID: UUID,
-                             options: ControlSessionCreateOptions, at index: Int? = nil) -> ControlResponse {
+    func makeSessionResponse(in store: AppStore, workspaceID: UUID, options: ControlSessionCreateOptions,
+                             tint: SidebarTint? = nil, at index: Int? = nil) -> ControlResponse {
         let cwd = options.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         guard let session = store.addSession(toWorkspace: workspaceID, cwd: cwd,
                                              command: options.command, name: options.name,
-                                             wait: options.wait ?? false, at: index, select: !options.noSelect) else {
+                                             wait: options.wait ?? false, at: index, select: !options.noSelect,
+                                             tint: tint) else {
             return ControlResponse(ok: false, error: "could not create session")
         }
         if !options.noSelect, store === library.activeStore { actions.focusActiveSession() }

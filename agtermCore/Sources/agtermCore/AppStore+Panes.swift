@@ -262,12 +262,19 @@ extension AppStore {
     /// addressable as the MAIN/left pane everywhere: `session.type`/`session.text --pane left` (and omitted)
     /// reach it, `{AGT_PANE}` reports `left`, and a later `session.split` opens a fresh RIGHT pane instead of
     /// displacing it. Called by the primary surface's `onExit`.
-    public func closePrimaryPane(_ sessionID: UUID, alreadyFinalized: UUID? = nil) {
-        guard let session = session(withID: sessionID) else { return }
+    /// A local parent with companions respawns when its last pane exits.
+    @discardableResult
+    public func closePrimaryPane(_ sessionID: UUID, alreadyFinalized: UUID? = nil, now: Date = Date()) -> PrimaryPaneExit {
+        guard let session = session(withID: sessionID) else { return .closed }
         guard let survivor = session.splitSurface else {
+            if respawnsOnLastPaneExit(session, now: now) {
+                respawnPrimaryPane(session, now: now)
+                return .respawned
+            }
             closeSession(sessionID, alreadyFinalized: alreadyFinalized)
-            return
+            return .closed
         }
+        defer { savePaneLayout(session) }
         if session.hudPaneIdentity == session.paneIdentity { closeHud(sessionID) }
         if session.askPaneIdentity == session.paneIdentity { session.cancelPendingAsk() }
         let priorPrimary = session.surface // the exiting pane, torn down below; scopes the search reset
@@ -340,7 +347,7 @@ extension AppStore {
             }
         }
         if wasShown { emitPaneVisibility(.paneSplit, session: session, shown: false) }
-        savePaneLayout(session)
+        return .promoted
     }
 
     /// The split pane's shell exited: collapses to the primary (`closeSplit`) ONLY when a genuine two-pane
@@ -349,9 +356,13 @@ extension AppStore {
     /// exit routes here — and closing rather than collapsing a gone split is what avoids a zombie session.
     /// The `surface == nil` half of the guard is defensive: `closePrimaryPane` always promotes the survivor
     /// INTO `surface`. Called by the split surface's `onExit`.
-    public func closeSplitPane(_ sessionID: UUID, alreadyFinalized: UUID? = nil) {
+    public func closeSplitPane(_ sessionID: UUID, alreadyFinalized: UUID? = nil, now: Date = Date()) {
         guard let session = session(withID: sessionID) else { return }
         guard session.surface != nil, session.splitSurface != nil else {
+            if respawnsOnLastPaneExit(session, now: now) {
+                respawnPrimaryPane(session, now: now)
+                return
+            }
             closeSession(sessionID, alreadyFinalized: alreadyFinalized)
             return
         }
@@ -365,10 +376,12 @@ extension AppStore {
     /// replacing it. NOT persisted.
     /// - `sizePercent` (clamped to 1...100) requests a *floating* overlay: an opaque framed panel at that
     ///   percent of the pane with the session visible behind it; nil gives the full-pane overlay that hides it.
+    /// - `points` overrides that percent per axis; ignored without one.
     /// - `backgroundColor` (`#rrggbb`) gives the overlay pane its own solid background, independent of the
     ///   session's; nil leaves the default theme background. Read by the overlay factory at creation.
     @discardableResult public func openOverlay(_ sessionID: UUID, command: String, cwd: String? = nil,
                                                wait: Bool = false, sizePercent: Int? = nil,
+                                               points: OverlayPointSize = OverlayPointSize(),
                                                backgroundColor: String? = nil) -> Bool {
         guard let session = session(withID: sessionID) else { return false }
         if session.hudActive { closeOverlay(sessionID) }
@@ -380,6 +393,7 @@ extension AppStore {
         session.overlayExitCode = nil
         session.remoteOverlays.clearFailure(nil)
         session.overlaySizePercent = sizePercent.map { min(100, max(1, $0)) }
+        session.overlayPoints = sizePercent == nil ? OverlayPointSize() : points
         session.overlayBackgroundColor = backgroundColor
         session.overlayActive = true
         scheduleTreeChanged()
@@ -393,10 +407,16 @@ extension AppStore {
     /// resize path can grow a message until it covers the session it is about, and the percent reaches its
     /// WIDTH alone. That width is recorded as forced, so it holds through later remeasures until the next
     /// open or update; the caller owes the panel a `remeasureHud` for the height the new width needs.
-    @discardableResult public func resizeOverlay(_ sessionID: UUID, sizePercent: Int?) -> Bool {
+    /// `points` replaces the panel's point overrides whole, so an axis it omits goes back to the percent; a
+    /// full resize clears them. A HUD takes none.
+    @discardableResult public func resizeOverlay(_ sessionID: UUID, sizePercent: Int?,
+                                                 points: OverlayPointSize = OverlayPointSize()) -> Bool {
         guard let session = session(withID: sessionID), session.overlayActive else { return false }
+        // a page companion's page is the row, so it stays full size
+        guard session.content == .terminal || sizePercent == nil else { return false }
         guard let spec = session.hudSpec, session.hudActive else {
             session.overlaySizePercent = sizePercent.map { min(100, max(1, $0)) }
+            session.overlayPoints = sizePercent == nil ? OverlayPointSize() : points
             return true
         }
         session.overlaySizePercent = sizePercent.map { HudLayout.clampSizePercent($0, for: spec) }
@@ -439,10 +459,16 @@ extension AppStore {
     /// never kept alive. Used on explicit close and when the program exits. No-op (false) with no overlay.
     @discardableResult public func closeOverlay(_ sessionID: UUID) -> Bool {
         guard let session = session(withID: sessionID), session.overlayActive else { return false }
+        // a page companion is its page: every way the page closes ends the row, which releases the page once
+        if session.content == .page, session.htmlOverlay != nil {
+            closeSession(sessionID)
+            return true
+        }
         let replica = session.overlayReplica
         session.overlayReplica = nil
         session.overlayActive = false
         session.overlayHidden = false
+        session.forgetSessionCoverHolds()
         session.overlaySurface?.teardown()
         session.overlaySurface = nil
         HtmlOverlayReleases.shared.release(session.htmlOverlay)
@@ -451,6 +477,7 @@ extension AppStore {
         session.overlayCwd = nil
         session.overlayWait = false
         session.overlaySizePercent = nil
+        session.overlayPoints = OverlayPointSize()
         session.overlayBackgroundColor = nil
         // every teardown routes through here — explicit close, ⌘W, the program's own exit, a replacement —
         // so discarding the HUD here is what keeps `hudActive` and its body file from outliving the slot they
@@ -541,8 +568,9 @@ extension AppStore {
         guard session.rendersPane(pane) else { return .paneNotVisible }
         session.setPaneOverlayExitCode(nil, pane: pane)
         session.remoteOverlays.clearFailure(pane)
-        session.setPaneOverlay(PaneOverlay(command: command, cwd: cwd, backgroundColor: backgroundColor,
-                                           wait: wait), pane: pane)
+        var overlay = PaneOverlay(command: command, cwd: cwd, backgroundColor: backgroundColor, wait: wait)
+        overlay.holdsSessionCover = session.coverOverlayActive
+        session.setPaneOverlay(overlay, pane: pane)
         scheduleTreeChanged()
         return nil
     }

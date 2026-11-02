@@ -100,20 +100,21 @@ struct Browser: ParsableCommand {
         subcommands: [Clear.self, Links.self]
     )
 
-    /// `agtermctl browser links [browser|overlay]`: no mode reads the setting. App-wide, so no `--window`.
+    /// `agtermctl browser links [MODE]`: no mode reads the setting. App-wide, so no `--window`.
     struct Links: RequestCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Set or read where a clicked web link in a terminal opens (browser|overlay).",
+            abstract: "Set or read where a clicked web link in a terminal opens (browser|overlay|overlay95|overlay75|overlay50).",
             discussion: "overlay opens http and https links in a full session web overlay with JavaScript, navigation "
-                + "buttons and the saved browser store; with no MODE the current one is printed. A link in a HUD, a link "
+                + "buttons and the saved browser store; overlay95, overlay75 and overlay50 open it at that percent of "
+                + "the session. With no MODE the current one is printed. A link in a HUD, a link "
                 + "clicked while a HUD is up or the terminal is zoomed, and a link the overlay cannot show open in the browser."
         )
-        @Argument(help: "Mode: browser or overlay. Omit to read the current mode.") var mode: String?
+        @Argument(help: "Mode: browser, overlay, overlay95, overlay75 or overlay50. Omit to read the current mode.") var mode: String?
         @OptionGroup var options: BasicOptions
 
         func validate() throws {
             guard let mode else { return }
-            guard LinkOpenMode(rawValue: mode) != nil else { throw ValidationError("mode must be browser or overlay") }
+            guard LinkOpenMode(rawValue: mode) != nil else { throw ValidationError("mode must be browser, overlay, overlay95, overlay75 or overlay50") }
         }
 
         func makeRequest() throws -> ControlRequest {
@@ -872,7 +873,7 @@ struct Version: RequestCommand {
         _ = _NSGetExecutablePath(nil, &size)
         var buffer = [CChar](repeating: 0, count: Int(size))
         guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
-        guard let resolved = realpath(buffer, nil) else { return String(cString: buffer) }
+        guard let resolved = realpath(buffer, nil) else { return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self) }
         defer { free(resolved) }
         return String(cString: resolved)
         #elseif canImport(Glibc)

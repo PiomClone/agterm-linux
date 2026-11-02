@@ -38,6 +38,7 @@ its *needs* column, so searching this page for `claude` or `kiro` finds those di
 |---|---|---|
 | [agent-reset](agent-reset/) | one chord clears the pane's Claude Code or codex run, and nothing when neither is running | 0.26.0, python3, Claude Code or Codex |
 | [annotate-claude-replies](annotate-claude-replies/) | mark up Claude's answers in revdiff and send the notes back | 0.13.0, revdiff, python3, Claude Code |
+| [annotate-document](annotate-document/) | review a plan, a document or a draft as a rendered page, and hand the notes back to Claude Code | 0.38.1, python3, Claude Code |
 | [annotate-pane-output](annotate-pane-output/) | mark up what the pane just printed in revdiff and send the notes back to whatever is running there | 0.13.0, revdiff, python3 |
 | [antigravity-agent-status](antigravity-agent-status/) | Antigravity CLI sessions report active, blocked, and completed onto their sidebar row | 0.7.1, Antigravity CLI |
 | [backlog-picker](backlog-picker/) | pick one of the repo's written-down deferred items and hand it to the agent in the pane | 0.20.2, python3, Claude Code |
@@ -47,6 +48,7 @@ its *needs* column, so searching this page for `claude` or `kiro` finds those di
 | [close-tab-when-done](close-tab-when-done/) | arm a tab with a chord and it closes itself when the agent stops replying | 0.22.0, jq, Claude Code |
 | [container-agent-status](container-agent-status/) | a containerized agent reports status onto its sidebar row via a TCP notification to the host | 0.7.1, nc, timeout, Claude Code |
 | [copilot-agent-status](copilot-agent-status/) | Copilot CLI sessions report active, blocked, and completed onto their sidebar row | 0.7.1, Copilot CLI |
+| [flag-recent-agents](flag-recent-agents/) | one chord lists the sessions whose agents reported a status lately, lets you untick any, and flags the rest | 0.38.0, jq |
 | [html-doc-overlay](html-doc-overlay/) | ask Claude Code for a page about the issue, PR, plan or topic in hand, read it in an overlay, and optionally share it on an expiring link | 0.33.0, jq, python3, Claude Code, cloudflared for sharing |
 | [kimi-agent-status](kimi-agent-status/) | Kimi Code sessions report agent status onto their sidebar row | 0.3.1, Kimi Code |
 | [kiro-agent-status](kiro-agent-status/) | Kiro CLI sessions report active, blocked, and completed onto their sidebar row | 0.7.1, Kiro CLI |
@@ -62,6 +64,7 @@ its *needs* column, so searching this page for `claude` or `kiro` finds those di
 
 | recipe | what it does | needs |
 |---|---|---|
+| [claude-pasted-images](claude-pasted-images/) | draw an image pasted into Claude Code under the prompt that carried it | 0.3.1, Claude Code |
 | [flagged-dashboard](flagged-dashboard/) | grid the flagged panes that are running something, one chord to show and dismiss | 0.20.0, jq |
 | [fzf-path-picker](fzf-path-picker/) | pick a path with fzf and type it into the shell | 0.8.0, fzf, fd, zsh |
 | [native-dir-picker](native-dir-picker/) | pick a directory in the native picker and type it into the shell | 0.19.0, fd, jq |

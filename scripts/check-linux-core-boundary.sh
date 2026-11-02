@@ -14,12 +14,12 @@ git -C "$ROOT" rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null || {
 }
 
 failed=0
-if rg -n '^[[:space:]]*import[[:space:]]+(AppKit|SwiftUI|Metal|MetalKit|GhosttyKit|Glibc|CoreGraphics|CGtk|Gtk|Adwaita)([[:space:]]|$)' "$CORE"; then
+if rg --case-sensitive -n '^[[:space:]]*import[[:space:]]+(AppKit|SwiftUI|Metal|MetalKit|GhosttyKit|Glibc|CoreGraphics|CGtk|Gtk|Adwaita)([[:space:]]|$)' "$CORE"; then
   echo "agtermCore imports a prohibited host module" >&2
   failed=1
 fi
 
-host_symbols="$(rg -n '\b(ghostty|gtk|adw)_[[:alnum:]_]+' "$CORE" | rg -v '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
+host_symbols="$(rg --case-sensitive -n '\b(ghostty|gtk|adw)_[[:alnum:]_]+' "$CORE" | rg -v '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
 if [[ -n "$host_symbols" ]]; then
   printf '%s\n' "$host_symbols"
   echo "agtermCore references a prohibited host API symbol" >&2

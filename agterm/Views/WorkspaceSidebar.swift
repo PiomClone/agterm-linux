@@ -76,7 +76,7 @@ struct WorkspaceSidebar: NSViewRepresentable {
         // on launch AppKit makes the sidebar the window's initial first responder; hand focus to the terminal.
         context.coordinator.focusActiveTerminal()
 
-        let scroll = NSScrollView()
+        let scroll = SidebarScrollView()
         scroll.identifier = NSUserInterfaceItemIdentifier("agterm-sidebar-scroll")
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
@@ -99,15 +99,16 @@ struct WorkspaceSidebar: NSViewRepresentable {
         // (GhosttyApp.notificationBadgeEnabled) is NOT observable and drives a re-reconcile via
         // .agtermAppearanceChanged, like toolbarMode.
         _ = store.workspaces.map {
-            ($0.id, $0.name, $0.unseenCount, $0.sessions.map {
+            ($0.id, $0.name, $0.unseenCount, $0.tint, $0.sessions.map {
                 ($0.id, $0.displayName, $0.hasSplit, $0.splitAxis, $0.unseenCount, $0.agentIndicator, $0.flagged,
-                 $0.remoteConnection)
+                 $0.remoteConnection, $0.tint)
             })
         }
         _ = store.selectedSessionID
         _ = store.sidebarSelectionIDs
         // sidebarMode flips the whole data source (tree ↔ flagged view), so a mode change must rebuild.
         _ = store.sidebarMode
+        _ = store.flaggedOrder // the flat and plain rows follow it; a control move changes nothing else read here
         // the marked set restricts the tree to its members while the filter is on; BOTH fields are read so
         // a membership change or a filter flip takes the rebuild branch.
         _ = store.focusedWorkspaceIDs
@@ -128,7 +129,7 @@ struct WorkspaceSidebar: NSViewRepresentable {
         /// Root workspace nodes in store order, rebuilt from the store on each reload from cached instances.
         private var roots: [SidebarNode] = []
         /// Cache of node instances keyed by id, so identity is stable across reloads.
-        private var nodeCache: [UUID: SidebarNode] = [:]
+        var nodeCache: [UUID: SidebarNode] = [:]
         /// Guards `syncSelection` against re-entering the store via the selection-change callback it fires.
         private var applyingSelection = false
         /// Last session id whose row was revealed (expanded owner + scrolled into view). Gates the intrusive
@@ -156,6 +157,9 @@ struct WorkspaceSidebar: NSViewRepresentable {
         private var expandedWorkspaceIDs = Set<UUID>() {
             didSet { store.noteSidebarExpansion(expandedWorkspaceIDs) }
         }
+        /// Parents whose companion rows are open, tracked like `expandedWorkspaceIDs`: a suppressed reveal
+        /// opens a folded parent without touching `Session.isExpanded`.
+        var expandedParentIDs = Set<UUID>()
         /// Set true around PROGRAMMATIC `expandItem`/`collapseItem` (the launch/rebuild re-apply, the
         /// `syncSelection` reveal, the focus force-expand): the didExpand/DidCollapse callbacks still update
         /// the visual `expandedWorkspaceIDs` but SKIP the persist write-back, so a view-only reveal never
@@ -196,7 +200,9 @@ struct WorkspaceSidebar: NSViewRepresentable {
         private var lastSidebarFontSize: CGFloat = CGFloat(AppSettings.defaultSidebarFontSize)
 
         /// Centered hint floating over the empty outline in flagged mode; hidden otherwise.
+        private weak var emptyState: NSStackView?
         private weak var emptyStateLabel: NSTextField?
+        private weak var emptyStateAddButton: NSButton?
 
         init(store: AppStore, actions: AppActions) {
             self.store = store
@@ -230,6 +236,8 @@ struct WorkspaceSidebar: NSViewRepresentable {
             // the per-workspace collapse/expand poke (workspace.collapse/expand) is store-scoped the same way.
             NotificationCenter.default.addObserver(self, selector: #selector(setWorkspaceExpandedNotified(_:)),
                                                    name: .agtermSetWorkspaceExpanded, object: store)
+            NotificationCenter.default.addObserver(self, selector: #selector(setSessionExpandedNotified(_:)),
+                                                   name: .agtermSetSessionExpanded, object: store)
             // a theme change (new terminal foreground) re-tints the visible rows in place.
             NotificationCenter.default.addObserver(self, selector: #selector(appearanceChanged),
                                                    name: .agtermAppearanceChanged, object: nil)
@@ -362,6 +370,8 @@ struct WorkspaceSidebar: NSViewRepresentable {
         private struct TreeShape: Equatable {
             let workspaceID: UUID
             let sessionIDs: [UUID]
+            /// Each session's parent while companions nest, empty otherwise.
+            var parentIDs: [UUID?] = []
         }
 
         /// A row's visible content: label (workspace name or session `displayName`), split-rectangle icon,
@@ -383,6 +393,10 @@ struct WorkspaceSidebar: NSViewRepresentable {
             let focusMember: Bool
             /// The remote row's stream notice, nil while it is up or for a local row.
             var presentationNotice: String?
+            /// The row's own tint, so a recolor or a clear reloads just that row.
+            var tint: SidebarTint?
+            /// Names of a folded parent's companions that need attention.
+            var foldedAttention: [String] = []
 
             func differsOnlyInLabel(from other: RowContent) -> Bool {
                 var relabeled = self
@@ -423,9 +437,12 @@ struct WorkspaceSidebar: NSViewRepresentable {
         /// `visibleWorkspaces`, so marking a workspace or flipping the focus filter counts as a shape change too.
         private func currentShape() -> [TreeShape] {
             guard rendersWorkspaceRows else {
-                return [TreeShape(workspaceID: Self.flaggedShapeID, sessionIDs: store.flaggedSessions.map(\.id))]
+                return [TreeShape(workspaceID: Self.flaggedShapeID, sessionIDs: store.orderedFlaggedSessions.map(\.id))]
             }
-            return workspaceProjection.map { TreeShape(workspaceID: $0.workspace.id, sessionIDs: $0.sessions.map(\.id)) }
+            return workspaceProjection.map {
+                TreeShape(workspaceID: $0.workspace.id, sessionIDs: $0.sessions.map(\.id),
+                          parentIDs: nestsCompanions ? $0.sessions.map(\.parentID) : [])
+            }
         }
 
         /// Updates only the rows whose visible content changed — the session row and, for a badge roll-up,
@@ -480,7 +497,7 @@ struct WorkspaceSidebar: NSViewRepresentable {
             RowContent(label: workspace.name, hasSplit: false, splitAxis: .leftRight,
                        unseen: effectiveUnseen(displayedUnseen(for: workspace)),
                        indicator: AgentIndicator(), flagged: false,
-                       focusMember: store.focusedWorkspaceIDs.contains(workspace.id))
+                       focusMember: store.focusedWorkspaceIDs.contains(workspace.id), tint: workspace.tint)
         }
 
         /// The visible content of a session row. One builder shared by `reloadChangedContentRows` and
@@ -491,7 +508,8 @@ struct WorkspaceSidebar: NSViewRepresentable {
                        splitAxis: session.splitAxis,
                        unseen: effectiveUnseen(session.unseenCount),
                        indicator: session.agentIndicator, flagged: session.flagged,
-                       focusMember: false, presentationNotice: presentationNotice(for: session))
+                       focusMember: false, presentationNotice: presentationNotice(for: session), tint: session.tint,
+                       foldedAttention: foldedAttention(forSession: session.id).map(\.displayName))
         }
 
         /// Rebuilds `roots` from the store, reusing cached node instances by id so NSOutlineView item
@@ -512,9 +530,11 @@ struct WorkspaceSidebar: NSViewRepresentable {
             // flat flagged list: non-expandable session rows; no workspace nodes, so they leave the cache.
             if !rendersWorkspaceRows {
                 var seen = Set<UUID>()
-                roots = store.flaggedSessions.map { session in
+                roots = store.orderedFlaggedSessions.map { session in
                     seen.insert(session.id)
-                    return node(for: session.id, kind: .session)
+                    let row = node(for: session.id, kind: .session)
+                    row.children = []
+                    return row
                 }
                 nodeCache = nodeCache.filter { seen.contains($0.key) }
                 outline.reloadData()
@@ -527,10 +547,8 @@ struct WorkspaceSidebar: NSViewRepresentable {
             for (workspace, sessions) in workspaceProjection {
                 let wsNode = node(for: workspace.id, kind: .workspace)
                 seen.insert(workspace.id)
-                wsNode.children = sessions.map { session in
-                    seen.insert(session.id)
-                    return node(for: session.id, kind: .session)
-                }
+                seen.formUnion(sessions.map(\.id))
+                wsNode.children = sessionNodes(for: sessions)
                 newRoots.append(wsNode)
             }
             nodeCache = nodeCache.filter { seen.contains($0.key) }
@@ -542,6 +560,9 @@ struct WorkspaceSidebar: NSViewRepresentable {
             // already-present id are undisturbed (formUnion only adds).
             expandedWorkspaceIDs.formIntersection(Set(store.workspaces.map(\.id)))
             expandedWorkspaceIDs.formUnion(store.workspaces.filter(\.isExpanded).map(\.id))
+            let sessions = store.workspaces.flatMap(\.sessions)
+            expandedParentIDs.formIntersection(Set(sessions.map(\.id)))
+            expandedParentIDs.formUnion(sessions.filter(\.isExpanded).map(\.id))
 
             // restore expansion from the tracked set, not the live outline state, which forgets every
             // workspace a flagged-mode reload left out. A filter applied to a SINGLE marked workspace also force-expands it — a
@@ -558,37 +579,50 @@ struct WorkspaceSidebar: NSViewRepresentable {
                 outline.expandItem(node)
             }
             suppressExpansionPersist = false
+            roots.forEach(applyParentExpansion(under:))
             updateEmptyState()
         }
 
         /// Adds the flagged-mode empty-state hint below the safe-area inset so it clears the titlebar, as a
         /// non-scrolling sibling of the clip view floating above the document. Hidden until it applies.
-        func installEmptyState(in scroll: NSScrollView) {
-            let label = NSTextField(wrappingLabelWithString: "No flagged sessions.\nRight-click a session → Flag.")
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.alignment = .center
-            label.isEditable = false
-            label.isSelectable = false
-            label.drawsBackground = false
-            label.isBordered = false
+        func installEmptyState(in scroll: SidebarScrollView) {
+            let label = NSTextField(labelWithString: "No flagged sessions.")
+            label.lineBreakMode = .byTruncatingTail
             label.font = .preferredFont(forTextStyle: .body)
-            label.isHidden = true
-            scroll.addSubview(label)
-            NSLayoutConstraint.activate([
-                label.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
-                label.topAnchor.constraint(equalTo: scroll.safeAreaLayoutGuide.topAnchor, constant: 40),
-                label.leadingAnchor.constraint(greaterThanOrEqualTo: scroll.leadingAnchor, constant: 16),
-                label.trailingAnchor.constraint(lessThanOrEqualTo: scroll.trailingAnchor, constant: -16),
-            ])
+            let add = EmptyStateLinkButton(title: "Add Sessions…", target: self,
+                                           action: #selector(addFlaggedSessionsClicked(_:)))
+            add.isBordered = false
+            add.setAccessibilityIdentifier("flagged-empty-add")
+            let stack = NSStackView(views: [label, add])
+            stack.orientation = .vertical
+            stack.alignment = .centerX
+            stack.spacing = 6
+            stack.isHidden = true
+            scroll.addSubview(stack)
+            scroll.emptyState = stack
+            emptyState = stack
             emptyStateLabel = label
+            emptyStateAddButton = add
             updateEmptyState()
         }
 
         /// Shows the hint only in flagged mode with nothing flagged; re-tints it to the dimmed theme color.
         func updateEmptyState() {
-            guard let label = emptyStateLabel else { return }
-            label.isHidden = !(store.sidebarMode == .flagged && store.flaggedSessions.isEmpty)
-            label.textColor = (GhosttyApp.shared.terminalForegroundColor ?? .secondaryLabelColor).withAlphaComponent(0.6)
+            guard let stack = emptyState, let label = emptyStateLabel, let add = emptyStateAddButton else { return }
+            let color = (GhosttyApp.shared.terminalForegroundColor ?? .secondaryLabelColor).withAlphaComponent(0.6)
+            stack.isHidden = !(store.sidebarMode == .flagged && store.flaggedSessions.isEmpty)
+            stack.superview?.needsLayout = true
+            label.textColor = color
+            add.attributedTitle = NSAttributedString(string: add.title, attributes: [
+                .foregroundColor: color,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .font: label.font ?? .preferredFont(forTextStyle: .body),
+            ])
+        }
+
+        // the keymap path, so enablement is asked at the click rather than cached on the link.
+        @objc func addFlaggedSessionsClicked(_ sender: NSButton) {
+            actions.perform(.editFlaggedSessions, in: sender.window)
         }
 
         /// Seeds the tracked expansion set from the persisted `Workspace.isExpanded`. Sets only the tracked
@@ -637,23 +671,24 @@ struct WorkspaceSidebar: NSViewRepresentable {
         }
 
         func outlineViewItemDidExpand(_ notification: Notification) {
-            guard let node = notification.userInfo?[Self.outlineItemUserInfoKey] as? SidebarNode,
-                  node.kind == .workspace else { return }
+            guard let node = notification.userInfo?[Self.outlineItemUserInfoKey] as? SidebarNode else { return }
+            guard node.kind == .workspace else { return parentExpansionChanged(node, expanded: true) }
             expandedWorkspaceIDs.insert(node.id)
             // persist ONLY a genuine user expand: a programmatic reveal or rebuild re-apply sets
             // suppressExpansionPersist, updating the visual set above without burning the persisted intent.
             if !suppressExpansionPersist { store.setWorkspaceExpanded(node.id, expanded: true) }
+            applyParentExpansion(under: node)
         }
 
         func outlineViewItemDidCollapse(_ notification: Notification) {
-            guard let node = notification.userInfo?[Self.outlineItemUserInfoKey] as? SidebarNode,
-                  node.kind == .workspace else { return }
+            guard let node = notification.userInfo?[Self.outlineItemUserInfoKey] as? SidebarNode else { return }
+            guard node.kind == .workspace else { return parentExpansionChanged(node, expanded: false) }
             expandedWorkspaceIDs.remove(node.id)
             // persist only a genuine user collapse; programmatic collapses are suppressed (see didExpand).
             if !suppressExpansionPersist { store.setWorkspaceExpanded(node.id, expanded: false) }
         }
 
-        private func node(for id: UUID, kind: SidebarNode.Kind) -> SidebarNode {
+        func node(for id: UUID, kind: SidebarNode.Kind) -> SidebarNode {
             if let existing = nodeCache[id] { return existing }
             let node = SidebarNode(kind: kind, id: id)
             nodeCache[id] = node
@@ -681,9 +716,11 @@ struct WorkspaceSidebar: NSViewRepresentable {
             // expanded; expand its owner first so the row resolves. A VIEW action, so suppress the persist:
             // navigating into a deliberately collapsed workspace shows the session without un-collapsing it
             // on disk.
-            if selectionChanged, let owner = ownerWorkspaceNode(ofSession: selectedID), !outline.isItemExpanded(owner) {
+            if selectionChanged {
                 suppressExpansionPersist = true
-                outline.expandItem(owner)
+                for owner in ownerNodes(ofSession: selectedID) where !outline.isItemExpanded(owner) {
+                    outline.expandItem(owner)
+                }
                 suppressExpansionPersist = false
             }
             var rows = IndexSet()
@@ -705,9 +742,16 @@ struct WorkspaceSidebar: NSViewRepresentable {
             lastRevealedSelection = selectedID
         }
 
-        /// The workspace node whose `children` hold `sessionID` — used to expand a collapsed owner first.
-        private func ownerWorkspaceNode(ofSession sessionID: UUID) -> SidebarNode? {
-            roots.first { $0.children.contains { $0.id == sessionID } }
+        /// The workspace node holding `sessionID` and, for a nested companion, its parent's node, outermost
+        /// first, so a reveal expands them in order.
+        private func ownerNodes(ofSession sessionID: UUID) -> [SidebarNode] {
+            for workspace in roots {
+                if workspace.children.contains(where: { $0.id == sessionID }) { return [workspace] }
+                if let parent = workspace.children.first(where: { $0.children.contains { $0.id == sessionID } }) {
+                    return [workspace, parent]
+                }
+            }
+            return []
         }
 
         func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -779,7 +823,7 @@ struct WorkspaceSidebar: NSViewRepresentable {
 
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
             guard let node = item as? SidebarNode else { return false }
-            return node.kind == .workspace
+            return node.kind == .workspace || !node.children.isEmpty
         }
 
         /// Leading row icons as monochrome template symbols. A flagged SESSION swaps to its base glyph's
@@ -796,6 +840,8 @@ struct WorkspaceSidebar: NSViewRepresentable {
         lazy var flaggedSessionIcon = Self.rowIcon("terminal.fill")
         lazy var flaggedSplitSessionIcon = Self.rowIcon("rectangle.split.2x1.fill")
         lazy var flaggedHorizontalSplitSessionIcon = Self.rowIcon("rectangle.split.1x2.fill")
+        lazy var pageSessionIcon = Self.rowIcon("list.bullet.rectangle")
+        lazy var flaggedPageSessionIcon = Self.rowIcon("list.bullet.rectangle.fill")
         lazy var remoteSessionIcon = Self.rowIcon("cloud")
         lazy var remoteSplitSessionIcon = Self.rowIcon("cloud", weight: .bold)
         lazy var remoteDisconnectedSessionIcon = Self.rowIcon("icloud.slash")
@@ -809,16 +855,38 @@ struct WorkspaceSidebar: NSViewRepresentable {
             return image
         }
 
-        /// The row label from an already-resolved session + its owning workspace name, with no store lookup.
+        /// The row label from an already-resolved session and its owning workspace name.
         func rowLabel(for session: Session, workspaceName: String) -> String {
-            guard flaggedLayout == .flat else { return session.displayName }
-            return "\(session.displayName) : \(workspaceName)"
+            guard let flaggedLayout else { return session.displayName }
+            let label = store.listLabel(for: session)
+            return flaggedLayout == .flat ? "\(label) : \(workspaceName)" : label
         }
 
         func workspaceNode(forID id: UUID) -> SidebarNode? {
             roots.first(where: { $0.id == id })
         }
     }
+}
+
+/// SidebarScrollView centers the flagged empty state below the safe area; the empty state is a
+/// non-scrolling accessory outside NSScrollView's tiled content.
+final class SidebarScrollView: NSScrollView {
+    weak var emptyState: NSView?
+
+    override func layout() {
+        super.layout()
+        guard let emptyState, !emptyState.isHidden else { return }
+        let size = emptyState.fittingSize
+        let width = min(size.width, max(0, bounds.width - 32))
+        let top = safeAreaInsets.top + 40
+        let y = isFlipped ? top : bounds.height - top - size.height
+        emptyState.frame = NSRect(x: ((bounds.width - width) / 2).rounded(), y: y.rounded(), width: width, height: size.height)
+    }
+}
+
+// a first click into a background window only activates it, so the link's click-time check reads that window.
+private final class EmptyStateLinkButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { false }
 }
 
 /// `NSOutlineView` subclass routing the per-row context menu and double-click rename to the coordinator.
@@ -828,6 +896,16 @@ final class SidebarOutlineView: NSOutlineView {
     // terminal, via mouseDown's focusActiveTerminal) makes AppKit re-set `isEmphasized` on the rows — an
     // extra repaint that flicks the selection pill on every click. Programmatic selection never bounces.
     override var acceptsFirstResponder: Bool { false }
+
+    // expansion would widen the column per nesting level and push every row's trailing glyph and badge past the
+    // sidebar edge; the column's autoresizing mask already fits it to the sidebar.
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        autoresizesOutlineColumn = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) { fatalError("init(coder:) is not supported") }
 
     /// Where a row's content belongs: the level-0 disclosure triangle ends at 14pt, and the cell's own 2pt
     /// icon inset supplies the gap after it.

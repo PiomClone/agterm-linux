@@ -21,7 +21,7 @@ extension AppController {
             removePaneOverlaySurface(session, pane: pane)
         }
         for pane in OverlayPane.allCases {
-            setPaneOverlayCoverage(session, pane: pane, covered: session.paneOverlay(pane) != nil)
+            setPaneOverlayCoverage(session, pane: pane, covered: session.paneOverlayVisible(pane))
         }
         updatePaneDim(session)
         if allowFocus, session.id == store.selectedSessionID,
@@ -129,7 +129,7 @@ extension AppController {
     func refreshPaneOverlayCoverage() {
         for session in store.workspaces.flatMap(\.sessions) {
             for pane in OverlayPane.allCases {
-                setPaneOverlayCoverage(session, pane: pane, covered: session.paneOverlay(pane) != nil)
+                setPaneOverlayCoverage(session, pane: pane, covered: session.paneOverlayVisible(pane))
             }
         }
     }

@@ -41,7 +41,7 @@ Code layout:
 
 ### Linux feature parity and platform differences
 
-The `linux-port` branch carries the upstream v0.26.1 terminal model and control protocol, including
+The `linux-port` branch carries the exact upstream v0.39.1 terminal model and control protocol, including
 split/scratch/overlay terminals, Quick terminal input and read-back, terminal zoom, fullscreen,
 recently closed sessions with grouped undo, light/dark themes, configurable toolbar and sidebar text,
 recent-session and attention popovers, agent status in the multi-session dashboard, stable pane status
@@ -49,6 +49,35 @@ routing, control-event subscriptions, held command sessions, per-pane restore ov
 collapse state, workspace focus sets, native script-driven pickers, window minimization, keymap read-back,
 session context, split orientation and pane swapping, three restore modes, zmx session inspection and remote
 attach, and Ctrl/Shift multi-session selection with batch move, close, flag, status, and drag/drop actions.
+It also includes native session and window asks, hooks and event subscriptions, pane-aware HUDs with
+Markdown, per-pane backgrounds, cross-window attention, and managed zmx pane leadership.
+HTML files and URLs can occupy full, floating, or split-pane overlays through `agtermctl`.
+Linux renders them with WebKitGTK 6.0, including source identity, navigation, theme variables,
+load status in `tree`, and a file-manager action corresponding to macOS Show in Finder.
+File pages support the shared DOM command bridge and optional `agterm.request` JavaScript helper,
+submitted values, chromeless panels, and page zoom.
+URL pages can share cookies and site data with `--persistent`; `browser clear` clears that store
+once every persistent page is closed.
+Remote panes retain their last screen while retrying a lost SSH connection, with retry reasons in `tree`.
+Live panes support `session restart` while preserving their pane identity.
+Repeatable keymap leaders, new-session placement preferences, `keymap run`, and `zmx screen` are available.
+The HTML view blocks file and URI-list drag or paste transfers; link drags advertised as URI lists
+are blocked too.
+Attached sessions mirror origin status, context, notifications, HUDs, asks, overlays, and split-layout
+changes through a presentation stream.
+Remote file pages stream their granted assets and bridge requests from the origin through SSH.
+Companions appear as nested, collapsible rows, including terminal duplicates and temporary page companions.
+Closing an attached page view leaves its origin page alive; a parent shell can respawn while its companions remain.
+Session and workspace tints, plain or grouped flagged lists, membership editors, and flagged ordering are
+available through GTK actions and the control socket.
+Overlay hide/show preserves the running program or page, and floating program and page overlays accept
+point dimensions with laid-out size read-back.
+HUDs support sticky placement, optional frames, and Ctrl-clicked Markdown links.
+Asks support text, multiline, radio, checkbox, and Other forms in native GTK surfaces.
+The Attach Remote action reads `remotes.conf` and observes edits while the palette is open.
+`session restart` can replay a readable foreground program, refusing unsupported observations before ending it.
+The Linux control socket and GTK UI share these session actions, including `session lead` on a covered
+pane and daemon-backed reads and typing while a local pane follows an attached viewer.
 The GTK frontend keeps the content toolbar focused on terminal controls.
 Preferences opens with Ctrl+, while Integrations, Keyboard Shortcuts, and About remain available from the command palette.
 The Linux command palette offers **Clear Recent Items** whenever recently closed sessions or workspaces exist.
@@ -57,7 +86,7 @@ Preferences exposes Quick Terminal sizing, cursor shape and blink, and Fresh she
 experimental Live sessions restore.
 Live mode uses the bundled pinned zmx runtime for primary and split panes; scratch, overlay, and Quick
 terminals remain temporary.
-It requires zsh as the password-database login shell and the bundled Ghostty zsh integration.
+It requires zsh or fish as the password-database login shell and the matching bundled Ghostty integration.
 The mode is latched at process startup, and a missing daemon after reboot falls back to recreating the pane
 from its last cleanly captured command.
 
@@ -101,6 +130,8 @@ GTK4 frontend intentionally leaves x/y geometry absent on both Wayland and X11 r
 coordinates it cannot restore.
 The macOS Finder, traffic-light, TCC, entitlement, notarization, Homebrew-cask, and AppKit-specific
 instructions later in this inherited document apply only to upstream agterm.
+macOS input-source locking and Ignore Reduce Transparency have no GTK equivalent;
+Linux leaves input-source selection and transparency policy to the desktop.
 
 Upstream `agterm` is a native macOS terminal for working with AI coding agents across many sessions at once; this fork carries that model to Linux. It is intentionally opinionated: rather than scattering shells across tabs, it organizes them into named workspaces, each holding the sessions for one project or context, so several agent-driven sessions can run side by side and you can move between them without losing track of which is which. The motivation is specific: running several coding agents at once means many long-lived sessions, each progressing on its own, and a tabbed terminal loses track of them quickly. agterm keeps them organized and makes it obvious which session needs you. None of this is limited to agents. It also works as a capable general-purpose terminal for everyday multi-project work.
 
@@ -111,8 +142,7 @@ What it does:
 - **Workspaces.** Sessions are grouped under named workspaces like "work" and "personal", which keeps a screen of concurrent sessions organized. You reach a session by name, by recency, or from the keyboard.
 - **Control API and CLI.** A bundled tool, `agtermctl`, drives almost everything over a local socket: create sessions, type into them, run a program in an overlay and read its exit status, move and resize windows, or post a notification tied to a specific session. A script or an agent can set up and drive its own layout, and send you a notification from the session it was working in.
 - **Splits, scratch, and overlays.** Split a session into two shells side by side or top and bottom, open a scratch terminal over it, or run a program in a full or floating overlay without disturbing the shell underneath.
-- **Live sessions and restore modes.** Quit, update, or relaunch agterm while the processes in primary and split panes keep running, an agent mid-turn included. The next launch reattaches to them with their text and TUI state. It is one of three restore modes in Preferences / Settings ▸ General ▸ Restore sessions, next to fresh shells and re-running cleanly captured commands. Linux packages include the pinned zmx runtime.
-- **Remote sessions.** Open a session running on another host as a row in this sidebar, split included, from File ▸ Attach Remote… or with `agtermctl zmx attach`. Its status, notifications, HUD, and title-bar context follow it, and its panes take this window's size. The remote host runs agterm in Live sessions mode over key-based ssh.
+- **Three restore modes.** Restore fresh shells, rerun cleanly captured commands, or keep primary and split processes alive with zmx. Linux packages include the pinned zmx runtime.
 - **Agent skill.** An installable skill teaches Claude Code or Codex the control model and the `agtermctl` commands, so an agent running inside agterm can build its own layout, run overlays, manage windows, and show images inline without you explaining the API. On Linux, manage it from **Preferences ▸ Integrations**.
 - **Agent status.** A coding agent reports its state (active, blocked, or completed) onto its session's row, so you can see which of many running agents needs you. On Linux, inspect and install the Claude Code, Codex, Pi, OpenCode, and shell hooks from **Preferences ▸ Integrations**.
 
@@ -177,15 +207,9 @@ A file open in the quick terminal, the window's shared scratch overlay:
 
 ### Linux
 
-Linux releases are published from this fork as AppImage, DEB, RPM, and relocatable tar artifacts.
+Linux releases are published from this fork as DEB, RPM, and relocatable tar artifacts.
 Download them from the [agterm-linux releases page](https://github.com/melonamin/agterm-linux/releases).
-
-The AppImage bundles GTK4, libadwaita, the Swift runtime, libghostty, Ghostty resources, and zmx:
-
-```sh
-chmod +x agterm-vX.Y.Z-x86_64.AppImage
-./agterm-vX.Y.Z-x86_64.AppImage
-```
+These formats use the host's WebKitGTK 6.0 package, including its web and network process helpers.
 
 Install the native package for Ubuntu 24.04 / Debian 13 or newer compatible systems:
 
@@ -199,8 +223,8 @@ On a modern Fedora-compatible system with glibc 2.39 or newer:
 sudo dnf install ./agterm-linux-vX.Y.Z-x86_64.rpm
 ```
 
-The tarball bundles the Swift runtime, libghostty, Ghostty resources, and zmx but expects GTK4 and
-libadwaita from the host:
+The tarball bundles the Swift runtime, libghostty, Ghostty resources, and zmx but expects GTK4,
+libadwaita, and WebKitGTK 6.0 from the host:
 
 ```sh
 tar xzf agterm-linux-vX.Y.Z-x86_64.tar.gz
@@ -225,7 +249,7 @@ Each row shows its status and target, and every install, update, or repair prese
 
 - **Command Line Tool** reports a DEB/RPM-owned `/usr/bin/agtermctl` as package-managed and never replaces it.
   A relocatable tar or development build can create an agterm-owned launcher at `~/.local/bin/agtermctl`.
-  AppImage mounts and Flatpak application paths are sandbox-local, so the app does not create a host launcher into either one; install a native package, extract the AppImage, or use the tar archive for a persistent CLI.
+  Flatpak application paths are sandbox-local, so the app does not create a host launcher into one; install a native package or use the tar archive for a persistent CLI.
 - **Agent Status Hooks** safely installs Claude Code, Codex, Pi, OpenCode, and shell lifecycle hooks, preserves existing settings and file modes, and reports malformed or user-owned conflicts for manual resolution.
   The Preferences action and `agtermctl integration install hooks` intentionally operate offline on host configuration.
   They do not use the control socket or add a `Command` case because requiring a running agterm instance would be less reliable and would put filesystem ownership in the wrong boundary.
@@ -244,7 +268,9 @@ The macOS upstream app exposes the equivalent one-time actions in its **Help** m
 Requirements:
 
 - Swift 6.3.2.
-- GTK4, libadwaita, libepoxy, pkg-config, git, curl, ca-certificates, and xz.
+- GTK4, libadwaita, WebKitGTK 6.0, libepoxy, pkg-config, git, curl, ca-certificates, and xz.
+- Python 3 at runtime for the bundled Codex status hooks; DEB and RPM installs include this dependency.
+- SVG image loading at runtime for toolbar and sidebar icons (`librsvg2-common` on Ubuntu/Debian).
 - zsh, required by the shared `agtermCore` tests.
 - Zig 0.16.0 for the vendored libghostty and zmx builds.
 
@@ -257,6 +283,9 @@ cd agterm-linux && swift build
 dependency, shell integration, and compiled `xterm-ghostty` terminfo.
 It reuses vendored caches only when libghostty matches the current architecture, the Ghostty resources are
 complete, and the zmx revision matches; release staging rejects a partial cache.
+The libghostty cache stamp includes every applied patch.
+Linux applies upstream's mailbox teardown fix before its renderer patches; the compatibility patch drops
+two Kitty clipboard message cases absent from the Linux Ghostty pin while retaining the teardown drain.
 At runtime Linux advertises `TERM=xterm-ghostty` only when both shell integration and the sibling terminfo database
 resolve, and safely uses `TERM=xterm-256color` when they do not.
 
@@ -273,17 +302,15 @@ cd ..
 scripts/dist-linux.sh
 ```
 
-The complete release set uses one staged payload for tar, DEB, RPM, and AppImage.
-It additionally requires nFPM, linuxdeploy with `linuxdeploy-plugin-gtk.sh`, ImageMagick, RPM tools,
-and `cpio`:
+The release set uses one staged payload for tar, DEB, and RPM.
+It additionally requires nFPM, ImageMagick, RPM tools, and `cpio`:
 
 ```sh
-scripts/package-linux.sh 0.14.0
-scripts/verify-linux-packages.sh 0.14.0
+scripts/package-linux.sh 0.33.1
+scripts/verify-linux-packages.sh 0.33.1
 ```
 
-The GitHub release workflow pins and verifies nFPM, linuxdeploy, the GTK plugin, and the AppImage
-runtime before packaging.
+The GitHub release workflow pins and verifies nFPM before packaging.
 Branch and release CI compile the GTK package in Swift 6 language mode and run the complete real GTK
 accessibility smoke suite in an isolated HOME, state directory, control socket, D-Bus session, and X display.
 
@@ -294,6 +321,8 @@ Local helper scripts:
 - `scripts/flatpak-linux.sh` builds and installs the local Flatpak manifest.
 - `scripts/test-linux-ui.sh` runs the GTK accessibility smoke suite locally under Xvfb (the same
   scenarios CI runs; works on dbus-broker hosts — the script pre-starts the AT-SPI registry).
+  It also checks rendered forms and floating overlays; see [Linux visual validation](agterm-linux/docs/visual-validation.md).
+  The input-method regression requires IBus and its GTK4 module (`ibus ibus-gtk4` on Ubuntu/Debian).
 
 ### macOS
 
@@ -350,7 +379,7 @@ Linux releases use tags in the `linux-vX.Y.Z` namespace and are built from `linu
 If Linux-only fixes must follow an already-published upstream-matched release, use an immutable
 `linux-vX.Y.Z+linux.N` revision tag instead of moving or replacing the published tag.
 The release workflow checks out the exact existing tag, reruns shared-core tests and strict SwiftLint,
-builds and validates all four formats, then publishes the x86_64 artifacts, consolidated SHA-256
+builds and validates the release formats, then publishes the x86_64 artifacts, consolidated SHA-256
 checksums, and GitHub build-provenance attestations.
 Release notes copy the matching upstream product notes, omit its macOS installation boilerplate, and
 append a separate Linux section with formats, compatibility, verification, and source details.
@@ -360,21 +389,21 @@ Create and push the tag after the release commit is already on `linux-port`:
 ```sh
 git switch linux-port
 git pull --ff-only origin linux-port
-git tag -a linux-v0.11.0 -m "agterm-linux v0.11.0"
-git push origin linux-v0.11.0
+git tag -a linux-v0.33.1 -m "agterm-linux v0.33.1"
+git push origin linux-v0.33.1
 ```
 
 An existing tag can be rebuilt from the Actions UI or with:
 
 ```sh
-gh workflow run release-linux.yml --ref linux-port -f tag=linux-v0.11.0
+gh workflow run release-linux.yml --ref linux-port -f tag=linux-v0.33.1
 ```
 
 Verify a downloaded release with either mechanism:
 
 ```sh
-sha256sum --check agterm-linux-v0.11.0-SHA256SUMS
-gh attestation verify agterm-v0.11.0-x86_64.AppImage \
+sha256sum --check agterm-linux-v0.33.1-SHA256SUMS
+gh attestation verify agterm-linux-v0.33.1-x86_64.tar.gz \
   --repo melonamin/agterm-linux
 ```
 
@@ -550,6 +579,22 @@ cd agterm-linux && swift build -c release --product agtermctl-linux
 # the binary is at agterm-linux/.build/release/agtermctl-linux
 ```
 
+For example, with `agtermctl` on `PATH`:
+
+```sh
+ws=$(agtermctl workspace new demo)                        # capture the new workspace's id
+sid=$(agtermctl session new --workspace "$ws" --cwd "$PWD" --no-select)
+agtermctl session split on --axis horizontal --target "$sid" # add a top-and-bottom shell
+agtermctl session type $'pwd\n' --target "$sid"           # drive a session you are not looking at
+agtermctl session text --target "$sid" --lines 10         # read its terminal back
+agtermctl session status blocked --target "$sid"          # set the sidebar status glyph
+printf '%s\n' staging production | agtermctl pick --prompt "Deploy where?"   # open the native picker
+agtermctl ask "Deploy now?" --button yes=Deploy --button no=Not\ yet --default no  # ask a question, get the button
+agtermctl tree --json                                     # dump the whole model as JSON
+```
+
+`session type` returns once the keystrokes are queued, so a following `session text` races the shell, and `pick` and `ask` block until someone answers.
+
 Linux also has local integration commands that do not connect to the control socket and work while agterm is stopped:
 
 ```sh
@@ -571,11 +616,11 @@ These local commands ignore `--socket` and do not require a running app.
 
 Each command targets a session or workspace by its UUID, a unique prefix of that UUID (git-style), or the keyword `active` (the selected session / current workspace). `--target` defaults to `active`, so the current one rarely needs to be named. Mutating commands normally print the affected id; batch `session close` and `session move` accept repeated `--target` options and print the number of sessions actually changed. `tree` prints the workspace and session tree. Add `--json` for the raw response, or `--socket PATH` to override the socket path. The exit code is zero on success, non-zero on error.
 
-Sessions come back on the next launch with their directory, font size, and split state. **Preferences / Settings ▸ General ▸ Restore sessions** chooses fresh shells, re-run commands, or live sessions. Live mode wraps every primary and split pane; scratch, overlay, and quick terminals remain temporary. A clean quit leaves each live process running and captures the foreground command as a fallback. The next launch reattaches when the daemon survived. If the daemon is missing after an orderly machine restart, zmx creates it with the captured command; the pane remains live and later launches reattach normally.
+On macOS, sessions come back on the next launch with their directory, font size, and split state. **Settings ▸ General ▸ Restore sessions** chooses fresh shells, re-run commands, or live sessions. Live mode wraps every primary and split pane; scratch, overlay, and quick terminals remain temporary. A clean quit leaves each live process running and captures the foreground command as a fallback. The next launch reattaches when the daemon survived. If the daemon is missing after an orderly machine restart, zmx creates it with the captured command; the pane remains live and later launches reattach normally.
 
 The fallback has three exclusions. A pane in a window closed before quit has no capture and starts a fresh shell if its daemon is missing. A hard power loss or force quit never reaches capture. A command refused by `restore-denylist.conf`, carrying a control character, or captured with invalid UTF-8 also starts a fresh shell. SIGTERM leaves live daemons running but skips the clean-quit capture path. `agtermctl zmx list` shows every daemon and the pane that claims it, `agtermctl zmx prune` clears the detached ones no pane claims, and `agtermctl restore mode` reads or sets the policy without opening Settings. Switching away from Live sessions and restarting ends the detached live processes. A launch that still requests Live sessions but cannot use it preserves them for a later eligible launch.
 
-Live restore keeps the running process, usable text and TUI state, and normal terminal colors. The reconstructed screen does not retain inline images, earlier OSC 133 prompt markers, program-changed palette entries, or hyperlink metadata already attached to cells. New output after reattach behaves normally. Restore modes and the limits of live restore are covered in [Restore & persistence](https://agterm.com/docs#restore), and attaching remote sessions in [Remote sessions](https://agterm.com/docs#remote-sessions).
+Live restore keeps the running process, usable text and TUI state, and normal terminal colors. The reconstructed screen does not retain inline images, earlier OSC 133 prompt markers, program-changed palette entries, or hyperlink metadata already attached to cells. New output after reattach behaves normally.
 
 ### Native picker
 
@@ -702,6 +747,32 @@ By default an overlay opens on its `--target` without switching the active sessi
 `--block` runs the program in the overlay (rendering normally) and blocks until it exits, then exits with the program's status — useful in a script that needs the outcome of an interactive run. The program's output stays its own concern: a TUI writes its result to its own file (for example `revdiff --output=…`) which the script reads, while `--block` reports only the exit status (the overlay never captures stdout). `--block` can't be combined with `--wait`; `session overlay result` reports the last overlay's exit status on demand for a manual open → poll flow.
 
 By default the overlay fills the pane, drawn translucent, hiding the session beneath it. Pass `--size-percent N` (1–100) for a *floating* variant instead: an opaque, framed panel sized to N% of the pane in both dimensions and centered in it, with the session still visible around it. Useful for a small auxiliary program (a picker, a monitor) that you want floating over — not replacing — the terminal you're working in. It composes with `--block` (a blocking floating overlay). Like a full overlay it opens in the background and runs even when the target is not active; pass `--follow` to switch the user to the target as it opens.
+
+An overlay can also show a local HTML file or a web page instead of running a program:
+
+```sh
+agtermctl session overlay open --html ./report.html --cwd . --navigation --follow
+agtermctl session overlay open --url http://localhost:5173/ --navigation --js
+agtermctl session overlay reload --current
+agtermctl session overlay close
+```
+
+`--cwd` grants an HTML file access to assets within that directory; omit it for a self-contained
+page with no local file access.
+Page JavaScript is off by default and requires `--js`.
+The `--navigation` toolbar adds browser navigation and Open in Browser, plus Show in Files for local
+pages or Copy Link for URLs.
+The page's load state and current address are readable in `tree --json` under `htmlOverlays`.
+`session overlay result --page ID` reads a submitted or dismissed HTML page outcome.
+File pages can use `data-agterm` buttons and forms with page JavaScript disabled; `--js` also enables
+`agterm.request("session.rename", {args: {name: "Review"}})`.
+Use `session overlay submit VALUE` to return a value and close the page, or open with `--block`
+to wait for that outcome.
+`--chromeless` hides the toolbar on file pages, and Ctrl+/Ctrl−/Ctrl+0 adjust page zoom.
+URL pages use ephemeral storage by default; `--persistent` shares a store within the active state directory.
+`agtermctl browser clear` waits for storage removal and refuses while any persistent page remains open.
+The overlay `text` and `copy` commands apply only to program overlays.
+The [HTML document overlay recipe](cookbook/html-doc-overlay/) contains generated-page examples.
 
 A session's terminal surface is created lazily — it does not exist until the session has been shown at least once. Injecting text into a never-shown session therefore fails with `session not realized` unless you pass `--select`, which selects the session (realizing its surface) before injecting:
 
@@ -892,7 +963,16 @@ For Codex, the installer merges a matching set of lifecycle hooks into `~/.codex
 
 For Pi, the installer copies a bundled TypeScript lifecycle extension to `~/.pi/agent/extensions/agterm-status.ts` when Pi has already created `~/.pi/agent`. It sets `active --blink` when Pi starts work and `completed --auto-reset` only when it settles — after automatic retries, compaction retries, and queued continuations. Pi deliberately has no built-in permission prompt or structured question event, so the extension does not infer `blocked` from its prose. It preserves a same-named extension without agterm's ownership marker; restart Pi or run `/reload` after installing or upgrading it.
 
-For OpenCode, the installer copies a bundled JavaScript lifecycle plugin to `~/.config/opencode/plugins/agterm-status.js` when OpenCode has already created `~/.config/opencode`. The file exports only the plugin function (OpenCode's legacy loader treats every export as a plugin). OpenCode `session.status` `busy`/`retry` set `active --blink` and remember the sessionID; `idle` clears that id and sets `completed --auto-reset` only when no session remains busy (so a task subagent's busy/idle pair cannot paint completed onto a still-working parent). Permission/question prompts set `blocked`. For a session already reported busy, a turn-ending `session.error` also sets `blocked` and suppresses the following `session.status(idle)` that OpenCode's halt path always publishes — including a sibling session's later idle, since every session of one OpenCode instance drives the same pane and a clean sibling must not erase a failed turn. Abort (`MessageAbortedError`) is ignored so Esc ends on completed, and a context overflow waits for the next event: `busy` means auto-compaction resumed and nothing is reported, while `idle` means the turn really ended and sets `blocked`. Reply/reject events clear blocked with `active --blink`. Deprecated `session.idle` is ignored so it does not double-fire with `session.status(type=idle)`. It preserves a same-named plugin without agterm's ownership marker; restart OpenCode after installing or upgrading it.
+For OpenCode, the Linux installer probes the interactive login shell's major version and copies the corresponding
+managed entrypoint: `plugins/agterm-status.js` for v1 or `plugins/agterm-v2/tui.js` for v2.
+For v2 it respects exported `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`; v1 keeps `~/.config/opencode`.
+An explicitly empty v2 override skips installation.
+It uses an existing managed entrypoint
+when the CLI cannot be detected.
+Preferences offers v1, v2, or skip when the major is unknown; the offline CLI accepts
+`integration install hooks --opencode-version v1|v2|skip`.
+It preserves unmarked files in either version's destination.
+For the legacy v1 plugin: The file exports only the plugin function (OpenCode's legacy loader treats every export as a plugin). OpenCode `session.status` `busy`/`retry` set `active --blink` and remember the sessionID; `idle` clears that id and sets `completed --auto-reset` only when no session remains busy (so a task subagent's busy/idle pair cannot paint completed onto a still-working parent). Permission/question prompts set `blocked`. For a session already reported busy, a turn-ending `session.error` also sets `blocked` and suppresses the following `session.status(idle)` that OpenCode's halt path always publishes — including a sibling session's later idle, since every session of one OpenCode instance drives the same pane and a clean sibling must not erase a failed turn. Abort (`MessageAbortedError`) is ignored so Esc ends on completed, and a context overflow waits for the next event: `busy` means auto-compaction resumed and nothing is reported, while `idle` means the turn really ended and sets `blocked`. Reply/reject events clear blocked with `active --blink`. Deprecated `session.idle` is ignored so it does not double-fire with `session.status(type=idle)`. It preserves a same-named plugin without agterm's ownership marker; restart OpenCode after installing or upgrading it.
 
 A generic bash/zsh/fish `shell/integration.sh` (or `.fish`) covers any agent launched as a shell command: it flags `active` while a command matching `AGTERM_AGENT_RE` runs and `idle` at the next prompt. The default regex matches `gemini`, `cursor-agent`, `aider`, `crush`, and `goose`; Claude Code, Codex, Pi, and OpenCode are excluded by default because their own hooks/extensions/plugins drive finer per-turn state that the coarse process-level `active`/`idle` would only fight. Override `AGTERM_AGENT_RE` before sourcing to change the set. All hooks are no-ops outside an agterm session.
 
@@ -909,7 +989,7 @@ Restore always reconstructs the window/session structure. Three process-level li
    power loss captures nothing, and entries in `restore-denylist.conf` are skipped. **Live sessions** keeps
    local primary and split processes in zmx daemons and reattaches on the next launch. A reboot removes those
    daemons, so the saved command is recreated instead. Scratch, overlay, and Quick terminals never survive.
-   Live mode requires zsh as the password-database login shell, plus bundled zmx and zsh integration.
+   Live mode requires zsh or fish as the password-database login shell, plus bundled zmx and the matching shell integration.
    Per-pane `session restore` overrides remain sticky and readable through `tree`; they are stored as shell
    code, so they must not contain secrets.
 2. The saved working directory depends on the `GHOSTTY_ACTION_PWD` callback, which only fires when the shell has Ghostty shell-integration / OSC 7 active (auto-injected for zsh, bash, fish, and nu when the shell-integration resources are present). If the working directory is never reported, a session restores to the directory it was created in.

@@ -26,6 +26,14 @@ extension WindowLibrary {
     /// reloaded list rather than the restore's coverage, because a failed write keeps the entry on disk.
     public func reopenRecentClosedOutcome(_ itemID: UUID, into targetStore: AppStore? = nil) -> RecentClosedReopen? {
         refreshRecentClosedItems()
+        guard let item = recentClosedItems.first(where: { $0.id == itemID }) else { return nil }
+        // a lone companion reopens only under its parent: a live one, or the entry holding the parent reopened
+        // first, the parent's own or its removed workspace's
+        if let parentID = item.session?.snapshot.parentID, openStores().allSatisfy({ $0.session(withID: parentID) == nil }) {
+            guard let parentItem = recentClosedItems.first(where: { $0.holdsTopLevelSession(parentID) }),
+                  reopenRecentClosedOutcome(parentItem.id, into: targetStore) != nil else { return nil }
+            refreshRecentClosedItems()
+        }
         guard let item = recentClosedItems.first(where: { $0.id == itemID }),
               let store = restoreDestination(for: item, requested: targetStore),
               let windowID = windowID(for: store)
@@ -37,6 +45,14 @@ extension WindowLibrary {
         return RecentClosedReopen(window: windowID, complete: !recentClosedItems.contains { $0.id == itemID })
     }
 
+    /// recentClosedItemLacksParent says `itemID` is a lone companion whose parent is neither open nor held by
+    /// another entry, the one reopen that cannot proceed.
+    public func recentClosedItemLacksParent(_ itemID: UUID) -> Bool {
+        guard let parentID = recentClosedItems.first(where: { $0.id == itemID })?.session?.snapshot.parentID,
+              openStores().allSatisfy({ $0.session(withID: parentID) == nil }) else { return false }
+        return !recentClosedItems.contains { $0.holdsTopLevelSession(parentID) }
+    }
+
     /// `reopenRecentClosedReportingWindow` over the newest entry.
     public func reopenLatestRecentClosedReportingWindow(into targetStore: AppStore? = nil) -> UUID? {
         refreshRecentClosedItems()
@@ -46,9 +62,9 @@ extension WindowLibrary {
 
     @discardableResult
     public func clearRecentClosedItems() -> Bool {
-        guard recentClosedStore.clear() else { return false }
-        refreshRecentClosedItems()
-        return true
+        let cleared = recentClosedStore.clear()
+        if cleared { refreshRecentClosedItems() }
+        return cleared
     }
 
     /// Which store restores `item`, in priority order: the window holding the session itself, then the one
@@ -57,6 +73,9 @@ extension WindowLibrary {
     private func restoreDestination(for item: RecentClosedItem, requested: AppStore?) -> AppStore? {
         if item.kind == .session, let id = item.session?.snapshot.id, let owner = store(holdingSession: id) {
             return owner
+        }
+        if let parentID = item.session?.snapshot.parentID {
+            return openStores().first { $0.session(withID: parentID) != nil }
         }
         if let owner = storeHoldingWorkspace(of: item) { return owner }
         return requested ?? activeStore
@@ -98,8 +117,13 @@ extension WindowLibrary {
     private func openStores() -> [AppStore] {
         openIDs().compactMap { store(for: $0) }
     }
+}
 
-    func log(_ message: @autoclosure () -> String) {
-        NSLog("agterm: %@", message())
+private extension RecentClosedItem {
+    func holdsTopLevelSession(_ id: UUID) -> Bool {
+        switch kind {
+        case .session: session?.snapshot.id == id
+        case .workspace: workspace?.snapshot.sessions.contains { $0.id == id && $0.parentID == nil } == true
+        }
     }
 }

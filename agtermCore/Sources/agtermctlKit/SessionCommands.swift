@@ -18,8 +18,9 @@ struct Session: ParsableCommand {
         subcommands: [New.self, Duplicate.self, Close.self, Select.self, Go.self, Rename.self, Reveal.self, Move.self, TypeText.self,
                       Split.self, Swap.self, Lead.self, Scratch.self, Focus.self, Resize.self, Copy.self, Paste.self,
                       SelectAll.self,
-                      Text.self, Status.self, Restore.self, Restart.self, FlagCommand.self, Context.self,
-                      Seen.self, Search.self, Background.self, Overlay.self, Hud.self, Wait.self]
+                      Text.self, Status.self, Restore.self, Restart.self, FlagCommand.self, Context.self, Tint.self,
+                      Seen.self, Search.self, Background.self, Overlay.self, Hud.self, Wait.self,
+                      Collapse.self, Expand.self]
     )
 
     struct New: RequestCommand {
@@ -34,10 +35,15 @@ struct Session: ParsableCommand {
         @Option(name: .long, help: "Place the new session right AFTER this anchor session (id/prefix/active); the anchor carries its own workspace, replacing --workspace.") var after: String?
         @Option(name: .long, help: "Place the new session right BEFORE this anchor session (id/prefix/active); mirror of --after.") var before: String?
         @Flag(name: .long, help: "Create the session in the background without selecting or focusing it (leaves the current selection untouched).") var noSelect = false
+        @Option(name: .long, help: "Create a companion of this session (id/prefix/active), placed under it in the sidebar; a companion target means its parent.") var parent: String?
+        @OptionGroup var tint: TintCreateOptions
         @OptionGroup var options: ClientOptions
         var echoesResultID: Bool { true }
 
         func validate() throws {
+            if parent != nil, workspace != nil || workspaceName != nil || createWorkspace || after != nil || before != nil {
+                throw ValidationError("--parent takes no --workspace, --workspace-name, --create-workspace, --after or --before")
+            }
             if after != nil, before != nil {
                 throw ValidationError("use either --after or --before, not both")
             }
@@ -56,37 +62,63 @@ struct Session: ParsableCommand {
             }
         }
 
+        func run() throws {
+            guard parent != nil else { return try defaultRun() }
+            try runCompanionRequest(makeRequest(), options: options, echoID: true)
+        }
+
         func makeRequest() throws -> ControlRequest {
-            ControlRequest(cmd: .sessionNew, args: options.withWindow(
+            if let parent {
+                return ControlRequest(cmd: .sessionCompanionNew, target: parent, args: options.withWindow(tint.apply(to:
+                    ControlArgs(name: name, cwd: cwd, noSelect: noSelect ? true : nil, command: command,
+                                wait: wait ? true : nil))))
+            }
+            return ControlRequest(cmd: .sessionNew, args: options.withWindow(tint.apply(to:
                 ControlArgs(name: name, cwd: cwd, workspace: workspace, workspaceName: workspaceName,
                             createWorkspace: createWorkspace ? true : nil, noSelect: noSelect ? true : nil,
-                            command: command, wait: wait ? true : nil, after: after, before: before)))
+                            command: command, wait: wait ? true : nil, after: after, before: before))))
         }
     }
 
-    /// No options: the target session names both the destination workspace and the cwd, so a duplicate is
-    /// fully described by `--target` (the GUI half is the sidebar row's "Duplicate").
+    /// The target session names the destination workspace and the cwd, so a plain duplicate is fully described by
+    /// `--target` (the GUI half is the sidebar row's "Duplicate"); `--companion` is "Duplicate as Companion".
     struct Duplicate: RequestCommand {
         static let configuration = CommandConfiguration(
             abstract: "Duplicate a session: a fresh shell in its directory, placed right after it.")
+        @Flag(name: .long, help: "Create a companion copying the session's split layout and starting another copy of each pane's program.")
+        var companion = false
+        @Flag(name: .long, help: "With --companion: create it without selecting or focusing it.")
+        var noSelect = false
         @OptionGroup var target: TargetOptions
         @OptionGroup var options: ClientOptions
         var echoesResultID: Bool { true }
 
+        func validate() throws {
+            if noSelect, !companion { throw ValidationError("--no-select needs --companion") }
+        }
+
+        func run() throws {
+            guard companion else { return try defaultRun() }
+            try runCompanionRequest(makeRequest(), options: options, echoID: true)
+        }
+
         func makeRequest() throws -> ControlRequest {
-            ControlRequest(cmd: .sessionDuplicate, target: target.target, args: options.withWindow())
+            ControlRequest(cmd: companion ? .sessionCompanionDuplicate : .sessionDuplicate, target: target.target,
+                           args: options.withWindow(noSelect ? ControlArgs(noSelect: true) : nil))
         }
     }
 
     struct Close: RequestCommand {
         static let configuration = CommandConfiguration(abstract: "Close a session.")
         @OptionGroup var target: BatchTargetOptions
+        @Flag(name: .long, help: "Give a single close ⌘W's undo grace, so undo inside it brings the running shell back; closes at once when Settings turns undo off.")
+        var undoable = false
         @OptionGroup var options: ClientOptions
 
         func makeRequest() throws -> ControlRequest {
-            let batchArgs = target.batchTargets.map { ControlArgs(targets: $0) }
-            let args = options.withWindow(batchArgs)
-            return ControlRequest(cmd: .sessionClose, target: target.targets.first ?? "active", args: args)
+            let args = ControlArgs(targets: target.batchTargets, undoable: undoable ? true : nil)
+            return ControlRequest(cmd: .sessionClose, target: target.targets.first ?? "active",
+                                  args: options.withWindow(args == ControlArgs() ? nil : args))
         }
     }
 
@@ -103,7 +135,7 @@ struct Session: ParsableCommand {
     struct Go: RequestCommand {
         static let configuration = CommandConfiguration(commandName: "go",
             abstract: "Navigate sessions: next|prev|first|last|next-attention|prev-attention.")
-        @Option(name: .long, help: "Direction: next, prev, first, last, next-attention, or prev-attention (attention = blocked/completed).") var to: String
+        @Option(name: .long, help: "Direction: next, prev, first, last, next-attention, or prev-attention (attention = blocked/completed, plus active when enabled in Settings).") var to: String
         @OptionGroup var options: ClientOptions
 
         func makeRequest() throws -> ControlRequest {
@@ -284,7 +316,7 @@ struct Session: ParsableCommand {
     struct Resize: RequestCommand {
         static let configuration = CommandConfiguration(
             abstract: "Resize a split session's divider (set or nudge the primary-pane fraction).")
-        @Option(name: .customLong("split-ratio"), help: "Absolute primary-role pane fraction 0..1 (e.g. 0.7). Clamped to 0.05..0.95.") var splitRatio: Double?
+        @Option(name: .customLong("split-ratio"), help: "Absolute primary-pane fraction 0..1 of the area below the titlebar (left or top; e.g. 0.7). Clamped to 0.05..0.95.") var splitRatio: Double?
         @Option(name: .customLong("grow-left"), help: "Grow the left pane by this fraction (e.g. 0.05); shrinks the right.") var growLeft: Double?
         @Option(name: .customLong("grow-right"), help: "Grow the right pane by this fraction (e.g. 0.05); shrinks the left.") var growRight: Double?
         @Option(name: .customLong("grow-primary"), help: "Grow the primary pane by this fraction.") var growPrimary: Double?
@@ -535,8 +567,20 @@ struct Session: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Open, read, resize, or close an ephemeral overlay terminal on a session.",
             subcommands: [Open.self, Close.self, Hide.self, Show.self, Toggle.self, Resize.self, Reload.self, Navigate.self,
-                          Result.self, Submit.self, Copy.self, Text.self, RunJob.self, PageServe.self]
+                          Result.self, Submit.self, Copy.self, Text.self, RunJob.self, PageServe.self, PageAttach.self]
         )
+
+        static let widthHelp: ArgumentHelp = "Panel content width in points, in place of --size-percent's width (at most 80% of the session)."
+        static let heightHelp: ArgumentHelp = """
+            Panel content height in points, in place of --size-percent's height (at most 80% of the session); \
+            a page's title strip is added on top.
+            """
+
+        static func validatePoints(width: Int?, height: Int?) throws {
+            if [width, height].contains(where: { ($0 ?? 1) <= 0 }) {
+                throw ValidationError("--width/--height must be positive")
+            }
+        }
 
         /// `--pane` validation for the overlay commands: the two pane roles only, deliberately NOT the shared
         /// `validatePaneArgument`, which also accepts `scratch` — there is no scratch pane to cover, and
@@ -574,8 +618,15 @@ struct Session: ParsableCommand {
             var cwd: String?
             @Flag(name: .long, help: "Keep the overlay open after COMMAND exits (press any key to close).") var wait = false
             @Flag(name: .long, help: Open.blockHelp) var block = false
+            @Flag(name: .long, help: """
+                Open the --html/--url page as a page companion under the target session: a sidebar row of its own, \
+                full size, that closes with its page. Refuses --pane, --size-percent, --width and --height.
+                """)
+            var companion = false
             @Flag(name: .long, help: "Select (switch to) the target session after opening the overlay (default: open without switching).") var follow = false
             @Option(name: .long, help: "Render a floating, framed panel at PERCENT (1-100) of the pane instead of full-size.") var sizePercent: Int?
+            @Option(name: .long, help: Overlay.widthHelp) var width: Int?
+            @Option(name: .long, help: Overlay.heightHelp) var height: Int?
             @Option(name: .long, help: "Solid background color (#rrggbb) for the overlay pane, independent of the session's own.") var backgroundColor: String?
             @Option(name: .long, help: """
                 Scope the overlay to ONE split pane (primary/left/top or split/right/bottom), leaving the sibling pane live and \
@@ -589,6 +640,10 @@ struct Session: ParsableCommand {
             // reject the mutually-exclusive combos + a malformed color at parse time (before any connection),
             // so it's a clean usage error and is unit-testable without a socket.
             func validate() throws {
+                if companion, html == nil && url == nil { throw ValidationError("--companion requires --html or --url") }
+                if companion, pane != nil || sizePercent != nil || width != nil || height != nil {
+                    throw ValidationError("--companion is full size: it takes no --pane, --size-percent, --width or --height")
+                }
                 if block && wait { throw ValidationError("--block cannot be combined with --wait") }
                 if [command, html, url].compactMap({ $0 }).count != 1 {
                     throw ValidationError("provide exactly one of COMMAND, --html or --url")
@@ -612,15 +667,23 @@ struct Session: ParsableCommand {
                 if pane != nil, sizePercent != nil {
                     throw ValidationError("--pane cannot be combined with --size-percent (pane overlays are always full)")
                 }
+                if pane != nil, width != nil || height != nil {
+                    throw ValidationError("--pane cannot be combined with --width/--height (pane overlays are always full)")
+                }
                 try Session.validateSizePercent(sizePercent)
+                try Overlay.validatePoints(width: width, height: height)
+                if width != nil || height != nil, sizePercent == nil {
+                    throw ValidationError("--width/--height need --size-percent")
+                }
             }
 
             func makeRequest() throws -> ControlRequest {
-                ControlRequest(cmd: .sessionOverlayOpen, target: target.target,
+                ControlRequest(cmd: companion ? .sessionCompanionPage : .sessionOverlayOpen, target: target.target,
                                args: options.withWindow(ControlArgs(cwd: html == nil ? cwd : cwd.map(Overlay.absolutePath),
                                                                      command: command, wait: wait ? true : nil,
                                                                      sizePercent: sizePercent, follow: follow ? true : nil,
-                                                                     pane: pane, color: backgroundColor,
+                                                                     pane: pane, width: width, height: height,
+                                                                     color: backgroundColor,
                                                                      html: html.map(Overlay.absolutePath),
                                                                      navigation: navigation ? true : nil, url: url,
                                                                      javascript: javascript ? true : nil, chromeless: chromeless ? true : nil, persistent: persistent ? true : nil,
@@ -628,8 +691,13 @@ struct Session: ParsableCommand {
             }
 
             func run() throws {
+                if companion, !block { return try runCompanionRequest(makeRequest(), options: options, echoID: true) }
                 guard block else { try defaultRun(); return }
-                if html != nil { return try HtmlPageRunner(json: options.json, send: SocketClient(path: options.socketPath()).send).block(makeRequest()) }
+                if html != nil {
+                    let send = SocketClient(path: options.socketPath()).send
+                    return try HtmlPageRunner(json: options.json, send: companion ? companionSend(send, json: options.json) : send)
+                        .block(makeRequest())
+                }
                 let client = SocketClient(path: options.socketPath())
                 // open via the same `makeRequest()` as the non-block path: in block mode `validate()` guarantees
                 // `!wait`, so its `wait` is nil, and the floating `--size-percent` rides that single source
@@ -676,23 +744,35 @@ struct Session: ParsableCommand {
         }
 
         struct Resize: RequestCommand {
-            static let configuration = CommandConfiguration(abstract: "Resize an open overlay: floating at a percent, or back to full-pane.")
+            static let configuration = CommandConfiguration(
+                abstract: "Resize an open overlay: floating at a percent or in points, or back to full-pane.",
+                discussion: """
+                    --size-percent re-sizes from that percent, keeping only the --width/--height given with it. \
+                    --width/--height alone change those axes of an overlay that is already floating.
+                    """)
             @Option(name: .long, help: "Resize to a floating, framed panel at PERCENT (1-100) of the pane.") var sizePercent: Int?
+            @Option(name: .long, help: Overlay.widthHelp) var width: Int?
+            @Option(name: .long, help: Overlay.heightHelp) var height: Int?
             @Flag(name: .long, help: "Resize to full-pane (translucent, hides the session).") var full = false
             @OptionGroup var target: TargetOptions
             @OptionGroup var options: ClientOptions
 
-            // require exactly one of --size-percent / --full at parse time (before any connection), so it is a
-            // clean usage error and unit-testable without a socket; the dispatcher re-checks the same rules.
+            // the dispatcher re-checks the same rules; here they are a clean usage error before any connection
             func validate() throws {
+                let points = width != nil || height != nil
                 if full && sizePercent != nil { throw ValidationError("--full cannot be combined with --size-percent") }
-                if !full && sizePercent == nil { throw ValidationError("provide --size-percent PERCENT or --full") }
+                if full && points { throw ValidationError("--full cannot be combined with --width/--height") }
+                if !full && sizePercent == nil && !points {
+                    throw ValidationError("provide --size-percent PERCENT, --width/--height POINTS or --full")
+                }
                 try Session.validateSizePercent(sizePercent)
+                try Overlay.validatePoints(width: width, height: height)
             }
 
             func makeRequest() throws -> ControlRequest {
                 ControlRequest(cmd: .sessionOverlayResize, target: target.target,
-                               args: options.withWindow(ControlArgs(sizePercent: sizePercent, full: full ? true : nil)))
+                               args: options.withWindow(ControlArgs(sizePercent: sizePercent, full: full ? true : nil,
+                                                                    width: width, height: height)))
             }
         }
 
@@ -749,6 +829,16 @@ struct Session: ParsableCommand {
 }
 
 extension Session {
+    struct Seen: RequestCommand {
+        static let configuration = CommandConfiguration(abstract: "Clear a session's unseen-notification badge without changing the selection or focus (idempotent).")
+        @OptionGroup var target: TargetOptions
+        @OptionGroup var options: ClientOptions
+
+        func makeRequest() throws -> ControlRequest {
+            ControlRequest(cmd: .sessionSeen, target: target.target, args: options.withWindow())
+        }
+    }
+
     /// The overlay and HUD arms share one accepted range for `--size-percent`, so the gate belongs to
     /// neither. `1...100` is the input domain both document; the narrower bound for rendering a HUD is a
     /// presentation limit applied app-side, not a rejection.

@@ -6,7 +6,7 @@ import agtermCore
 @MainActor
 extension LinuxHtmlOverlayPage {
     func installBridge() {
-        guard case .file = overlay.source else { return }
+        if case .url = overlay.source { return }
         let data = Unmanaged.passUnretained(self).toOpaque()
         connect(manager, "script-message-with-reply-received::agterm", unsafeBitCast(onHtmlBridgeRequest, to: GCallback.self), data)
         for world in overlay.javascript ? ["agterm-bridge", ""] : ["agterm-bridge"] {
@@ -42,7 +42,8 @@ extension LinuxHtmlOverlayPage {
         guard let reply else { return }
         guard !closed, let store, let controller, let slot = store.htmlOverlaySlot(id),
               let uri = webkit_web_view_get_uri(cast(webView)).map(String.init(cString:)),
-              uri == "about:blank" || uri.hasPrefix("agterm-file://\(id.uuidString.lowercased())/") else {
+              uri == "about:blank" || uri.hasPrefix("agterm-file://\(id.uuidString.lowercased())/")
+                || uri.hasPrefix("agterm-page://\(id.uuidString.lowercased())/") else {
             return rejectBridge(reply, "page closed or navigation left the file grant")
         }
         guard let json = jsc_value_to_json(value, 0) else { return rejectBridge(reply, "invalid request") }
@@ -52,6 +53,20 @@ extension LinuxHtmlOverlayPage {
               envelope["nonce"] as? String == bridgeNonce, let object = envelope["request"],
               let requestData = try? JSONSerialization.data(withJSONObject: object) else {
             return rejectBridge(reply, "request must come from the file page's main frame")
+        }
+        if let record = controller.replicaPages[id], let channel = record.channel,
+           !(slot.session.content == .page && linuxBridgeAddressesOwnPage(object)) {
+            guard let context = jsc_value_get_context(value) else { return rejectBridge(reply, "no JavaScript context") }
+            let delivery = LinuxHtmlBridgeReply(reply: reply, context: context)
+            channel.bridge(String(decoding: requestData, as: UTF8.self)) { result in
+                switch result {
+                case .success(let response):
+                    delivery.finish((try? JSONDecoder().decode(ControlResponse.self, from: Data(response.utf8)))
+                        ?? ControlResponse(ok: false, error: "invalid response from page origin"))
+                case .failure: delivery.finish(ControlResponse(ok: false, error: "page channel closed"))
+                }
+            }
+            return
         }
         let page = HtmlBridgePage(window: controller.windowID.uuidString, session: slot.session.id, pane: slot.pane)
         let request: ControlRequest
@@ -108,3 +123,10 @@ private let onHtmlBridgeRequest: @MainActor @convention(c)
         Unmanaged<LinuxHtmlOverlayPage>.fromOpaque(data).takeUnretainedValue().bridgeRequest(value, reply: reply)
         return 1
     }
+
+func linuxBridgeAddressesOwnPage(_ object: Any) -> Bool {
+    guard let request = object as? [String: Any], let command = request["cmd"] as? String,
+          ["session.overlay.reload", "session.overlay.navigate"].contains(command) else { return false }
+    let args = request["args"] as? [String: Any]
+    return ![request["target"], args?["targets"], args?["window"]].contains { $0 != nil && !($0 is NSNull) }
+}

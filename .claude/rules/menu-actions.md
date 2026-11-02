@@ -40,8 +40,8 @@ paths:
 - **`PaletteItem.isEnabled` is a closure over live state, never a flag captured when the list was built.**
   `filtered` refreshes only on appear, query and mode, so a snapshot goes stale under an open palette: a
   session exits, a pending close expires, control mutates the tree. The row asks it during body evaluation
-  and `runIfEnabled()` asks it again at the keystroke, returning whether it ran — which is the only thing
-  that dismisses the palette, so an inert row cannot close it on a keystroke that did nothing.
+  and `runIfEnabled()` asks it again at the keystroke, returning whether it ran, so an inert row cannot close
+  the palette on a keystroke that did nothing. A row that ran closes it unless the mode `keepsOpenOnRun`.
   `PaletteItem.indicator` is a closure for the same reason: a session row reads its live `agentIndicator`
   in the row body, so an agent finishing under an open ⌃P or attention palette updates its glyph.
 - `toggleQuickTerminal` gates on all `uiActionsEnabled`, including terminal zoom and dashboard.
@@ -59,6 +59,14 @@ paths:
   through `RemoteAttaching`, so it adds no control command: `zmx tree` + `pick` + `zmx attach` already
   script it. A HUD over the starting session shows the two ssh waits and a failure, the latter hiding
   itself after `remoteAttachErrorSeconds`; a window with no session falls back to `notifyCommandFailure`.
+
+- New Companion (`new_companion`, keyless) sits beside Duplicate Session in the row menu and the Session
+  menu, with a palette row. On a remote row it asks the origin through `RemoteAttaching.createRemoteCompanion`,
+  showing the two ssh waits in the Attach Remote HUD.
+- Duplicate as Companion (`duplicate_companion`, keyless) follows it in both menus, with a palette row; it is in
+  `terminalOnly` and takes the same remote route. `AppActions` reaches the local planner through
+  `CompanionDuplicating`, which `ControlServer` implements, so the GUI and `session.companion.duplicate` share one
+  planner; a refusal shows in a timed `RemoteAttachHud` over the session, falling back to `notifyCommandFailure`.
 
 ## Dock menu
 
@@ -200,8 +208,9 @@ paths:
 - This preserves the current workspace when possible, remains inside flagged/focused views while they
   contain survivors, and lets `disableFocusIfSelectionOutsideSet` reveal a whole-tree fallback while
   preserving membership.
-- If MRU is empty, narrowed modes use `nearestInScopeTarget` over flattened sidebar order; unfiltered tree
-  uses the sole `reselectionTarget` caller. Do not choose the first flagged row because it destroys locality.
+- If MRU is empty, narrowed modes use `nearestInScopeTarget` over flattened sidebar order; the flat and plain
+  flagged lists first walk the saved `flaggedOrder` from the closed id's slot (`nearestInSavedFlaggedOrder`),
+  so every caller passes the closed id; unfiltered tree uses the sole `reselectionTarget` caller. Do not choose the first flagged row because it destroys locality.
   Closing the last flagged session widens to the whole tree rather than leaving no terminal.
 - Workspace removal uses `workspaceRemovalTarget`: most recent visible, then first visible, then positional.
   Preserve `softCloseSessions.removedBeforeActive` for fallback index adjustment. The named
@@ -232,9 +241,14 @@ paths:
   because the key monitor fires this from the quick terminal with agterm inactive.
 - When selection moves, GUI callers reveal a captured blocked/completed pane; unchanged plain navigation
   only refocuses, preventing a one-item wrap from resetting split focus. Modal focus guards still apply.
-- Attention navigation defaults to Control-Option-Up/Down, includes blocked/completed only, wraps, and
-  excludes current. If it finds no other target, GUI callers may use the current live indicator solely to
+- Attention navigation defaults to Control-Option-Up/Down, includes blocked/completed (plus active under
+  `attentionIncludesActive`, see [[settings]]), wraps, and excludes current. If it finds no other target, GUI callers may use the current live indicator solely to
   reveal its tagged pane. Control changes selection only.
+- Under `attentionNavigationAcrossWindows` the GUI step walks windows in library order and each window's
+  `navigableSessions` in sidebar order, skipping a window `uiActionsEnabled(for:)` refuses. The attention
+  commands then stay enabled without an active session, so an empty window can step out. A target in
+  another window goes through `selectAttention` one main-queue tick later, as the attention palette does;
+  a same-window target selects at once. `session.go` never crosses windows.
 - `revealActiveBlockedPane` focuses right only when the split surface exists, explicitly chooses primary
   for left/nil, and shows/focuses scratch. Promotion retags right to left. Idle/active never change pane or
   dismiss scratch. Navigation, palettes, sidebar, Dock menu, titlebar attention, and auto-follow share it.
@@ -248,9 +262,21 @@ paths:
   and Enter target cannot diverge; sort by score then title. Built-in palettes match label plus subtitle;
   caller-supplied pickers match the label only, so subtitle consequence text cannot filter a safe row out
   and leave a destructive one preselected. Ctrl-P opens sessions; Ctrl-Shift-P opens actions.
-- An empty query skips ranking in two cases: attention mode and a caller-supplied picker. Both keep their
-  source order, because every row scores 0 and the tie-break would re-sort A→Z and replace the row Return
-  runs. Every other palette lists everything A→Z.
+- An empty query skips ranking in four cases: attention mode, ⌃P sessions, the two membership editors, and a
+  caller-supplied picker. All keep their source order, because every row scores 0 and the tie-break would
+  re-sort A→Z and replace the row Return runs. ⌃P's source order is `AppStore.listOrdered`: A→Z by label,
+  each parent followed by its companions. Every other palette lists everything A→Z.
+- Flat session lists title a companion `parent › child` through `AppStore.listLabel(for:)`: ⌃P, ⌃Tab, the
+  attention palette, both titlebar popovers, the Dock menu, dashboard captions, the flagged editor and every
+  flagged layout. The sidebar tree, rename and Copy Name keep the bare `displayName`.
+- Edit Flagged Sessions (`.flaggedEditor`) lists every session of the frontmost window in tree order, focus-hidden
+  ones included; Edit Focused Workspaces (`.focusEditor`) lists every workspace. Both are `keepsOpenOnRun`:
+  Return or a click toggles the row through `setFlag`/`setFocusMembership` and the palette stays open on the same
+  query, order and highlight, and a click moves the highlight first so the next Return hits that row. Each row
+  captures its id and store, never the active session, and reads membership live through `PaletteItem.mark`.
+  Focus membership follows [[sidebar]]. One deferred opener per editor serves the palette row, the
+  keymap, the View menu and the flagged empty-state link; opening them is keep-in-sync exempt like every palette,
+  `session.flag` and `workspace.focus` being the scripted forms.
 - Attention mode lists every open window's non-idle sessions (`WindowLibrary.attentionAcrossWindows`),
   ordered blocked, active, completed and then newest `statusChangedAt`, with nil last, as one combined
   sort. Items carry a subtitle naming the window once more than one is open, and `isEnabled` asking the OWNING
@@ -260,8 +286,8 @@ paths:
   in the action palette. The titlebar bell opens a popover, not this palette. Palette opening is
   keep-in-sync exempt.
 - Every session list draws the status glyph TRAILING, as the sidebar does, with per-call color/shape
-  through the sidebar's helpers and nothing for idle: ⌃P, attention, Ctrl-Tab, both titlebar popovers, and
-  a pick whose items carry status (Attach Remote).
+  through the sidebar's helpers and nothing for idle: ⌃P, attention, the session editor, Ctrl-Tab, both
+  titlebar popovers, and a pick whose items carry status (Attach Remote).
 - Ctrl-J/Ctrl-K move the selection through `CommandPalette.selectionStep`, which resolves the key with
   `chordKey` from `NSApp.currentEvent`; `KeyPress` carries only the typed character, which is not `j`/`k`
   on a non-Latin layout. See [[keymap]] for the layout rule.

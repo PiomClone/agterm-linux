@@ -38,8 +38,7 @@ You are inside agterm (`AGTERM_ENABLED=1`). Use:
   `agtermctl terminfo install <host>` (local-only, no socket; `-p`, `-i`, `-J`, `-F` pass through, other
   connection settings belong in `~/.ssh/config`, and the execution settings are the installer's own). The symptom it fixes is `less`, `vim` or `apt` on the remote
   warning that the terminal is not fully functional, because `TERM=xterm-ghostty` is unknown there.
-- **Logs** — split by platform.
-  macOS uses unified logging with subsystem `com.umputun.agterm`:
+- **Logs** — split by platform. macOS uses unified logging with subsystem `com.umputun.agterm`:
   ```bash
   log show --predicate 'subsystem == "com.umputun.agterm"' --info --last 30m
   ```
@@ -138,8 +137,8 @@ Check these in order:
 
 - **Restart after selecting Live sessions.** The restore mode is fixed when agterm starts. Changing
   **Settings ▸ General ▸ Restore sessions** affects the next process, not sessions already open.
-- **Read the eligibility reason in Settings.** Live mode requires zsh or fish as the login shell and the
-  bundled zmx and shell-integration resources (`ZDOTDIR` for zsh, `XDG_DATA_DIRS` for fish) on both frontends. If the launch
+- **Read the eligibility reason in Settings.** Live mode requires zsh or fish as the macOS login shell and the
+  bundled zmx and shell-integration resources (`ZDOTDIR` for zsh, `XDG_DATA_DIRS` for fish). If the launch
   cannot use live mode, every pane starts as an ordinary shell.
 - **Inspect actual backing with `tree --json`.** Primary and split surfaces report `backedByZmx`; the session
   field is true only when every existing primary or split is backed. The sidebar deliberately has no zmx
@@ -153,9 +152,9 @@ Check these in order:
 - **A missing daemon is recreated, running the captured command.** A reboot or a stale daemon leaves nothing
   to attach, so agterm creates one under the saved name and replays the command that pane was running at the
   last clean quit. A fresh shell instead means no capture applied: the window was closed before the quit, the
-  machine lost power or was force-quit, the process exited before quitting, SIGTERM was used, or the command
-  is refused by `restore-denylist.conf`. `agtermctl zmx kill` is not one of these — it closes a shown split
-  or promotes a primary rather than leaving a daemon to recreate. To check what was captured, read
+  machine lost power or was force-quit, the process exited before quitting, SIGTERM was used on macOS, or the
+  command is refused by `restore-denylist.conf`. `agtermctl zmx kill` is not one of these — it closes a shown
+  split or promotes a primary rather than leaving a daemon to recreate. To check what was captured, read
   `foregroundCommand` in `windows/<id>.json` while agterm is STOPPED: the next launch moves it into memory
   and rewrites the file with nil, so a running app always shows null there.
 - **A tool asks for the microphone again after every update.** The pane was created before the session
@@ -165,9 +164,12 @@ Check these in order:
   possible, and the notification afterwards says how many sessions were covered. A session whose old process
   could not be confirmed gone gets no command restarted and the reset can be run again.
 - **After an update, an attached session still needs a key press, or a zmx change seems missing.** A live
-  session keeps the zmx it was created with through app updates. `agtermctl zmx list` marks such rows
+  session keeps the zmx it was created with through app updates.
+  On macOS, `agtermctl zmx list` marks such rows
   `outdated`; Agterm ▸ Reset Live Sessions… (or `agtermctl zmx reset --force`) recreates them on the current
   zmx, with the same cost as any reset: running work stops and agent conversations need resuming.
+  Linux has neither the flag nor the reset (`zmx reset` answers unsupported); the session keeps its old zmx
+  until its daemon ends.
 - **Switching modes ends detached live processes.** Selecting Fresh shells or Re-run commands and restarting
   reaps the live daemons in this state directory. An unavailable launch that still requests Live sessions
   preserves its claimed daemons for a later eligible launch.
@@ -330,6 +332,27 @@ disconnects the CLI sessions attached to it. A daemon-backed conversation can st
 exits: if `codex --no-daemon resume <id>` shows "This conversation is open in another app", stop the
 shared daemon and press R to retry.
 
+### "Claude Code background sessions have no status"
+
+A session started with `claude --bg` runs under Claude Code's supervisor, which does not pass the
+launching pane's `AGTERM_*` variables, so its status hooks find no `AGTERM_SESSION_ID` and exit quietly.
+`--settings` carries over into a background session and its hooks inherit the `env` block, so pass the
+variables there. With the hooks installed (Help ▸ Install Agent Status Hooks…), launch from the pane that
+should show the status:
+
+```bash
+cbg() {
+  claude --bg --settings "$(jq -cn \
+    --arg s "$AGTERM_SESSION_ID" --arg k "$AGTERM_SOCKET" \
+    --arg p "$AGTERM_PANE" --arg i "$AGTERM_PANE_ID" \
+    '{env:{AGTERM_SESSION_ID:$s,AGTERM_SOCKET:$k,AGTERM_PANE:$p,AGTERM_PANE_ID:$i}}')" "$@"
+}
+cbg "your prompt"
+```
+
+The status stays with the launching pane; `claude attach` from another pane does not move it. Verified
+hook routing with Claude Code 2.1.311.
+
 ### "Claude Code's question/permission prompt is unresponsive after switching apps"
 
 Known upstream Claude Code bug, NOT agterm. Do not file an agterm issue for it. While Claude Code shows
@@ -387,7 +410,8 @@ and only inside that program. Ghostty.app behaves the same. It is per-program, n
 that never enables mouse reporting keeps links working. Workaround: hold shift too (⌘⇧-hover, ⌘⇧-click).
 A program can claim shift via `XTSHIFTESCAPE`, so `mouse-shift-capture = never` in
 `~/.config/agterm/ghostty.conf` makes shift always win; `mouse-reporting = false` there turns reporting
-off for every program, trading in-program mouse support for always-on selection and links.
+off for every program, trading in-program mouse support for always-on selection. Links still need ⌘⇧
+there: link detection follows the program's mouse request, not that setting.
 
 ## Reporting: decide bug vs unsupported FIRST
 

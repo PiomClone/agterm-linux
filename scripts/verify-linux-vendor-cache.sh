@@ -8,14 +8,10 @@ if (( $# != 1 )); then
 fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../linux/ghostty-build.sh
+source "$ROOT/linux/ghostty-build.sh"
 VENDOR="$1"
 [[ "$VENDOR" = /* ]] || VENDOR="$ROOT/$VENDOR"
-PATCH_DIGEST="$(sha256sum \
-  "$ROOT/linux/patches/ghostty-embedded-opengl.patch" \
-  "$ROOT/linux/patches/ghostty-embedded-input-handoff.patch" \
-  "$ROOT/linux/patches/ghostty-embedded-conditional-env.patch" \
-  "$ROOT/linux/patches/ghostty-lib-resources.patch" \
-  | sha256sum | awk '{print $1}')"
 
 for required in lib/libghostty.so include/ghostty.h include/ghostty/vt.h; do
   [[ -s "$VENDOR/$required" ]] || {
@@ -24,8 +20,8 @@ for required in lib/libghostty.so include/ghostty.h include/ghostty/vt.h; do
   }
 done
 
-[[ "$(<"$VENDOR/.agterm-ghostty-patches.sha256")" == "$PATCH_DIGEST" ]] || {
-  echo "vendored libghostty was built with different Linux patches" >&2
+[[ -f "$VENDOR/REVISION" && "$(cat "$VENDOR/REVISION")" == "$GHOSTTY_STAMP" ]] || {
+  echo "vendored libghostty revision or patch set is stale: $VENDOR" >&2
   exit 1
 }
 

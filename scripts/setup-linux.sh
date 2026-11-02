@@ -3,16 +3,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PATCH="$ROOT/linux/patches/ghostty-embedded-opengl.patch"
-INPUT_HANDOFF_PATCH="$ROOT/linux/patches/ghostty-embedded-input-handoff.patch"
-CONDITIONAL_ENV_PATCH="$ROOT/linux/patches/ghostty-embedded-conditional-env.patch"
-RESOURCE_PATCH="$ROOT/linux/patches/ghostty-lib-resources.patch"
 VENDOR="$ROOT/agterm-linux/vendor/ghostty"
 VERIFY_CACHE="$ROOT/scripts/verify-linux-vendor-cache.sh"
 VERIFY_ZMX_CACHE="$ROOT/scripts/verify-linux-zmx-cache.sh"
 GHOSTTY_REPO="https://github.com/ghostty-org/ghostty"
-# shellcheck source=../linux/ghostty-resources.env
-source "$ROOT/linux/ghostty-resources.env"
+# shellcheck source=../linux/ghostty-build.sh
+source "$ROOT/linux/ghostty-build.sh"
 # shellcheck source=../linux/zmx.env
 source "$ROOT/linux/zmx.env"
 ZMX_PATCH_DIGEST="$(cat "$ROOT/scripts/zmx-patches"/*.patch "$ROOT/scripts/zmx-patches/ghostty"/*.patch | sha256sum | cut -c1-16)"
@@ -69,11 +65,10 @@ if $need_ghostty; then
     exit 1
   }
 
-  echo "applying embedded-OpenGL patch..."
-  git -C "$GHOSTTY_BUILD" apply "$PATCH"
-  git -C "$GHOSTTY_BUILD" apply "$INPUT_HANDOFF_PATCH"
-  git -C "$GHOSTTY_BUILD" apply "$CONDITIONAL_ENV_PATCH"
-  git -C "$GHOSTTY_BUILD" apply "$RESOURCE_PATCH"
+  for ghostty_patch in "${GHOSTTY_PATCHES[@]}"; do
+    echo "applying $(basename "$ghostty_patch")..."
+    git -C "$GHOSTTY_BUILD" apply "$ghostty_patch"
+  done
   echo "building libghostty and generated terminfo source..."
   # Zig defaults to Debug, whose terminal integrity checks make sustained PTY output unusably slow.
   (
@@ -102,8 +97,7 @@ if $need_ghostty; then
   cp "$TERMINFO_SOURCE" "$GHOSTTY_BUILD/src/terminfo/ghostty.terminfo"
   tic -x -o "$GHOSTTY_STAGE/share/terminfo" "$GHOSTTY_BUILD/src/terminfo/ghostty.terminfo"
 
-  sha256sum "$PATCH" "$INPUT_HANDOFF_PATCH" "$CONDITIONAL_ENV_PATCH" "$RESOURCE_PATCH" \
-    | sha256sum | awk '{print $1}' > "$GHOSTTY_STAGE/.agterm-ghostty-patches.sha256"
+  printf '%s\n' "$GHOSTTY_STAMP" > "$GHOSTTY_STAGE/REVISION"
   "$VERIFY_CACHE" "$GHOSTTY_STAGE"
   rm -rf "$VENDOR"
   mkdir -p "$(dirname "$VENDOR")"

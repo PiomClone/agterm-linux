@@ -9,17 +9,30 @@ extension AppController {
         case .failure(let response): return response
         case .success(let id):
             if let page = options.page {
+                let overlay = HtmlOverlay(source: page, navigation: options.navigation,
+                                          javascript: options.javascript, chromeless: options.chromeless,
+                                          persistent: options.persistent, browse: options.browse)
+                switch store.openRemotePage(id, overlay: overlay, options: options) {
+                case .opened:
+                    if case .file = page { gControlServer.schedulePageClaimExpiry(after: AppStore.pageClaimWindow) }
+                    return ControlResponse(ok: true, result: ControlResult(id: id.uuidString, pageID: overlay.id.uuidString))
+                case .slotTaken: return err(options.pane == nil ? "overlay already open" : PaneOverlayError.alreadyOpen)
+                case .paneMissing: return err(PaneOverlayError.paneNotVisible)
+                case .unsupported: return err(OverlayHtmlError.presenter)
+                case .loopback: return err(OverlayHtmlError.remoteLoopback)
+                case .tooLarge: return err(OverlayHtmlError.remoteTooLarge)
+                case .pointsUnsupported: return err(OverlayPointError.remote)
+                case .local: break
+                }
                 if store.session(withID: id)?.remoteOverlays.slot(options.pane) != nil {
                     return err(options.pane == nil ? "overlay already open" : PaneOverlayError.alreadyOpen)
                 }
                 if options.persistent, let error = LinuxBrowserStore.shared.failure() {
                     return err("session.overlay.open: \(error)")
                 }
-                let overlay = HtmlOverlay(source: page, navigation: options.navigation,
-                                          javascript: options.javascript, chromeless: options.chromeless, persistent: options.persistent)
                 if let failure = store.openHtmlOverlay(id, pane: options.pane, overlay: overlay,
                                                        sizePercent: options.sizePercent,
-                                                       backgroundColor: options.backgroundColor) {
+                                                       points: options.points, backgroundColor: options.backgroundColor) {
                     return err(failure.message(pane: options.pane))
                 }
                 _ = LinuxHtmlOverlayRegistry.shared.page(for: overlay, controller: self, backgroundColor: options.backgroundColor)
@@ -44,7 +57,7 @@ extension AppController {
             }
             guard store.openOverlay(id, command: options.command, cwd: options.cwd, wait: options.wait,
                                     sizePercent: options.sizePercent,
-                                    backgroundColor: options.backgroundColor) else {
+                                    points: options.points, backgroundColor: options.backgroundColor) else {
                 return err("overlay already open")
             }
             if options.follow { selectSession(id, userInitiated: false) }
@@ -57,6 +70,11 @@ extension AppController {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
         case .success(let id):
+            switch store.reloadRemotePage(id, pane: pane, current: current) {
+            case .sent: return ok(id)
+            case .refused(let message): return err(message)
+            case .local: break
+            }
             if let failure = LinuxHtmlOverlayRegistry.shared.reload(sessionID: id, pane: pane,
                                                                     current: current, store: store) {
                 return err(failure.message)
@@ -70,6 +88,11 @@ extension AppController {
         switch resolveSessionResponse(target) {
         case .failure(let response): return response
         case .success(let id):
+            switch store.navigateRemotePage(id, pane: pane, navigation: navigation) {
+            case .sent: return ok(id)
+            case .refused(let message): return err(message)
+            case .local: break
+            }
             if let failure = LinuxHtmlOverlayRegistry.shared.navigate(sessionID: id, pane: pane,
                                                                       step: navigation, store: store) {
                 return err(failure)

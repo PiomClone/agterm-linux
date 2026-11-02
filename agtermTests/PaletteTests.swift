@@ -30,6 +30,23 @@ final class PaletteTests: XCTestCase {
         XCTAssertEqual(step(9, "k", ascii: true), -1)
     }
 
+    func testOnlyTheMembershipEditorsStayOpenAfterARun() {
+        XCTAssertTrue(PaletteMode.flaggedEditor.keepsOpenOnRun)
+        XCTAssertTrue(PaletteMode.focusEditor.keepsOpenOnRun)
+        for mode in [PaletteMode.actions, .sessions, .themes, .customCommands, .attention] {
+            XCTAssertFalse(mode.keepsOpenOnRun, "\(mode)")
+        }
+    }
+
+    func testEmptyQueriesKeepTheFeedOrderExceptForActionsThemesAndCustomCommands() {
+        for mode in [PaletteMode.sessions, .attention, .flaggedEditor, .focusEditor] {
+            XCTAssertTrue(mode.keepsSourceOrder, "\(mode)")
+        }
+        for mode in [PaletteMode.actions, .themes, .customCommands] {
+            XCTAssertFalse(mode.keepsSourceOrder, "\(mode)")
+        }
+    }
+
     func testOtherKeysDoNotMove() {
         XCTAssertNil(step(0, "a", ascii: true))
         XCTAssertNil(step(0, "ф", ascii: false))

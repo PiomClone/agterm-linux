@@ -21,7 +21,8 @@ paths:
   surface and invalidates its GL context. Keep one stable `GtkOverlay` child per session, map pages for
   Dashboard without accepting input, and mirror each source through `GtkWidgetPaintable` + `GtkPicture`
   beneath an opaque input-owning Dashboard host.
-- That GL-context invalidation is PERMANENT: `GhosttySurface` connects `realize` but no `unrealize` and
+- That GL-context invalidation is PERMANENT: `GhosttySurface`'s input-method unrealize handler only clears
+  the IM client; it does not repair rendering, and
   `realize()`'s `createSurface()` no-ops on an existing surface, so a re-add realizes a NEW context while
   libghostty keeps drawing into the destroyed one, and `refresh()` cannot repair it. `realize()` logs
   `GLArea re-realized over a live surface` for exactly that, since no AT-SPI assertion can see a blank pane.
@@ -248,8 +249,8 @@ paths:
 - The wash is neutral only at full window opacity. Below it the wash color is opaque while the backing is
   not, so the body rises to `m + p(1-m)` against a title bar left at `p`; scaling by the rendered opacity
   shrinks that gap but no fill closes it. Scale by what the window actually renders at, not the saved
-  setting: fullscreen and Reduce Transparency force it opaque, and scaling there under-mutes to nothing at
-  a saved 0. Fullscreen is per-window, so it needs its own notification pair, not an app-global mirror.
+  setting: fullscreen and Reduce Transparency (unless ignored) force it opaque, and scaling there
+  under-mutes to nothing at a saved 0. Fullscreen is per-window, so it needs its own notification pair, not an app-global mirror.
 - Take the covered session's own solid background when it set one, else the theme color. Neither that field
   nor a live OSC 11 color is observed, so the color is whatever it was when the wash was last drawn.
 

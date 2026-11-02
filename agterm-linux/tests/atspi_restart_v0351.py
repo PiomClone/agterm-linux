@@ -25,6 +25,10 @@ def verify_restart_v0351(env, state):
         def sessions():
             return [row for workspace in window_tree(env, window)["workspaces"] for row in workspace["sessions"]]
 
+        if env.get("AGTERM_TEST_LOGIN_SHELL") == "/usr/bin/fish":
+            wait_for(lambda: any(row.get("foregroundShell") == "fish" for row in sessions()),
+                     "Live fish did not start an integrated fish shell")
+
         pid_file = os.path.join(state, "old-job.pid")
         command = f"/bin/sh -c {shlex.quote('echo $$ > ' + shlex.quote(pid_file) + '; exec sleep 3600')}"
         created = request("session.new", args={"name": "restart target", "command": command})
@@ -70,6 +74,16 @@ def verify_restart_v0351(env, state):
         daemon = "agterm-" + identity.replace("-", "").lower()
         screen = request("zmx.screen", args={"name": daemon, "all": True})
         assert screen["ok"] and "restart-screen" in screen["result"]["text"], screen
+        replay = request("session.restart", session, {"paneID": identity})
+        assert replay["ok"], replay
+        replay_receipt = replay["result"]["restart"]
+        assert os.path.basename(replay_receipt["replayedArgv"][0]) == "sleep", replay_receipt
+        assert replay_receipt["replayedArgv"][1:] == ["3600"], replay_receipt
+        wait_for(lambda: ended(new_job), "foreground replay left the old program running")
+        wait_for(lambda: next(row for row in sessions() if row["id"] == session).get("foreground", [None])[-1] == "3600",
+                 "replayed foreground program did not start")
+        assert pane_id() == identity, "foreground replay changed pane identity"
+        new_job = replay_receipt["newPid"]
         second_window = raw_control_json(env, {"cmd": "window.new", "args": {"name": "cursor route probe"}})
         assert second_window["ok"], second_window
         cursor = raw_control_json(env, {"cmd": "surface.cursor", "target": session, "args": {"paneID": identity}})

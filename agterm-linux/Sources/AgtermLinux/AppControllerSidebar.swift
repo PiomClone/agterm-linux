@@ -280,6 +280,9 @@ extension AppController {
         gtk_box_append(cast(wrapper), W(listBox))
         let widgets = SectionWidgets(wrapper: wrapper, header: header, listBox: listBox, disc: disc,
                                      icon: icon, name: nameWidget, add: add, hint: makeSectionHint(section, in: wrapper))
+        if let content = section.header {
+            applySidebarTint(content.tint, icon: icon, name: nameWidget)
+        }
         widgets.applied = section.header
         sidebarRuntime.sections[section.key] = widgets
         return widgets
@@ -308,11 +311,22 @@ extension AppController {
     private func makeSectionHint(_ section: SidebarSnapshot.Section,
                                  in wrapper: OpaquePointer) -> OpaquePointer? {
         guard section.key == .flagged,
-              let hint = op(gtk_label_new("No flagged sessions.\nRight-click a session → Flag.")) else { return nil }
-        gtk_label_set_justify(hint, GTK_JUSTIFY_CENTER)
+              let hint = op(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8)),
+              let label = op(gtk_label_new("No flagged sessions.")) else { return nil }
+        gtk_label_set_justify(label, GTK_JUSTIFY_CENTER)
         // Fixed instructional text wraps rather than ellipsizes: wrapping drops the minimum
         // width from the longest line to the longest word, which is all the sidebar needs.
-        gtk_label_set_wrap(hint, 1)
+        gtk_label_set_wrap(label, 1)
+        gtk_box_append(cast(hint), W(label))
+        if let button = op(gtk_button_new_with_label("Edit Flagged Sessions…")) {
+            gtk_button_set_has_frame(cast(button), 0)
+            if let text = gtk_button_get_child(cast(button)) {
+                gtk_label_set_ellipsize(op(text), PANGO_ELLIPSIZE_END)
+            }
+            gtk_widget_set_tooltip_text(W(button), "Edit Flagged Sessions…")
+            connectAction(button) { [weak self] in self?.showMembershipEditor(workspaces: false) }
+            gtk_box_append(cast(hint), W(button))
+        }
         gtk_widget_set_margin_top(W(hint), 24)
         gtk_widget_add_css_class(W(hint), "dim-label")
         gtk_widget_set_visible(W(hint), section.showsHint ? 1 : 0)
@@ -365,6 +379,7 @@ extension AppController {
         gtk_box_append(cast(box), W(badge))
         let widgets = SessionRowWidgets(row: row, box: box, lead: lead, name: name,
                                         glyph: glyph, star: star, badge: badge)
+        installCompanionRowWidgets(id, widgets: widgets, content: content)
         widgets.applied = content
         sidebarRuntime.rows[id] = widgets
         rowSession[row] = id
@@ -393,7 +408,7 @@ extension AppController {
         gtk_event_controller_set_propagation_phase(rightClick, GTK_PHASE_CAPTURE)
         connect(rightClick, "pressed", unsafeBitCast(onSessionRowContextClick, to: GCallback.self), RAW(row))
         gtk_widget_add_controller(W(row), rightClick)
-        if store.sidebarMode != .flagged {
+        do {
             let drag = gtk_drag_source_new()
             gtk_drag_source_set_actions(drag, GDK_ACTION_MOVE)
             connect(drag, "prepare", unsafeBitCast(onRowDragPrepare as @convention(c) (OpaquePointer?, Double, Double, gpointer?) -> OpaquePointer?, to: GCallback.self))
@@ -470,6 +485,16 @@ extension AppController {
     /// unreachable. The slot comes from the drop's `y` against the target row's midpoint
     /// (`LinuxSidebarPolicy.dropInsertionSlot`): top half inserts before the target, bottom half after.
     func handleSessionDrop(source: UUID, onto target: UUID, y: Double, targetHeight: Double) {
+        if store.sidebarMode == .flagged, store.flaggedLayout != .tree {
+            let order = store.orderedFlaggedSessions.map(\.id)
+            guard let index = order.firstIndex(of: target) else { return }
+            let slot = LinuxSidebarPolicy.dropInsertionSlot(targetIndex: index, y: y, height: targetHeight)
+            let dragged = LinuxSidebarPolicy.draggedSessionBlock(source: source, selection: store.sidebarSelectionIDs)
+            guard let move = SidebarDrop.resolveFlaggedReorder(order: order, dragged: dragged, onRow: nil, childIndex: slot) else { return }
+            store.moveFlagged(move.ids, to: move.placement, of: move.anchor)
+            syncSidebar(preferMoving: Set(move.ids))
+            return
+        }
         guard let tgt = store.sessionLocation(ofSession: target) else { return }
         let dropTarget = SidebarDrop.SessionDropTarget.sessionRow(workspace: tgt.workspace, sessionIndex: tgt.index, sessionCount: tgt.count)
         let slot = LinuxSidebarPolicy.dropInsertionSlot(targetIndex: tgt.index, y: y, height: targetHeight)
@@ -480,6 +505,7 @@ extension AppController {
         }
         guard let resolution = SidebarDrop.resolveSessions(sources: sources, target: dropTarget,
                                                            childIndex: slot) else { return }
+        guard store.canMoveSessions(ids, toWorkspace: resolution.workspace, at: resolution.destination) else { return }
         store.moveSessions(ids, toWorkspace: resolution.workspace, at: resolution.destination)
         // The dragged block breaks the planner's LIS ties: without the hint an equally minimal plan
         // may move the rows the block passed over instead of the rows the user dragged.
@@ -599,6 +625,7 @@ extension AppController {
             sources: sources,
             target: .workspaceRow(id: workspace, sessionCount: target.sessions.count),
             childIndex: SidebarDrop.onItemIndex) else { return }
+        guard store.canMoveSessions(ids, toWorkspace: resolution.workspace, at: resolution.destination) else { return }
         store.moveSessions(ids, toWorkspace: resolution.workspace, at: resolution.destination)
         reconcile(preferMoving: Set(ids))
     }

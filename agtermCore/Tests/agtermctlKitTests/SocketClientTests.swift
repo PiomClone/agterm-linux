@@ -308,6 +308,8 @@ struct SocketClientTests {
             open_directory              cmd+o
             rename_session              -
             duplicate_session           -
+            new_companion               -
+            duplicate_companion         -
             close_session               cmd+w
             reopen_recent               cmd+shift+t
             undo_close                  cmd+z
@@ -346,6 +348,8 @@ struct SocketClientTests {
             show_attention              ctrl+shift+i
             dashboard                   cmd+shift+g
             attach_remote               cmd+shift+r
+            edit_flagged_sessions       -
+            edit_focused_workspaces     -
 
         commands:
             Deploy  cmd+shift+y
@@ -391,6 +395,32 @@ struct SocketClientTests {
         #expect(printed == Data("9f3c\n".utf8))
     }
 
+    @Test func anAppTooOldForCompanionsIsNamedAndNothingElseIsSent() throws {
+        let decodeError = "invalid request: Cannot initialize Command from invalid String value session.companion.new"
+        let server = StubServer(response: ControlResponse(ok: false, error: decodeError))
+        try server.start()
+        defer { server.stop() }
+
+        let command = try Session.New.parse(["--parent", "p1", "--socket", server.path])
+        let printed = try captureStdout { #expect(throws: ExitCode.failure) { try command.run() } }
+
+        #expect(printed.isEmpty)
+        #expect(server.received?.cmd == .sessionCompanionNew)
+    }
+
+    @Test func anAppTooOldForCompanionsKeepsTheRawReplyUnderJSON() throws {
+        let response = ControlResponse(ok: false, error: "invalid request: Cannot initialize Command from invalid String value session.companion.new")
+        let server = StubServer(response: response)
+        try server.start()
+        defer { server.stop() }
+
+        let command = try Session.New.parse(["--parent", "p1", "--json", "--socket", server.path])
+        let printed = try captureStdout { #expect(throws: ExitCode.failure) { try command.run() } }
+
+        let decoded = try JSONDecoder().decode(ControlResponse.self, from: printed)
+        #expect(decoded == response)
+    }
+
     @Test func runQuietsIdForNonCreateCommand() throws {
         let server = StubServer(response: ControlResponse(ok: true, result: ControlResult(id: "9f3c")))
         try server.start()
@@ -399,6 +429,16 @@ struct SocketClientTests {
         let command = try Tree.parse(["--socket", server.path])
         let printed = try captureStdout { try command.run() }
         #expect(printed == Data("ok\n".utf8))
+    }
+
+    @Test func recentClearRunLabelsAffectedEntriesAsItems() throws {
+        let server = StubServer(response: ControlResponse(ok: true, result: ControlResult(affected: 2)))
+        try server.start()
+        defer { server.stop() }
+
+        let command = try Recent.Clear.parse(["--socket", server.path])
+        let printed = try captureStdout { try command.run() }
+        #expect(printed == Data("2 items\n".utf8))
     }
 
     /// Runs `body` with the process stdout redirected to a pipe, returning the bytes it printed.
@@ -825,6 +865,23 @@ struct SocketClientTests {
         #expect(SocketClient.formatResponse(ControlResponse(ok: true)) == "ok")
     }
 
+    @Test func formatRecentCountsAParentEntrysCompanions() {
+        let items = [
+            ControlRecentItem(id: "R1", kind: "session", title: "api", subtitle: "work", closedAt: 0,
+                              workspaceID: "W", sessionIDs: ["P", "C1", "C2"]),
+            ControlRecentItem(id: "R2", kind: "session", title: "db", subtitle: nil, closedAt: 0,
+                              workspaceID: "W", sessionIDs: ["S"]),
+            ControlRecentItem(id: "R3", kind: "workspace", title: "work", subtitle: "2 sessions", closedAt: 0,
+                              workspaceID: "W", sessionIDs: ["A", "B"]),
+        ]
+
+        #expect(SocketClient.formatRecent(items) == """
+        R1  session  api (work) +2 companion(s)
+        R2  session  db
+        R3  workspace  work (2 sessions)
+        """)
+    }
+
     @Test func formatResponseEchoesIdWhenRequested() {
         let response = ControlResponse(ok: true, result: ControlResult(id: "9f3c"))
         #expect(SocketClient.formatResponse(response, echoID: true) == "9f3c")
@@ -877,6 +934,16 @@ struct SocketClientTests {
     func formatResponseAffectedItems(_ affected: Int, _ expected: String) {
         let response = ControlResponse(ok: true, result: ControlResult(affected: affected))
         #expect(SocketClient.formatResponse(response, affectedNoun: "item") == expected)
+    }
+
+    @Test(arguments: [
+        (ControlResult(id: "9f3c", undoable: true), "ok (undoable)"),
+        (ControlResult(id: "9f3c", undoable: false), "ok (not undoable)"),
+        (ControlResult(affected: 2, undoable: true), "2 sessions (undoable)"),
+        (ControlResult(affected: 1, undoable: false), "1 session (not undoable)")
+    ])
+    func formatResponseUndoableClose(_ result: ControlResult, _ expected: String) {
+        #expect(SocketClient.formatResponse(ControlResponse(ok: true, result: result)) == expected)
     }
 
     @Test func formatResponseError() {
@@ -1173,7 +1240,11 @@ struct SocketClientTests {
         defer { close(lock) }
 
         let error = try #require(throws: SocketClientError.self) { _ = try SocketClient(path: socket.path).connect() }
+        #if os(Linux)
+        #expect(error.description.contains("agterm may be stopped or unable to accept connections"))
+        #else
         #expect(error.description.contains("the socket owner is present but not accepting connections"))
+        #endif
         #expect(error.description.contains("Connection refused"))
     }
 
@@ -1207,7 +1278,11 @@ struct SocketClientTests {
         try #require(flock(lock, LOCK_EX | LOCK_NB) == 0)
 
         let error = try #require(throws: SocketClientError.self) { _ = try SocketClient(path: path).connect() }
+        #if os(Linux)
+        #expect(error.description.contains("agterm may be stopped or unable to accept connections"))
+        #else
         #expect(error.description.contains("the socket owner is present but not accepting connections"))
+        #endif
         #expect(error.description.contains("No such file or directory"))
     }
 
@@ -1239,7 +1314,7 @@ private final class RefusedSocket {
 
     init() throws {
         path = NSTemporaryDirectory() + "agterm-refused-\(UUID().uuidString.prefix(8)).sock"
-        fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        fd = systemSocket()
         guard fd >= 0 else { throw SocketClientError("refused socket() failed") }
         unlink(path)
         var addr = sockaddr_un()

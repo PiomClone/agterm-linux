@@ -1,6 +1,6 @@
 #if canImport(Darwin)
 import Darwin
-#elseif canImport(Glibc)
+#else
 import Glibc
 #endif
 import Foundation
@@ -126,6 +126,54 @@ struct ZmxReplayScriptTests {
         #expect(try String(contentsOf: result, encoding: .utf8) == "two words and more")
     }
 
+    @Test func endingCommandRunsItsLineAndExitsWithItsStatus() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let result = fixture.appending(path: "ending")
+        let output = CommandRestore.shellQuotedLine([result.path])
+        let script = ZmxReplayScript.renderEnding(commandLine: "printf '%s' 'two words' > \(output) && exit 7")
+
+        #expect(script == "'builtin' 'eval' -- " + CommandRestore.shellQuotedLine(["printf '%s' 'two words' > \(output) && exit 7"]))
+        #expect(try runZsh(script: script) == 7)
+        #expect(try String(contentsOf: result, encoding: .utf8) == "two words")
+    }
+
+    @Test func aDuplicatedProgramsCreationCommandKeepsItsArgvThroughZsh() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let result = fixture.appending(path: "argv")
+        let probe = fixture.appending(path: "record-argv")
+        try makeArgumentProbe(probe)
+        let expected = ["can't", "two words", "", "$HOME", "semi;colon"]
+        let command = try #require(DuplicateReplay.Plan.program(argv: [probe.path, result.path] + expected, workingDirectory: "/").command)
+
+        #expect(try runZsh(script: ZmxReplayScript.renderEnding(commandLine: command)) == 0)
+        #expect(try nullSeparatedValues(at: result) == expected)
+    }
+
+    @Test func endingCommandStartsNoShellAfterIt() {
+        let script = ZmxReplayScript.renderEnding(commandLine: "lazygit")
+        let fishScript = ZmxReplayScript.renderFishEnding(commandLine: "printf '%s' 'two words'")
+
+        #expect(!script.contains("exec"))
+        #expect(!script.contains("ZDOTDIR"))
+        #expect(fishScript == "builtin status job-control full; builtin eval 'printf \\'%s\\' \\'two words\\''")
+    }
+
+    @Test(.enabled(if: fishPath != nil || fishRequired, "fish is unavailable; real-fish tests are skipped"))
+    func fishEndingCommandRunsItsLineAndStartsNoShell() throws {
+        let fish = try resolvedFish()
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let result = fixture.appending(path: "ending")
+        let script = ZmxReplayScript.renderFishEnding(
+            commandLine: "printf '%s' 'two words' > " + CommandRestore.shellQuotedLine([result.path])
+        )
+
+        try runFish(executable: fish, script: script, fixture: fixture)
+        #expect(try String(contentsOf: result, encoding: .utf8) == "two words")
+    }
+
     @Test func fishRenderersUseFishEscapingAndRearmBeforeTheFinalShell() {
         let root = "/Applications/agterm resources/shell-integration"
         let argv = ["/tmp/tool $name;*", "two words", "can't", ""]
@@ -196,6 +244,22 @@ struct ZmxReplayScriptTests {
         #expect(environment == [
             "/integration root:/usr/local/share:/usr/share", "/integration root",
         ])
+    }
+
+    @Test(.enabled(if: fishPath != nil || fishRequired, "fish is unavailable; real-fish tests are skipped"))
+    func aDuplicatedProgramsCreationCommandKeepsItsArgvThroughFish() throws {
+        let fish = try resolvedFish()
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let result = fixture.appending(path: "argv")
+        let probe = fixture.appending(path: "record-argv")
+        try makeArgumentProbe(probe)
+        let expected = ["can't", "two words", "", "$HOME", "semi;colon"]
+        let command = try #require(DuplicateReplay.Plan.program(argv: [probe.path, result.path] + expected, workingDirectory: "/").command)
+
+        try runFish(executable: fish, script: ZmxReplayScript.renderFishEnding(commandLine: command), fixture: fixture,
+                    environment: ["RESULT_FILE": result.path])
+        #expect(try nullSeparatedValues(at: result) == expected)
     }
 
     @Test(.enabled(if: fishPath != nil || fishRequired, "fish is unavailable; real-fish tests are skipped"))
@@ -350,7 +414,8 @@ struct ZmxReplayScriptTests {
         ])
 
         #expect(try String(contentsOf: payloadLog, encoding: .utf8) == "ran\n")
-        #expect(try nullSeparatedValues(at: result) == ["/integration root:/user/share", "/integration root"])
+        let values = try nullSeparatedValues(at: result)
+        #expect(values == ["/integration root:/user/share", "/integration root"])
     }
 
     private func makeFixture() throws -> URL {
@@ -403,22 +468,22 @@ struct ZmxReplayScriptTests {
         try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: inTerminal ? "/usr/bin/script" : executable)
-        #if os(Linux)
-        if inTerminal {
-            let cmd = CommandRestore.shellQuotedLine([executable, "--no-config", "-lic", script])
-            process.arguments = ["-q", "-e", "-c", cmd, "/dev/null"]
-        } else {
-            process.arguments = ["--no-config", "-lic", script]
-        }
+        let fishArguments = ["--no-config", "-lic", script]
+        #if canImport(Darwin)
+        process.arguments = (inTerminal ? ["-q", "/dev/null", executable] : []) + fishArguments
         #else
-        process.arguments = (inTerminal ? ["-q", "/dev/null", executable] : []) + ["--no-config", "-lic", script]
+        process.arguments = inTerminal
+            ? ["-q", "-e", "-c", CommandRestore.shellQuotedLine([executable] + fishArguments), "/dev/null"]
+            : fishArguments
         #endif
         if inTerminal { process.standardInput = FileHandle.nullDevice }
         var processEnvironment = ProcessInfo.processInfo.environment
         processEnvironment.removeValue(forKey: "XDG_DATA_DIRS")
+        #if os(Linux)
+        processEnvironment["SHELL"] = "/bin/sh" // util-linux script runs -c through SHELL, with POSIX quoting below.
+        #endif
         process.environment = processEnvironment.merging([
             "HOME": home.path,
-            "SHELL": "/bin/sh",
             "XDG_CONFIG_HOME": config.path,
             "XDG_DATA_HOME": data.path,
         ].merging(overrides) { _, new in new }) { _, new in new }
@@ -470,11 +535,10 @@ struct ZmxReplayScriptTests {
     private func runZshInTerminal(script: String, environment overrides: [String: String]) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        #if os(Linux)
-        let cmd = CommandRestore.shellQuotedLine(["/bin/zsh", "-lic", script])
-        process.arguments = ["-q", "-e", "-c", cmd, "/dev/null"]
-        #else
+        #if canImport(Darwin)
         process.arguments = ["-q", "/dev/null", "/bin/zsh", "-lic", script]
+        #else
+        process.arguments = ["-q", "-e", "-c", CommandRestore.shellQuotedLine(["/bin/zsh", "-lic", script]), "/dev/null"]
         #endif
         process.environment = ProcessInfo.processInfo.environment.merging(overrides) { _, new in new }
         process.standardInput = FileHandle.nullDevice

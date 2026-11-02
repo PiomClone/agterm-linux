@@ -41,6 +41,7 @@ extension AppStore {
     /// rules of `openOverlay`/`openPaneOverlay`. Refused when the placement rule hands the slot to the presenting
     /// Mac, which `openRemotePage` serves. NOT persisted.
     public func openHtmlOverlay(_ sessionID: UUID, pane: OverlayPane?, overlay: HtmlOverlay, sizePercent: Int?,
+                                points: OverlayPointSize = OverlayPointSize(),
                                 backgroundColor: String? = nil) -> HtmlOverlayOpenFailure? {
         guard let session = session(withID: sessionID) else { return .unknownSession }
         if pageBelongsRemote(session, pane: pane) { return .presenter }
@@ -49,7 +50,9 @@ extension AppStore {
             guard session.rendersPane(pane) else { return .paneNotVisible }
             session.setPaneOverlayExitCode(nil, pane: pane)
             session.remoteOverlays.clearFailure(pane)
-            session.setPaneOverlay(PaneOverlay(html: overlay, backgroundColor: backgroundColor), pane: pane)
+            var slot = PaneOverlay(html: overlay, backgroundColor: backgroundColor)
+            slot.holdsSessionCover = session.coverOverlayActive
+            session.setPaneOverlay(slot, pane: pane)
             if overlay.replicaOf == nil { HtmlPageOutcomes.shared.register(overlay.id) }
             scheduleTreeChanged()
             return nil
@@ -60,6 +63,7 @@ extension AppStore {
         session.overlayExitCode = nil
         session.remoteOverlays.clearFailure(nil)
         session.overlaySizePercent = sizePercent.map { min(100, max(1, $0)) }
+        session.overlayPoints = sizePercent == nil ? OverlayPointSize() : points
         session.overlayBackgroundColor = backgroundColor
         session.htmlOverlay = overlay
         session.overlayActive = true
@@ -152,7 +156,7 @@ extension AppStore {
         let remote = Dictionary(remotePageNodes(session).map { ($0.pane, $0.page) }, uniquingKeysWith: { first, _ in first })
         let nodes = ([nil] + OverlayPane.allCases).compactMap { (pane: OverlayPane?) -> ControlHtmlOverlayNode? in
             let local = pane.map { session.paneOverlay($0)?.html } ?? (session.htmlOverlayActive ? session.htmlOverlay : nil)
-            if let local { return htmlOverlayNode(local, pane: pane, zoom: zoom, hidden: session.overlayHidden(pane)) }
+            if let local { return htmlOverlayNode(local, pane: pane, zoom: zoom, hidden: session.overlayOutOfSight(pane)) }
             guard let page = remote[pane] else { return nil }
             return htmlOverlayNode(page.overlay, pane: pane, zoom: nil, hidden: page.hidden, remote: true)
         }

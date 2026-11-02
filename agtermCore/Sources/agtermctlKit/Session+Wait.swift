@@ -2,11 +2,6 @@ import ArgumentParser
 import Dispatch
 import Foundation
 import agtermCore
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#endif
 
 /// The result of a `session wait`: a status in the `--until` set, the session leaving the open tree, or
 /// the deadline passing first.
@@ -94,7 +89,7 @@ extension Session {
                     Self.reportTimeout()
                     #if canImport(Darwin)
                     Darwin.exit(Self.timeoutExitCode)
-                    #elseif canImport(Glibc)
+                    #else
                     Glibc.exit(Self.timeoutExitCode)
                     #endif
                 }

@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERIFY="$ROOT/scripts/verify-linux-resources.sh"
 VERIFY_CACHE="$ROOT/scripts/verify-linux-vendor-cache.sh"
-# shellcheck source=../linux/ghostty-resources.env
-source "$ROOT/linux/ghostty-resources.env"
+# shellcheck source=../linux/ghostty-build.sh
+source "$ROOT/linux/ghostty-build.sh"
 
 command -v tic >/dev/null || { echo "tic is required to test Ghostty resources" >&2; exit 1; }
 ZIG="$(command -v zig || true)"
@@ -47,6 +47,7 @@ fi
 printf 'fixture\n' > "$SHARE/ghostty/shell-integration/zsh/.zshenv"
 
 mkdir -p "$WORK/complete/include/ghostty" "$WORK/complete/lib"
+printf '%s\n' "$GHOSTTY_STAMP" > "$WORK/complete/REVISION"
 printf 'fixture\n' > "$WORK/complete/include/ghostty.h"
 printf 'fixture\n' > "$WORK/complete/include/ghostty/vt.h"
 cat > "$WORK/uname" <<'EOF'
@@ -75,6 +76,11 @@ install -m755 "$WORK/libghostty-x86_64.so" "$WORK/complete/lib/libghostty.so"
 AGTERM_TEST_UNAME=x86_64 PATH="$WORK:$PATH" "$VERIFY_CACHE" "$WORK/complete" >/dev/null
 expect_cache_failure aarch64 "expected aarch64 (ARM aarch64)"
 
+printf '%s stale-patches\n' "$GHOSTTY_REV" > "$WORK/complete/REVISION"
+expect_cache_failure x86_64 "revision or patch set is stale"
+printf '%s\n' "$GHOSTTY_STAMP" > "$WORK/complete/REVISION"
+
+
 install -m755 "$WORK/libghostty-aarch64.so" "$WORK/complete/lib/libghostty.so"
 AGTERM_TEST_UNAME=aarch64 PATH="$WORK:$PATH" "$VERIFY_CACHE" "$WORK/complete" >/dev/null
 expect_cache_failure x86_64 "expected x86_64 (x86-64)"
@@ -92,6 +98,10 @@ mkdir -p "$SETUP_ROOT/scripts/zmx-patches/ghostty"
 cp "$ROOT/scripts/zmx-patches/"*.patch "$SETUP_ROOT/scripts/zmx-patches/"
 cp "$ROOT/scripts/zmx-patches/ghostty/"*.patch "$SETUP_ROOT/scripts/zmx-patches/ghostty/"
 cp "$ROOT/linux/arch.sh" "$ROOT/linux/ghostty-resources.env" "$ROOT/linux/zmx.env" "$SETUP_ROOT/linux/"
+cp "$ROOT/linux/ghostty-build.sh" "$SETUP_ROOT/linux/"
+mkdir -p "$SETUP_ROOT/scripts/ghostty-patches" "$SETUP_ROOT/linux/patches"
+cp "$ROOT/scripts/ghostty-patches/"*.patch "$SETUP_ROOT/scripts/ghostty-patches/"
+cp "$ROOT/linux/patches/"*.patch "$SETUP_ROOT/linux/patches/"
 cp -R "$WORK/complete/." "$SETUP_ROOT/agterm-linux/vendor/ghostty/"
 cat > "$SETUP_ROOT/agterm-linux/vendor/zmx/zmx" <<'EOF'
 #!/usr/bin/env bash

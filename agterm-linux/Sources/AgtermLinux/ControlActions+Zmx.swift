@@ -193,11 +193,11 @@ extension AppController {
     }
 
     func attachRemoteSession(host: String, session remoteID: String,
-                             tree: ControlRemoteTree) -> ControlResponse {
+                             tree: ControlRemoteTree, parent: UUID? = nil, select: Bool = true, tint: SidebarTint? = nil) -> ControlResponse {
         guard let remote = tree.sessions.first(where: { $0.id == remoteID }) else {
             return ControlResponse(ok: false, error: "no attachable session \(remoteID) on \(host)")
         }
-        guard let workspace = store.currentWorkspaceID else {
+        guard let workspace = parent.flatMap({ store.workspace(forSession: $0)?.id }) ?? store.currentWorkspaceID else {
             return ControlResponse(ok: false, error: "no window to attach into")
         }
         let byRole = Dictionary(remote.panes.map { (ZmxPaneRole(controlName: $0.pane), $0.daemon) },
@@ -224,7 +224,7 @@ extension AppController {
         }
         guard let created = store.addSession(
             toWorkspace: workspace, cwd: Self.homeCwd, command: primary,
-            name: remote.name, wait: true, remoteHost: host
+            name: remote.name, wait: true, select: select, remoteHost: host, tint: tint, parentID: parent
         ) else {
             return ControlResponse(ok: false, error: "could not create the session")
         }
@@ -246,9 +246,9 @@ extension AppController {
         store.bindRemote(RemoteBinding(remoteSessionID: remote.id, daemonsByLocalPane: daemons,
                                        presentationVersion: tree.presentation, origin: origin),
                          forSession: created.id)
-        reconcile()
-        sessionFocusTarget(for: created.id, wantSplit: created.splitFocused)?.grabFocus()
-        return ControlResponse(ok: true, result: ControlResult(id: created.id.uuidString))
+        reconcile(focusActive: select)
+        if select { sessionFocusTarget(for: created.id, wantSplit: created.splitFocused)?.grabFocus() }
+        return ControlResponse(ok: true, result: ControlResult(id: created.id.uuidString, parent: parent?.uuidString))
     }
 
     var configuredRemotes: [RemoteEntry] {

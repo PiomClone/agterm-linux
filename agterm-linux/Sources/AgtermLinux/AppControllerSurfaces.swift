@@ -31,7 +31,7 @@ extension AppController {
         // Drop closed sessions, but never one a pending close still holds for its undo window.
         var live = Set(store.workspaces.flatMap { $0.sessions.map(\.id) })
         live.formUnion(store.pendingHeldSessionIDs())
-        for id in Array(surfaces.keys) where !live.contains(id) { removeSession(id) }
+        for id in Array(sessionStacks.keys) where !live.contains(id) { removeSession(id) }
         if syncSidebar { self.syncSidebar(preferMoving: preferMoving) }
         showActive(focus: focusActive)
         updateTitle()
@@ -60,10 +60,12 @@ extension AppController {
     /// pane(s), "scratch" = the full-overlay scratch shell). The primary pane starts in the paned's start
     /// child and keeps whatever slot it is given for its lifetime (`primaryInEndSlot`).
     private func ensurePrimary(_ s: Session) {
+        if s.content == .page { ensurePageSession(s); return }
         guard surfaces[s.id] == nil,
               let paned = OpaquePointer(gtk_paned_new(GTK_ORIENTATION_HORIZONTAL)),
               let stack = op(gtk_stack_new()) else { return }
         sessionPanes[s.id] = paned
+        gtk_widget_add_css_class(W(paned), "agterm-terminal-split")
         connect(paned, "notify::position", unsafeBitCast(onPanedPosition as @convention(c) (OpaquePointer?, OpaquePointer?, gpointer?) -> Void, to: GCallback.self))
         let dividerClick = gtk_gesture_click_new()
         gtk_gesture_single_set_button(dividerClick, 1)
@@ -235,68 +237,6 @@ extension AppController {
     /// Measure an empty, visible GtkFrame, apply the current overlay geometry, mount its child, and return
     /// the child's usable box. The ordering matters: a size request, hidden state, or mounted child would
     /// contaminate the frame-only chrome measurement used by the pre-layout surface estimate.
-    private func mountFloatingOverlayFrame(
-        _ session: Session,
-        frame: OpaquePointer,
-        overlay: OpaquePointer,
-        child: OpaquePointer?,
-        fallbackPercent: Int
-    ) -> (width: Int32, height: Int32) {
-        var chromeWidth: Int32 = 0, chromeHeight: Int32 = 0
-        gtk_widget_measure(W(frame), GTK_ORIENTATION_HORIZONTAL, -1, &chromeWidth, nil, nil, nil)
-        gtk_widget_measure(W(frame), GTK_ORIENTATION_VERTICAL, -1, &chromeHeight, nil, nil, nil)
-        let request = updateFloatingOverlayFrame(
-            session, frame: frame, overlay: overlay, fallbackPercent: fallbackPercent)
-        gtk_frame_set_child(cast(frame), W(child))
-        return GhosttySurfaceGeometry.contentSize(
-            request: request, chrome: (width: chromeWidth, height: chromeHeight))
-    }
-
-    @discardableResult
-    func updateFloatingOverlayFrame(_ session: Session, frame: OpaquePointer,
-                                    overlay: OpaquePointer,
-                                    fallbackPercent: Int) -> (width: Int32, height: Int32) {
-        let width = gtk_widget_get_width(W(overlay))
-        let height = gtk_widget_get_height(W(overlay))
-        let widthPercent = Int32(session.overlaySizePercent ?? fallbackPercent)
-        let heightPercent = Int32(session.hudHeightPercent ?? session.overlaySizePercent ?? fallbackPercent)
-        let minimumWidth: Int32 = session.hudActive ? 1 : 240
-        let minimumHeight: Int32 = session.hudActive ? 1 : 160
-        let request = (width: max(minimumWidth, width * widthPercent / 100),
-                       height: max(minimumHeight, height * heightPercent / 100))
-        gtk_widget_set_size_request(W(frame), request.width, request.height)
-        let position = session.hudSpec?.position ?? .center
-        let horizontal: GtkAlign
-        switch position {
-        case .topLeft, .centerLeft, .bottomLeft: horizontal = GTK_ALIGN_START
-        case .topRight, .centerRight, .bottomRight: horizontal = GTK_ALIGN_END
-        default: horizontal = GTK_ALIGN_CENTER
-        }
-        let vertical: GtkAlign
-        switch position {
-        case .topLeft, .topCenter, .topRight: vertical = GTK_ALIGN_START
-        case .bottomLeft, .bottomCenter, .bottomRight: vertical = GTK_ALIGN_END
-        default: vertical = GTK_ALIGN_CENTER
-        }
-        gtk_widget_set_halign(W(frame), horizontal)
-        gtk_widget_set_valign(W(frame), vertical)
-        let horizontalMargin = width * Int32(HudPosition.edgeMarginPercent) / 100
-        let verticalMargin = height * Int32(HudPosition.edgeMarginPercent) / 100
-        gtk_widget_set_margin_start(W(frame), horizontal == GTK_ALIGN_START ? horizontalMargin : 0)
-        gtk_widget_set_margin_end(W(frame), horizontal == GTK_ALIGN_END ? horizontalMargin : 0)
-        gtk_widget_set_margin_top(W(frame), vertical == GTK_ALIGN_START ? verticalMargin : 0)
-        gtk_widget_set_margin_bottom(W(frame), vertical == GTK_ALIGN_END ? verticalMargin : 0)
-        let targetable = Self.floatingOverlayTargetable(isHud: session.hudActive)
-        gtk_widget_set_can_target(W(frame), targetable ? 1 : 0)
-        gtk_widget_set_focusable(W(frame), 0)
-        if let surface = overlaySurfaces[session.id] {
-            gtk_widget_set_can_target(W(surface.rootWidget), targetable ? 1 : 0)
-            gtk_widget_set_focusable(
-                W(surface.glArea), Self.floatingOverlayFocusable(isHud: session.hudActive) ? 1 : 0)
-        }
-        return request
-    }
-
     static func floatingOverlayTargetable(isHud: Bool) -> Bool { !isHud }
     static func floatingOverlayFocusable(isHud: Bool) -> Bool { !isHud }
 
@@ -318,12 +258,13 @@ extension AppController {
         guard Self.hudGeometryNeedsRefresh(
             previous: lastHudGeometryDeckSize, width: width, height: height) else { return }
         lastHudGeometryDeckSize = (width, height)
+        syncAskSurfaces()
         for (id, paned) in sessionPanes where store.session(withID: id)?.isSplit == true {
             scheduleSplitRatioRestore(sessionID: id, paned: paned)
         }
         for (id, frame) in floatingOverlayFrames {
-            guard let session = store.session(withID: id), session.hudActive,
-                  let percent = session.overlaySizePercent else { continue }
+            guard let session = store.session(withID: id), let percent = session.overlaySizePercent else { continue }
+            refreshHudMeasurement(session)
             let host = placeFloatingOverlayFrame(frame, for: session)
             updateFloatingOverlayFrame(session, frame: frame, overlay: host, fallbackPercent: percent)
         }
@@ -515,6 +456,7 @@ extension AppController {
         surface.onExitHeld = { [weak self, weak surface] in
             guard let self, let surface else { return }
             self.remoteHeldExits.paneHeld(surface, forSession: sessionID)
+            self.remotePaneRespawnHeld(surface)
         }
     }
 
@@ -655,7 +597,7 @@ extension AppController {
         scheduleSplitRatioRestore(sessionID: session.id, paned: paned)
     }
 
-    private func removeSession(_ id: UUID) {
+    func removeSession(_ id: UUID) {
         removeTerminalAskSurface(id)
         abandonSearch(ownedBy: id)
         splitRatioRestore.cancel(sessionID: id)
@@ -701,7 +643,7 @@ extension AppController {
         for session in store.workspaces.flatMap(\.sessions) {
             guard let stack = sessionStacks[session.id] else { continue }
             let page: String
-            if session.fullOverlayActive {
+            if session.fullOverlayVisible {
                 page = session.htmlOverlayActive ? "html" : "overlay"
             } else if session.scratchActive {
                 page = "scratch"
@@ -746,7 +688,7 @@ extension AppController {
             if let page = active.topmostHtmlOverlay,
                let view = LinuxHtmlOverlayRegistry.shared.existing(page.id) {
                 gtk_widget_grab_focus(W(view.webView))
-            } else if active.programOverlayActive {
+            } else if active.programOverlayVisible {
                 overlaySurfaces[active.id]?.grabFocus()
             } else if active.scratchActive {
                 scratchSurfaces[active.id]?.grabFocus()
@@ -866,7 +808,7 @@ extension AppController {
         for (id, frame) in floatingOverlayFrames {
             let visible = Self.floatingOverlayVisible(
                 sessionID: id, activeID: activeID,
-                overlayActive: store.session(withID: id)?.overlayActive == true,
+                overlayActive: store.session(withID: id).map { $0.overlayActive && ($0.hudActive || $0.sessionSlotShown) } == true,
                 zoomTarget: terminalZoom.target)
             gtk_widget_set_visible(W(frame), visible ? 1 : 0)
         }

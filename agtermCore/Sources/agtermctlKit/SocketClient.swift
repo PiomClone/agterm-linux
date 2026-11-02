@@ -117,7 +117,7 @@ struct SocketClient {
     }
 
     /// The sentence after a failed `connect`. A refusal and a missing socket are the two the ownership
-    /// lock narrows, and only to an owner being there: `ControlServer.start` keeps the lock after a failed
+    /// lock narrows on Darwin, and only to an owner being there: `ControlServer.start` keeps the lock after a failed
     /// bind, so a held lock never says how the socket came to be unreachable.
     private static func hint(forConnect failure: Int32, path: String) -> String {
         guard failure == ECONNREFUSED || failure == ENOENT else { return "is agterm running?" }
@@ -128,12 +128,11 @@ struct SocketClient {
     }
 
     /// Whether a process holds the server's ownership lock on `<socketPath>.lock`, nil when that cannot be
-    /// answered. Darwin's `F_GETLK` observes a `flock` without competing for it; taking a shared lock to
-    /// test instead would fail a starting instance's own `LOCK_EX|LOCK_NB`.
+    /// answered. Darwin's `F_GETLK` observes a `flock` without competing for it. Linux has no equivalent
+    /// non-competing probe for BSD `flock`, so its failure hint stays generic.
     private static func ownershipLockHeld(socketPath: String) -> Bool? {
-        let lockPath = ControlResolve.ownershipLockPath(forSocket: socketPath)
         #if canImport(Darwin)
-        let fd = open(lockPath, O_RDONLY | O_CLOEXEC)
+        let fd = open(ControlResolve.ownershipLockPath(forSocket: socketPath), O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         var query = flock()
@@ -145,15 +144,6 @@ struct SocketClient {
         guard queried == 0 else { return nil }
         return query.l_type != Int16(F_UNLCK)
         #elseif canImport(Glibc)
-        let fd = open(lockPath, O_RDONLY | O_CLOEXEC)
-        guard fd >= 0 else { return nil }
-        defer { close(fd) }
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
-            _ = flock(fd, LOCK_UN)
-            return false
-        } else if errno == EWOULDBLOCK || errno == EAGAIN {
-            return true
-        }
         return nil
         #else
         return nil
@@ -205,7 +195,7 @@ struct SocketClient {
             return
         }
         if !reply.response.ok {
-            FileHandle.standardError.write(Data((formatResponse(reply.response, affectedNoun: affectedNoun) + "\n").utf8))
+            FileHandle.standardError.write(Data((formatResponse(reply.response) + "\n").utf8))
             return
         }
         print(formatResponse(reply.response, echoID: echoID, affectedNoun: affectedNoun))
@@ -313,6 +303,10 @@ struct SocketClient {
         if let exitCode = response.result?.exitCode {
             return "exit \(exitCode)"
         }
+        if let undoable = response.result?.undoable {
+            let closed = response.result?.affected.map(formatAffected) ?? "ok"
+            return "\(closed) (\(undoable ? "undoable" : "not undoable"))"
+        }
         if let affected = response.result?.affected {
             let noun = affected == 1 ? affectedNoun : "\(affectedNoun)s"
             return "\(affected) \(noun)"
@@ -345,6 +339,10 @@ struct SocketClient {
             return id
         }
         return "ok"
+    }
+
+    static func formatAffected(_ affected: Int) -> String {
+        affected == 1 ? "1 session" : "\(affected) sessions"
     }
 
     static func formatIdentity(_ identity: AppIdentity) -> String {
@@ -437,7 +435,9 @@ struct SocketClient {
         guard !items.isEmpty else { return RecentClosedTarget.emptyError }
         return items.map { item in
             let subtitle = item.subtitle.map { " (\($0))" } ?? ""
-            return "\(item.id)  \(item.kind)  \(item.title)\(subtitle)"
+            let companions = item.kind == "session" && item.sessionIDs.count > 1
+                ? " +\(item.sessionIDs.count - 1) companion(s)" : ""
+            return "\(item.id)  \(item.kind)  \(item.title)\(subtitle)\(companions)"
         }.joined(separator: "\n")
     }
 

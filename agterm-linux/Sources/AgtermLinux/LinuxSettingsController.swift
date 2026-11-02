@@ -160,6 +160,7 @@ extension AppController {
         let countA = (hidden.contains(.recentSessions) ? 0 : 1)
             + ((settings.attentionButtonEnabled ?? false) ? 1 : 0)
         let countB = (hidden.contains(.scratch) ? 0 : 1) + (hidden.contains(.split) ? 0 : 1)
+            + (hidden.contains(.overlayToggle) ? 0 : 1)
         let countC = (hidden.contains(.dashboard) ? 0 : 1) + (hidden.contains(.quickTerminal) ? 0 : 1)
         let dividers = InterfaceElement.titlebarGroupDividers(countA: countA, countB: countB, countC: countC)
         gtk_widget_set_visible(W(titlebarDividerAfterA), dividers.afterA ? 1 : 0)
@@ -168,6 +169,7 @@ extension AppController {
             of: [.newWorkspace, .newSession, .flaggedView, .focusFilter])
         gtk_widget_set_visible(W(bottomBar), footerVisible ? 1 : 0)
         updateTitle()
+        LinuxHtmlOverlayRegistry.shared.refreshChrome()
     }
 
     func setNewSessionDirectoryAtIndex(_ index: Int) {
@@ -424,6 +426,9 @@ extension AppController {
         let stayOnActive = settings.autoFollowStayOnActive ?? false
         // Keep the upstream DispatchQueue timer disabled under GTK. Linux owns the equivalent GLib
         // runtime, while AppStore.noteUserActivity still supplies the shared control API's idle metric.
+        store.attentionIncludesActive = settings.attentionIncludesActive ?? false
+        store.attentionNavigationAcrossWindows = settings.attentionNavigationAcrossWindows ?? false
+        library.setFlaggedLayout(settings.effectiveFlaggedViewLayout)
         store.setAutoFollow(timeout: nil, stayOnActive: stayOnActive)
         autoFollowCoordinator.configure(timeout: timeout, stayOnActive: stayOnActive)
     }

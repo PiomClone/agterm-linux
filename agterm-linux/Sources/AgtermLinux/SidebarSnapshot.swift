@@ -18,6 +18,7 @@ struct SidebarSnapshot: Equatable {
         /// Carried here as well as on the section so a collapse repaints the disclosure arrow and the
         /// add-session tooltip; `setExpanded` only hides the list box.
         var expanded: Bool
+        var tint: SidebarTint?
     }
 
     struct RowContent: Equatable {
@@ -30,6 +31,12 @@ struct SidebarSnapshot: Equatable {
         var remote = false
         /// The remote row's stream notice, shown as the lead icon's tooltip; set only while the stream is down.
         var notice: String?
+        var tint: SidebarTint?
+        var indented = false
+        var shown = true
+        var hasCompanions = false
+        var expanded = true
+        var foldedAttention: String?
 
         var disconnected: Bool { remote && notice != nil }
 
@@ -92,12 +99,12 @@ extension SidebarSnapshot {
     @MainActor
     static func desired(from store: AppStore, settings: AppSettings,
                         renaming: AppController.RenameTarget?,
-                        expandedWorkspaceIDs: Set<UUID>) -> SidebarSnapshot {
+                        expandedWorkspaceIDs: Set<UUID>, expandedParentIDs: Set<UUID> = []) -> SidebarSnapshot {
         let flaggedMode = store.sidebarMode == .flagged
         let flaggedTree = flaggedMode && settings.effectiveFlaggedViewLayout == .tree
         let flaggedView = flaggedMode && !flaggedTree
         let builder = SidebarSnapshotBuilder(store: store, settings: settings,
-                                             flaggedView: flaggedView, renamingID: renaming?.id)
+                                             flaggedView: flaggedView, renamingID: renaming?.id, expandedParentIDs: expandedParentIDs)
         var snapshot = SidebarSnapshot()
         if flaggedTree {
             snapshot.sections = store.workspaces.compactMap { workspace in
@@ -107,7 +114,7 @@ extension SidebarSnapshot {
                 let header = HeaderContent(name: workspace.name,
                                            renaming: builder.renamingID == workspace.id,
                                            focusMember: store.focusedWorkspaceIDs.contains(workspace.id),
-                                           addVisible: false, expanded: expanded)
+                                           addVisible: false, expanded: expanded, tint: workspace.tint)
                 return builder.section(key: .workspace(workspace.id), header: header,
                                        sessions: flagged, expanded: expanded, showsHint: false)
             }
@@ -116,7 +123,7 @@ extension SidebarSnapshot {
                                                      expanded: true, showsHint: true)]
             }
         } else if flaggedView {
-            let sessions = store.flaggedSessions
+            let sessions = store.orderedFlaggedSessions
             snapshot.sections = [builder.section(key: .flagged, header: nil, sessions: sessions,
                                                  expanded: true, showsHint: sessions.isEmpty)]
         } else {
@@ -127,7 +134,7 @@ extension SidebarSnapshot {
                     renaming: builder.renamingID == workspace.id,
                     focusMember: store.focusedWorkspaceIDs.contains(workspace.id),
                     addVisible: !settings.isInterfaceElementHidden(.workspaceAddSession),
-                    expanded: expanded)
+                    expanded: expanded, tint: workspace.tint)
                 return builder.section(key: .workspace(workspace.id), header: header,
                                        sessions: workspace.sessions, expanded: expanded,
                                        showsHint: false)
@@ -149,6 +156,7 @@ private struct SidebarSnapshotBuilder {
     let settings: AppSettings
     let flaggedView: Bool
     let renamingID: UUID?
+    let expandedParentIDs: Set<UUID>
 
     func section(key: SidebarSnapshot.Section.Key,
                  header: SidebarSnapshot.HeaderContent?, sessions: [Session],
@@ -159,6 +167,8 @@ private struct SidebarSnapshotBuilder {
             content: Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, rowContent($0)) }))
     }
 
+    private var flattenCompanions: Bool { store.sidebarMode == .flagged }
+
     private func rowContent(_ session: Session) -> SidebarSnapshot.RowContent {
         // A flagged row normally carries its workspace breadcrumb, but inline rename edits the bare name.
         let renaming = renamingID == session.id
@@ -166,16 +176,23 @@ private struct SidebarSnapshotBuilder {
         let unseen = session.unseenCount
         let badged = unseen > 0 && (settings.notificationBadgeEnabled ?? true)
         return SidebarSnapshot.RowContent(
-            name: flaggedView && !renaming
+            name: flaggedView && settings.effectiveFlaggedViewLayout == .flat && !renaming
                 ? LinuxSidebarPolicy.flaggedRowLabel(for: session, in: store)
-                : session.displayName,
+                : (flattenCompanions && !renaming ? store.listLabel(for: session) : session.displayName),
             renaming: renaming,
             glyph: glyph,
             blink: glyph != nil && session.agentIndicator.blink,
             star: session.flagged && !flaggedView,
             badge: badged ? (unseen > 99 ? "99+" : "\(unseen)") : nil,
             remote: session.remoteHost != nil,
-            notice: session.remoteHost.flatMap { session.remotePresentation?.connection.rowNotice(host: $0) })
+            notice: session.remoteHost.flatMap { session.remotePresentation?.connection.rowNotice(host: $0) },
+            tint: session.tint,
+            indented: !flattenCompanions && session.parentID != nil,
+            shown: flattenCompanions || store.parent(of: session).map { $0.isExpanded || expandedParentIDs.contains($0.id) } != false,
+            hasCompanions: !flattenCompanions && !store.companions(of: session.id).isEmpty,
+            expanded: session.isExpanded || expandedParentIDs.contains(session.id),
+            foldedAttention: !flattenCompanions && !session.isExpanded && !expandedParentIDs.contains(session.id)
+                ? store.companionsNeedingAttention(of: session.id).map(\.displayName).joined(separator: ", ").linuxTrimmedOrNil : nil)
     }
 }
 

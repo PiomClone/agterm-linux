@@ -56,7 +56,7 @@ extension ControlServer: ControlActions {
             } else {
                 guard store.openOverlay(id, command: options.command, cwd: options.cwd,
                                         wait: options.wait, sizePercent: options.sizePercent,
-                                        backgroundColor: options.backgroundColor) else {
+                                        points: options.points, backgroundColor: options.backgroundColor) else {
                     return ControlResponse(ok: false, error: "overlay already open")
                 }
             }
@@ -69,14 +69,15 @@ extension ControlServer: ControlActions {
         }
     }
 
-    /// openLinkOverlay shows a clicked link as a browsing page over its session and says whether it did.
+    /// openLinkOverlay shows a clicked link as a browsing page over its session, at `sizePercent` or full size
+    /// when nil, and says whether it did.
     /// A HUD on the session and a zoomed terminal in its window both refuse it up front: the store would
     /// accept the page, closing the HUD for good in one case and showing nothing in the other.
-    func openLinkOverlay(_ url: URL, session id: UUID) -> Bool {
+    func openLinkOverlay(_ url: URL, session id: UUID, sizePercent: Int?) -> Bool {
         guard let session = library.store(forSession: id)?.session(withID: id), !session.hudActive else { return false }
         if let windowID = library.windowID(forSession: id),
            TerminalZoomRegistry.shared.controller(for: windowID)?.target != nil { return false }
-        let options = ControlSessionOverlayOpenOptions(command: "", cwd: nil, wait: false, sizePercent: nil,
+        let options = ControlSessionOverlayOpenOptions(command: "", cwd: nil, wait: false, sizePercent: sizePercent,
                                                        backgroundColor: nil, page: .url(url), navigation: true,
                                                        javascript: true, persistent: true, browse: true)
         return openSessionOverlay(id.uuidString, window: nil, options: options).ok
@@ -98,6 +99,7 @@ extension ControlServer: ControlActions {
         case .unsupported: return ControlResponse(ok: false, error: OverlayHtmlError.presenter)
         case .loopback: return ControlResponse(ok: false, error: OverlayHtmlError.remoteLoopback)
         case .tooLarge: return ControlResponse(ok: false, error: OverlayHtmlError.remoteTooLarge)
+        case .pointsUnsupported: return ControlResponse(ok: false, error: OverlayPointError.remote)
         case .local: break
         }
         if store.session(withID: id)?.remoteOverlays.slot(options.pane) != nil {
@@ -106,8 +108,8 @@ extension ControlServer: ControlActions {
         if options.persistent, let failure = HtmlOverlayRegistry.shared.persistentStoreFailure() {
             return ControlResponse(ok: false, error: "session.overlay.open: \(failure)")
         }
-        if let failure = store.openHtmlOverlay(id, pane: options.pane, overlay: overlay,
-                                               sizePercent: options.sizePercent, backgroundColor: options.backgroundColor) {
+        if let failure = store.openHtmlOverlay(id, pane: options.pane, overlay: overlay, sizePercent: options.sizePercent,
+                                               points: options.points, backgroundColor: options.backgroundColor) {
             return ControlResponse(ok: false, error: failure.message(pane: options.pane))
         }
         // a page exists only once a view asks for it; built here, an accepted persistent page already
@@ -223,6 +225,16 @@ extension ControlServer: ControlActions {
         }
     }
 
+    func resizeSessionOverlay(_ target: String?, window: String?, sizePercent: Int?,
+                              points: OverlayPointSize) -> ControlResponse {
+        resolver.resolveSession(target, window: window) { store, id in
+            if let failure = store.resizeOverlayInPoints(id, sizePercent: sizePercent, points: points) {
+                return ControlResponse(ok: false, error: failure.message)
+            }
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+        }
+    }
+
     func sessionOverlayResult(_ target: String?, window: String?, pane: OverlayPane?) -> ControlResponse {
         resolver.resolveSession(target, window: window) { store, id in
             guard let session = store.session(withID: id) else {
@@ -261,6 +273,10 @@ extension ControlServer: ControlActions {
     /// default) or `workspaceName` (the sidebar label) plus optional `createWorkspace` — create needs a
     /// name, there is nothing to create by id. cwd/command/name are applied in `makeSessionResponse`.
     func createSession(_ options: ControlSessionCreateOptions) -> ControlResponse {
+        createSession(options, tint: nil)
+    }
+
+    func createSession(_ options: ControlSessionCreateOptions, tint: SidebarTint?) -> ControlResponse {
         resolver.resolvePlacementStore(options.window) { store in
             // anchor-relative placement: the anchor names its own workspace, bypassing `--workspace`/
             // `--workspace-name`. `before` takes the anchor's slot, `after` the next (clamped in `addSession`).
@@ -268,7 +284,7 @@ extension ControlServer: ControlActions {
                 let placeBefore = options.before != nil
                 return resolveAnchorLocation(anchor, in: store) { location in
                     let index = placeBefore ? location.index : location.index + 1
-                    return makeSessionResponse(in: store, workspaceID: location.workspace, options: options, at: index)
+                    return makeSessionResponse(in: store, workspaceID: location.workspace, options: options, tint: tint, at: index)
                 }
             }
             // name addressing: reuse-or-create with `createWorkspace`, else require an existing match.
@@ -284,13 +300,13 @@ extension ControlServer: ControlActions {
                 guard let workspace else {
                     return ControlResponse(ok: false, error: "no workspace named \"\(name)\" (pass --create-workspace to add it)")
                 }
-                return makeSessionResponse(in: store, workspaceID: workspace.id, options: options)
+                return makeSessionResponse(in: store, workspaceID: workspace.id, options: options, tint: tint)
             }
             // id addressing (default `active`): the canonical prefix/active resolver.
             let target = options.workspace ?? "active"
             return resolver.resolve(target, candidates: store.workspaces.map(\.id),
                            active: store.currentWorkspaceID, noun: "workspace") { workspaceID in
-                makeSessionResponse(in: store, workspaceID: workspaceID, options: options)
+                makeSessionResponse(in: store, workspaceID: workspaceID, options: options, tint: tint)
             }
         }
     }
@@ -338,37 +354,6 @@ extension ControlServer: ControlActions {
                 return ControlResponse(ok: false, error: "no session to navigate")
             }
             return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
-        }
-    }
-
-    func closeSession(_ target: String?, window: String?) -> ControlResponse {
-        resolver.resolveSession(target, window: window) { store, id in
-            store.closeSession(id)
-            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
-        }
-    }
-
-    func closeSessions(_ targets: [String], window: String?) -> ControlResponse {
-        resolveBatchSessions(targets, window: window) { store, ids in
-            guard ids.count > 1 else {
-                guard let id = ids.first else { return ControlResponse(ok: false, error: "session.close requires at least one --target") }
-                store.closeSession(id)
-                return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
-            }
-            let affected: Int
-            if settingsModel.settings.closeGraceUndoEnabled ?? true {
-                // one grouped grace record is the batch behavior scripts cannot reproduce by looping.
-                affected = store.softCloseSessions(ids) ? ids.count : 0
-            } else {
-                // match the GUI's immediate batch-close path when grace undo is disabled.
-                affected = ids.reduce(into: 0) { count, id in
-                    guard store.session(withID: id) != nil else { return }
-                    store.closeSession(id)
-                    count += 1
-                }
-            }
-            // `ok` with the count (0 included) mirrors `placeSessions` — every id resolved, so no error arm.
-            return ControlResponse(ok: true, result: ControlResult(affected: affected))
         }
     }
 
@@ -482,7 +467,7 @@ extension ControlServer: ControlActions {
         scratchSession(target, window: window, mode: mode, command: command, follow: false)
     }
 
-    /// Move keyboard focus to a split session pane by model role or physical position (`other` toggles).
+    /// Move keyboard focus to a split session's pane: `pane` is `left`|`right`|`other` (`other` toggles).
     func focusSessionPane(_ target: String?, window: String?, pane: String?) -> ControlResponse {
         return resolver.resolveSession(target, window: window) { store, id in
             guard let session = store.session(withID: id) else {
@@ -494,10 +479,7 @@ extension ControlServer: ControlActions {
             guard let parsedPane = ControlPaneFocusMode.parse(pane) else {
                 return ControlResponse(ok: false, error: "invalid pane: \(pane ?? "other")")
             }
-            let toSplit = parsedPane.wantsSplit(
-                currentSplitFocused: session.splitFocused,
-                primaryInEndSlot: false
-            )
+            let toSplit = parsedPane.wantsSplit(currentSplitFocused: session.splitFocused)
             actions.setSplitFocus(toSplit, of: session)
             return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
         }
@@ -524,9 +506,6 @@ extension ControlServer: ControlActions {
                 requested = ratio
             case .delta(let delta):
                 requested = (session.splitRatio ?? AppStore.splitRatioDefault) + delta
-            case .paneDelta(let target, let delta):
-                requested = (session.splitRatio ?? AppStore.splitRatioDefault)
-                    + target.primaryRatioDelta(delta, primaryInEndSlot: false)
             }
             guard let applied = store.applySplitRatio(requested, forSession: id) else {
                 return ControlResponse(ok: false, error: "no such session: \(target ?? "active")")
@@ -675,6 +654,25 @@ extension ControlServer: ControlActions {
         }
     }
 
+    /// moveFlaggedSession moves the target within its window's saved flagged order, just before or after
+    /// `anchor`, resolved in the same window. Both must be flagged; an unchanged order still answers ok.
+    func moveFlaggedSession(_ target: String?, window: String?, anchor: String,
+                            placement: FlaggedOrderPlacement) -> ControlResponse {
+        resolver.resolveSession(target, window: window) { store, id in
+            resolver.resolve(anchor, candidates: store.workspaces.flatMap { $0.sessions.map(\.id) },
+                             active: store.selectedSessionID, noun: "session") { anchorID in
+                guard anchorID != id else {
+                    return ControlResponse(ok: false, error: "a session cannot be its own anchor")
+                }
+                guard store.session(withID: id)?.flagged == true, store.session(withID: anchorID)?.flagged == true else {
+                    return ControlResponse(ok: false, error: "session.flag move needs a flagged session and a flagged anchor")
+                }
+                store.moveFlagged([id], to: placement, of: anchorID)
+                return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+            }
+        }
+    }
+
     /// Set or clear a session's title-bar context. The value is already trimmed and validated by the
     /// dispatcher, so nil here means clear rather than "nothing supplied".
     func setSessionContext(_ target: String?, window: String?, context: String?) -> ControlResponse {
@@ -712,7 +710,9 @@ extension ControlServer: ControlActions {
             return resolver.resolveSession(target, window: window) { store, sessionID in
                 resolver.resolve(workspace, candidates: store.workspaces.map(\.id),
                         active: store.currentWorkspaceID, noun: "workspace") { workspaceID in
-                    store.moveSession(sessionID, toWorkspace: workspaceID)
+                    guard store.moveSession(sessionID, toWorkspace: workspaceID) else {
+                        return ControlResponse(ok: false, error: Self.companionMoveError)
+                    }
                     return ControlResponse(ok: true, result: ControlResult(id: sessionID.uuidString))
                 }
             }
@@ -730,6 +730,9 @@ extension ControlServer: ControlActions {
                 resolver.resolve(workspace, candidates: store.workspaces.map(\.id),
                         active: store.currentWorkspaceID, noun: "workspace") { workspaceID in
                     let affected = store.moveSessions(ids, toWorkspace: workspaceID)
+                    if affected == 0, refusesCompanionMove(ids, in: store) {
+                        return ControlResponse(ok: false, error: Self.companionMoveError)
+                    }
                     return ControlResponse(ok: true, result: ControlResult(affected: affected))
                 }
             }
@@ -749,8 +752,9 @@ extension ControlServer: ControlActions {
                 if let resolution = SidebarDrop.resolveRelative(
                     source: (workspace: source.workspace, index: source.index),
                     anchor: (workspace: anchorLoc.workspace, index: anchorLoc.index, count: anchorLoc.count),
-                    placeAfter: after) {
-                    store.moveSession(sessionID, toWorkspace: resolution.workspace, at: resolution.destination)
+                    placeAfter: after),
+                   !store.moveSession(sessionID, toWorkspace: resolution.workspace, at: resolution.destination) {
+                    return ControlResponse(ok: false, error: Self.companionMoveError)
                 }
                 return ControlResponse(ok: true, result: ControlResult(id: sessionID.uuidString))
             }
@@ -780,6 +784,9 @@ extension ControlServer: ControlActions {
                 ) {
                     affected = store.moveSessions(ids, toWorkspace: resolution.workspace,
                                                   at: resolution.destination)
+                    if affected == 0, refusesCompanionMove(ids, in: store) {
+                        return ControlResponse(ok: false, error: Self.companionMoveError)
+                    }
                 } else {
                     affected = 0
                 }
@@ -788,8 +795,8 @@ extension ControlServer: ControlActions {
         }
     }
 
-    private func resolveBatchSessions(_ targets: [String], window: String?,
-                                      _ body: (AppStore, [UUID]) -> ControlResponse) -> ControlResponse {
+    func resolveBatchSessions(_ targets: [String], window: String?,
+                              _ body: (AppStore, [UUID]) -> ControlResponse) -> ControlResponse {
         guard let first = targets.first else {
             return ControlResponse(ok: false, error: "session command requires at least one --target")
         }

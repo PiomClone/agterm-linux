@@ -239,14 +239,18 @@ final class AppActions {
         if terminalZoomActive { frontmostTerminalZoom?.clear(); return true }
         if let dashboard = frontmostDashboard, dashboard.isOpen { dashboard.close(); focusActiveSession(); return true }
         guard let store, let session = store.activeSession else { return false }
-        if session.hudActive || session.coverOverlayVisible { store.closeOverlay(session.id); return true }
+        // a page companion's page is the row, so Cmd-W takes the session close with its confirmation and undo
+        if session.hudActive || (session.coverOverlayVisible && session.content == .terminal) {
+            store.closeOverlay(session.id)
+            return true
+        }
         if session.scratchActive { store.toggleScratch(session.id); return true }
         // the focused pane's own overlay is the last cover: without this rung ⌘W over one falls straight
         // through and closes the SESSION. An overlay on the other pane is not in front of the user, so it
         // does not intercept — that pane stays live and ⌘W keeps its ordinary meaning.
         if let pane = session.focusedOverlayPane { store.closePaneOverlay(session.id, pane: pane); return true }
         // handled either way — returning true on cancel keeps the File menu from closing the whole window.
-        guard confirmCloseSession(session) else { return true }
+        guard confirmCloseSession(session, companions: store.companions(of: session.id)) else { return true }
         closeSessionAfterConfirmation(session.id, in: store)
         focusActiveSession()
         return true
@@ -288,7 +292,7 @@ final class AppActions {
     func closeSession(_ id: UUID, in store: AppStore) {
         guard uiActionsEnabled else { return }
         guard let session = store.session(withID: id) else { return }
-        guard confirmCloseSession(session) else { return }
+        guard confirmCloseSession(session, companions: store.companions(of: session.id)) else { return }
         closeSessionAfterConfirmation(id, in: store)
     }
 
@@ -321,13 +325,13 @@ final class AppActions {
 
     /// A native warning confirm before closing `session`, gated by `AppSettings.confirmCloseSession`. Returns
     /// whether to proceed: true with no prompt when the setting is off or under XCUITest (a modal hangs it).
-    private func confirmCloseSession(_ session: Session) -> Bool {
+    private func confirmCloseSession(_ session: Session, companions: [Session]) -> Bool {
         guard settingsModel?.settings.confirmCloseSession == true,
               !ContentView.shouldBypassCloseConfirmation else { return true }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Close “\(session.displayName)”?"
-        alert.informativeText = closeConfirmationText(for: [session])
+        alert.informativeText = closeConfirmationText(for: [session], companions: companions)
         alert.addButton(withTitle: "Close")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
@@ -384,6 +388,7 @@ final class AppActions {
     /// The session whose open overlay is the hooks editor, so its close reloads the hooks. Nil when none.
     var hooksEditOverlaySession: UUID?
     weak var remoteAttacher: (any RemoteAttaching)?
+    weak var companionDuplicator: (any CompanionDuplicating)?
 
     /// Open `hooks.conf` in the user's editor in a 95% overlay over the active session, exactly like
     /// `editKeymap`; exiting reloads the hooks.

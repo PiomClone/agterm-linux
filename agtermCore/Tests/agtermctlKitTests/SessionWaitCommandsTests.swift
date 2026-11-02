@@ -1,7 +1,7 @@
 import ArgumentParser
 #if canImport(Darwin)
 import Darwin
-#elseif canImport(Glibc)
+#else
 import Glibc
 #endif
 import Foundation

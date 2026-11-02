@@ -2,18 +2,16 @@
 # Build pinned libghostty and zmx artifacts from upstream source.
 #
 # We build from source rather than downloading a prebuilt artifact so the toolchain is fully
-# self-owned: the inputs are pinned upstream revisions, zig, and Xcode's Metal Toolchain. No fork or
-# daily-build release is involved; zmx takes the patches in scripts/zmx-patches over its plain pin.
+# self-owned: pinned upstream revisions, local patches, zig, and Xcode's Metal Toolchain.
 #
-# GHOSTTY_REV is a plain pin for reproducibility, not a workaround. It was held at a 2026-04-30
-# pre-regression commit while later builds blanked the scrollback on a font-size increase; that is
+# GHOSTTY_REV selects the upstream commit; local patches are applied after checkout. It was held at a
+# 2026-04-30 pre-regression commit while later builds blanked the scrollback on a font-size increase; that is
 # fixed upstream and re-verified by hand before this bump. Re-test the font-increase case when moving
 # it, and check `minimum_zig_version` in build.zig.zon against ZIG_FORMULA.
 #
 # One-time cost: the build (a few minutes, plus a Metal Toolchain download on first run) is skipped
-# whenever the staged artifacts match the current rev. Presence alone is not enough — an xcframework
-# built from a different rev is indistinguishable from a current one, so the stamp, not the directory,
-# is what says a rebuild can be skipped.
+# whenever the staged artifacts match the current revision and patch digest. Presence alone is not
+# enough — the stamp, not the directory, determines whether the staged artifacts can be reused.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,6 +31,9 @@ XCFRAMEWORK_DIR="GhosttyKit.xcframework"
 # TERMINFO=dirname(GHOSTTY_RESOURCES_DIR)/terminfo derivation resolves xterm-ghostty.
 RESOURCES_MARKER="agterm/Resources/terminfo"
 STAMP_FILE=".ghostty-build-stamp"
+GHOSTTY_PATCH_DIR="scripts/ghostty-patches"
+GHOSTTY_PATCH_DIGEST="$(cat "$GHOSTTY_PATCH_DIR"/*.patch | shasum -a 256 | cut -c1-16)"
+GHOSTTY_STAMP="$GHOSTTY_REV $GHOSTTY_PATCH_DIGEST"
 ZMX_STAGE_DIR="agterm/Resources/zmx"
 ZMX_STAMP_FILE=".zmx-build-stamp"
 # applied in name order over the plain pin; scripts/zmx-patches/README.md says what each one is for.
@@ -64,7 +65,7 @@ fi
 
 # a stale stamp restages BOTH: they come out of one build, and an artifact built from another revision
 # cannot be told apart from a current one.
-if [[ ! -f "$STAMP_FILE" || "$(cat "$STAMP_FILE")" != "$GHOSTTY_REV" ]]; then
+if [[ ! -f "$STAMP_FILE" || "$(cat "$STAMP_FILE")" != "$GHOSTTY_STAMP" ]]; then
   need_xc=true
   need_res=true
 fi
@@ -150,6 +151,11 @@ if $need_xc || $need_res; then
   git -C "$ghostty_build" fetch -q --depth 1 origin "$GHOSTTY_REV"
   git -C "$ghostty_build" -c advice.detachedHead=false checkout -q FETCH_HEAD
 
+  for ghostty_patch in "$GHOSTTY_PATCH_DIR"/*.patch; do
+    echo "applying libghostty/$(basename "$ghostty_patch")..."
+    git -C "$ghostty_build" apply --whitespace=nowarn "$PWD/$ghostty_patch"
+  done
+
   echo "building GhosttyKit.xcframework with zig (a few minutes)..."
   ( cd "$ghostty_build" && "$ZIG" build -Doptimize=ReleaseFast -Demit-xcframework=true \
       -Dxcframework-target=native -Demit-macos-app=false )
@@ -168,7 +174,7 @@ if $need_xc || $need_res; then
     cp -R "$ghostty_build/zig-out/share/ghostty/themes" agterm/Resources/ghostty/
     cp -R "$ghostty_build/zig-out/share/terminfo" agterm/Resources/terminfo
   fi
-  printf '%s\n' "$GHOSTTY_REV" > "$STAMP_FILE"
+  printf '%s\n' "$GHOSTTY_STAMP" > "$STAMP_FILE"
 fi
 
 if $need_zmx; then

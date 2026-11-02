@@ -5,6 +5,39 @@ import agtermCore
 extension LinuxControlDispatcher {
     func dispatchNewParityCommand(_ request: ControlRequest) -> ControlResponse? {
         switch request.cmd {
+        case .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayResult,
+             .sessionOverlayReload, .sessionOverlayNavigate, .sessionOverlaySubmit, .sessionOverlayCopy,
+             .sessionOverlayText, .sessionOverlayHide, .sessionOverlayShow, .sessionOverlayToggle:
+            return dispatchV039OverlayCommand(request)
+        case .sessionTint, .workspaceTint:
+            return dispatchTint(request)
+        case .sessionCompanionNew, .sessionCompanionPage, .sessionCompanionDuplicate, .sessionCompanionPageAttach,
+             .sessionCollapse, .sessionExpand:
+            return dispatchCompanionCommand(request)
+        case .recentList, .recentOpen, .recentClear:
+            if request.cmd == .recentOpen {
+                return actions.openRecentClosed(request.target, window: request.args?.window)
+            }
+            if request.target != nil || request.args?.window != nil {
+                return ControlResponse(ok: false, error: "\(request.cmd.rawValue) takes no target or --window")
+            }
+            return request.cmd == .recentList ? actions.listRecentClosed() : actions.clearRecentClosed()
+        case .workspaceFlag:
+            guard let mode = ControlToggleMode.parse(request.args?.mode) else {
+                return ControlResponse(ok: false, error: "invalid flag mode: \(request.args?.mode ?? "toggle")")
+            }
+            return actions.setWorkspaceFlag(request.target, window: request.args?.window, mode: mode)
+        case .browserLinks:
+            if request.target != nil || request.args?.window != nil {
+                return ControlResponse(ok: false, error: "browser.links takes no target or --window")
+            }
+            if let raw = request.args?.mode {
+                guard let mode = LinkOpenMode(rawValue: raw) else {
+                    return ControlResponse(ok: false, error: "invalid link mode: \(raw)")
+                }
+                return actions.linkOpenMode(mode)
+            }
+            return actions.linkOpenMode(nil)
         case .keymapRun:
             guard let name = request.args?.name, !name.isEmpty else {
                 return ControlResponse(ok: false, error: "keymap.run requires a command name")
@@ -23,20 +56,6 @@ extension LinuxControlDispatcher {
             }
             return actions.readZmxScreen(name: name, fullBuffer: request.args?.all == true,
                                          lines: request.args?.lines)
-        case .sessionOverlaySubmit:
-            guard let value = request.args?.value else {
-                return ControlResponse(ok: false, error: OverlayHtmlError.submitValue)
-            }
-            switch parseOverlayPane(request.args?.pane) {
-            case .rejected(let response): return response
-            case .pane(let pane):
-                return actions.submitSessionOverlay(request.target, window: request.args?.window, pane: pane, value: value)
-            }
-        case .sessionOverlayResult where request.args?.page != nil:
-            guard let id = request.args?.page.flatMap(UUID.init(uuidString:)) else {
-                return ControlResponse(ok: false, error: OverlayHtmlError.invalidPageID)
-            }
-            return actions.htmlPageResult(id)
         default: return nil
         }
     }

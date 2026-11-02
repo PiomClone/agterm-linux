@@ -20,7 +20,10 @@ extension AppController {
             } catch {
                 return err("could not save flagged view layout")
             }
-            for controller in gWindows.values { controller.syncSidebar(force: true) }
+            library.setFlaggedLayout(layout)
+            for controller in gWindows.values {
+                controller.syncSidebar(force: true)
+            }
         }
         return ControlResponse(ok: true, result: ControlResult(text: layout.rawValue))
     }

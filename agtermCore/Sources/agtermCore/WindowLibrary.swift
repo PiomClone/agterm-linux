@@ -32,6 +32,10 @@ public final class WindowLibrary {
     /// carries the observation.
     @ObservationIgnored var stores: [UUID: AppStore]
 
+    /// flaggedLayout is the app-wide flagged layout, copied onto every store as it is made, before its restore
+    /// picks a selection.
+    @ObservationIgnored public internal(set) var flaggedLayout: FlaggedViewLayout
+
     /// Bumped on every open-set change, the observable stand-in for `stores` membership: a background
     /// window opening or closing changes neither `windows` nor (necessarily) `frontmostWindowID`, so a
     /// view reading the attention list or a row's eligibility would otherwise keep its stale answer.
@@ -76,7 +80,7 @@ public final class WindowLibrary {
     private static let legacyFileName = "workspaces.json"
 
     var indexURL: URL { directory.appendingPathComponent(Self.indexFileName) }
-    var windowsDirectory: URL { directory.appendingPathComponent(Self.windowsSubdirectory, isDirectory: true) }
+    private var windowsDirectory: URL { directory.appendingPathComponent(Self.windowsSubdirectory, isDirectory: true) }
 
     /// Preserves the pre-zmx initializer symbol for source and incremental-build compatibility.
     public convenience init(directory: URL = PersistenceStore.defaultDirectory,
@@ -87,13 +91,16 @@ public final class WindowLibrary {
     }
 
     /// Creates the library rooted at `directory`, running migration/recovery and the strict pane inventory.
+    /// `flaggedLayout` is the saved setting, needed before the stores it restores pick their selections.
     public init(directory: URL = PersistenceStore.defaultDirectory,
                 paneFinalizer: (([UUID]) -> Void)?,
                 launchInventorySink: ((Set<UUID>?) -> Void)? = nil,
                 launchPaneDrop: (([UUID]) -> Void)? = nil,
                 controlEventRing: ControlEventRing? = nil,
-                defaultSessionCwd: String = FileManager.default.homeDirectoryForCurrentUser.path) {
+                defaultSessionCwd: String = FileManager.default.homeDirectoryForCurrentUser.path,
+                flaggedLayout: FlaggedViewLayout = .flat) {
         self.directory = directory
+        self.flaggedLayout = flaggedLayout
         self.recentClosedStore = RecentClosedStore(directory: directory)
         self.controlEventRing = controlEventRing ?? ControlEventRing()
         self.paneFinalizer = paneFinalizer
@@ -335,8 +342,8 @@ public final class WindowLibrary {
 
     // MARK: - Mutation
 
-    /// Creates a window seeded with "workspace 1" and one $HOME session, opens it, and persists the index.
-    /// Defaults the name to "window N".
+    /// Creates a window seeded with "workspace 1" and one session at the host-provided default cwd,
+    /// opens it, and persists the index. Defaults the name to "window N".
     @discardableResult
     public func newWindow(name: String? = nil) -> WindowInfo {
         // the name feeds {AGT_WINDOW_NAME}; see TerminalText.
@@ -662,7 +669,7 @@ public final class WindowLibrary {
     }
 
     private func makeStore(for windowID: UUID, persistence: PersistenceStore) -> AppStore {
-        AppStore(
+        let store = AppStore(
             persistence: persistence,
             recentClosedStore: recentClosedStore,
             recentClosedDidChange: { [weak self] in self?.refreshRecentClosedItems() },
@@ -683,6 +690,8 @@ public final class WindowLibrary {
             paneFinalizer: paneFinalizer,
             launchPaneDrop: launchPaneDrop
         )
+        store.flaggedLayout = flaggedLayout
+        return store
     }
 
     private func loadSnapshotForStore(_ persistence: PersistenceStore) -> Snapshot {
@@ -907,8 +916,22 @@ public final class WindowLibrary {
         return ZmxClaimWalk(claims: claims, complete: complete)
     }
 
-    func refreshRecentClosedItems() {
-        recentClosedItems = recentClosedStore.load()
+    /// Window files on disk that the index does not list. A stale index short-circuits recovery, so these
+    /// are real panes whose daemons would otherwise read as unclaimed. Nil when the directory itself could
+    /// not be read, which is not the same answer as "no stray files".
+    private func strayWindowFileIDs(indexed: Set<UUID>) -> [UUID]? {
+        guard (try? windowsDirectory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+            return nil
+        }
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: windowsDirectory,
+                                                                          includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        return contents
+            .filter { $0.pathExtension == "json" }
+            .compactMap { UUID(uuidString: $0.deletingPathExtension().lastPathComponent) }
+            .filter { !indexed.contains($0) }
+            .sorted { $0.uuidString < $1.uuidString }
     }
 
     private func scheduleTreeChanged(for windowID: UUID) {
@@ -919,5 +942,13 @@ public final class WindowLibrary {
             let event = self.controlEventRing.append(ControlEventDraft(kind: .treeChanged, window: windowID.uuidString))
             self.onControlEvent?(event)
         }
+    }
+
+    func refreshRecentClosedItems() {
+        recentClosedItems = recentClosedStore.load()
+    }
+
+    func log(_ message: @autoclosure () -> String) {
+        NSLog("agterm: %@", message())
     }
 }

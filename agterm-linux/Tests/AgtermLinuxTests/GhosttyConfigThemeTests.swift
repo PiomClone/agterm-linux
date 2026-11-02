@@ -100,6 +100,9 @@ struct GhosttyConfigThemeTests {
         paned.agterm-sidebar-split > separator {
             min-width: 1px; padding: 0 4px; background-color: alpha(#222222, 0.18); background-clip: content-box; box-shadow: none;
         }
+        paned.agterm-terminal-split > separator {
+            background-color: mix(#111111, #222222, 0.1); background-image: none; box-shadow: none;
+        }
         .agterm-switcher-row.agterm-switcher-current { background-color: #333333; color: #444444; }
         """
 

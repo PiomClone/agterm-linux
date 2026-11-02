@@ -259,6 +259,9 @@ agtermctl session move --after "$anchor" --target "$server" --target "$logs"
 
 # close several sessions with one grace-period undo
 agtermctl session close --target "$server" --target "$logs"
+
+# close one session with ⌘W's undo grace: undo inside it brings the running shell back
+agtermctl session close --target "$server" --undoable
 ```
 
 `--after`/`--before` are mutually exclusive with each other, with `--to`, and with a destination
@@ -309,6 +312,8 @@ agtermctl session overlay open "revdiff HEAD~3" --target "$AGTERM_SESSION_ID" --
 agtermctl session overlay open "revdiff HEAD~3" --target "$AGTERM_SESSION_ID" --size-percent 80 --follow
 # resize the open overlay in place (the program keeps running): shrink to a floating panel, then back to full
 agtermctl session overlay resize --size-percent 60 --target "$AGTERM_SESSION_ID"
+# keep the 60% width but make the panel 240pt tall; read the laid-out size back as overlayWidth/overlayHeight
+agtermctl session overlay resize --height 240 --target "$AGTERM_SESSION_ID"
 agtermctl session overlay resize --full --target "$AGTERM_SESSION_ID"
 # ... later
 agtermctl session overlay close
@@ -507,6 +512,7 @@ agtermctl sidebar mode flagged                            # show only the flagge
 agtermctl sidebar flagged-layout tree                     # nest them under workspace rows, in every window
 agtermctl sidebar flagged-layout plain                    # or one flat list of session names, no workspace suffix
 agtermctl session go --to next                            # in flagged mode, nav steps the flagged set only
+agtermctl session flag move --target c3d4 --before a1b2   # flat/plain order: put c3d4 right above a1b2
 agtermctl sidebar mode tree                               # back to the full tree
 agtermctl session flag clear                              # unflag everything in the window
 ```
@@ -1069,7 +1075,7 @@ file is read once per command; nothing watches it, so push each change with an `
 
 ```bash
 agtermctl session go --to next            # step selection to the next session
-agtermctl session go --to next-attention  # jump to the next blocked/completed session
+agtermctl session go --to next-attention  # jump to the next blocked/completed session (plus active when enabled)
 agtermctl workspace go --to next          # step a whole workspace, landing on its first session
 agtermctl workspace go --to prev          # wraps at both ends; no --target, it is relative
 w=$(agtermctl window new "scratch" --json | jq -r '.result.id')

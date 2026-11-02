@@ -214,6 +214,11 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     /// of the pane (1...100); absent with no overlay AND while a HUD holds the slot, whose size is `hud`'s.
     /// The read side of `session.overlay.resize`.
     public let overlaySizePercent: Int?
+    /// overlayWidth and overlayHeight are a floating program or page's content size in points, after
+    /// `--width`/`--height` and the cap, from the session's last layout; the page strip is not included. Omitted for a full overlay, a HUD, and a
+    /// session not laid out yet. The read side of `session.overlay.open`/`.resize` `--width`/`--height`.
+    public let overlayWidth: Double?
+    public let overlayHeight: Double?
     /// The panes covered by their OWN overlay, ordered left then right (`["left"]`, `["right"]`,
     /// `["left","right"]`); nil/omitted when neither has one. Independent of `overlay`, the session-wide
     /// one — both kinds can be up at once. The read side of `session.overlay.open --pane`; those overlays
@@ -283,6 +288,19 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     /// When the status was last set, idle and repeated values included, as epoch seconds on the
     /// `ControlEvent.ts` clock. Omitted before any set; never persisted.
     public let statusChangedAt: Double?
+    /// lastSelectedAt is `Session.lastSelectedAt` as epoch seconds; omitted when no selection timestamp has
+    /// been recorded.
+    public let lastSelectedAt: Double?
+    /// The row's tint color (`session.tint`); nil/omitted when untinted.
+    public let tint: String?
+    /// The row parts the tint colors, `icon` and/or `name`; present exactly when `tint` is.
+    public let tintOn: [String]?
+    /// The parent's id for a companion; omitted for a top-level session.
+    public let parent: String?
+    /// True for a parent whose companions are folded; omitted otherwise.
+    public let collapsed: Bool?
+    /// `page` for a page companion, which has no terminal; omitted for a terminal session.
+    public let content: String?
     /// The session's background watermark spec; nil/omitted when none is set. The read side of
     /// `session.background`.
     public let background: BackgroundWatermark?
@@ -346,7 +364,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
     public init(id: String, name: String, cwd: String, title: String? = nil, active: Bool, split: Bool,
                 hasSplit: Bool? = nil, backedByZmx: Bool?, splitAxis: String? = nil,
                 splitRatio: Double? = nil, splitFocused: Bool? = nil,
-                overlay: Bool = false, overlaySizePercent: Int? = nil, paneOverlays: [String]? = nil,
+                overlay: Bool = false, overlaySizePercent: Int? = nil, overlayWidth: Double? = nil,
+                overlayHeight: Double? = nil, paneOverlays: [String]? = nil,
                 hud: ControlHudNode? = nil, ask: ControlSessionAsk? = nil, scratch: Bool = false, flagged: Bool = false,
                 commandWait: Bool? = nil, splitCommandWait: Bool? = nil,
                 foreground: [String]? = nil, splitForeground: [String]? = nil,
@@ -361,7 +380,12 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
                 liveAttribution: String? = nil, splitLiveAttribution: String? = nil,
                 presentation: ControlPresentationNode? = nil, presenters: ControlPresentersNode? = nil,
                 remoteOverlays: [ControlRemoteOverlayNode]? = nil, htmlOverlays: [ControlHtmlOverlayNode]? = nil,
-                hiddenOverlays: [String]? = nil) {
+                hiddenOverlays: [String]? = nil, lastSelectedAt: Double? = nil,
+                tint: String? = nil, tintOn: [String]? = nil, parent: String? = nil, collapsed: Bool? = nil,
+                content: String? = nil) {
+        self.content = content
+        self.parent = parent
+        self.collapsed = collapsed
         self.id = id
         self.name = name
         self.cwd = cwd
@@ -375,6 +399,8 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
         self.splitFocused = splitFocused
         self.overlay = overlay
         self.overlaySizePercent = overlaySizePercent
+        self.overlayWidth = overlayWidth
+        self.overlayHeight = overlayHeight
         self.paneOverlays = paneOverlays
         self.hud = hud
         self.ask = ask
@@ -395,6 +421,9 @@ public struct ControlSessionNode: Codable, Sendable, Equatable {
         self.statusColor = statusColor
         self.statusShape = statusShape
         self.statusChangedAt = statusChangedAt
+        self.lastSelectedAt = lastSelectedAt
+        self.tint = tint
+        self.tintOn = tintOn
         self.background = background
         self.paneBackgrounds = paneBackgrounds
         self.unseen = unseen
@@ -584,15 +613,23 @@ public struct ControlWorkspaceNode: Codable, Sendable, Equatable {
     /// `workspace.collapse`/`workspace.expand` and `workspace.new --collapsed`. Reports the persisted
     /// `!isExpanded`, independent of a transient focus force-reveal.
     public let collapsed: Bool?
+    /// The workspace row's own tint color (`workspace.tint`); nil/omitted when untinted. Never inherited by
+    /// the sessions inside.
+    public let tint: String?
+    /// The workspace row parts the tint colors; present exactly when `tint` is.
+    public let tintOn: [String]?
     public let sessions: [ControlSessionNode]
 
     public init(id: String, name: String, active: Bool, focused: Bool? = nil,
-                collapsed: Bool? = nil, sessions: [ControlSessionNode]) {
+                collapsed: Bool? = nil, tint: String? = nil, tintOn: [String]? = nil,
+                sessions: [ControlSessionNode]) {
         self.id = id
         self.name = name
         self.active = active
         self.focused = focused
         self.collapsed = collapsed
+        self.tint = tint
+        self.tintOn = tintOn
         self.sessions = sessions
     }
 }
@@ -607,6 +644,12 @@ public struct ControlTree: Codable, Sendable, Equatable {
     /// The window's auto-follow-blocked timeout in milliseconds, or nil when the feature is disabled
     /// (omitted from the JSON). The read side of the GUI-only Auto-follow setting.
     public let autoFollowMs: Int?
+    /// Whether the projected window's attention navigation also stops on `active` sessions. Always populated
+    /// by the app, optional for version skew. The read side of a GUI-only setting with no control setter.
+    public let attentionIncludesActive: Bool?
+    /// Whether the projected window's GUI attention navigation walks every open window. `session.go`
+    /// stays window-scoped either way. Always populated by the app, optional for version skew.
+    public let attentionNavigationAcrossWindows: Bool?
     /// Whether the projected window's sidebar is visible. LIVE, built fresh from the window's store per
     /// request — the read side of the write-only `sidebar` command. Always present on a `tree` response (the
     /// producer passes a non-optional `Bool`), unlike `idleMs`/`autoFollowMs`; the `window.list` copy omits
@@ -623,8 +666,11 @@ public struct ControlTree: Codable, Sendable, Equatable {
     /// is dormant. The read side of `sidebar.flagged-layout` and a term of the workspace-row visibility
     /// predicate on `ControlWorkspaceNode.focused`.
     public let sidebarFlaggedLayout: String?
-    /// Where a clicked web link from terminal output opens: `LinkOpenMode.rawValue` (`browser` | `overlay`),
-    /// the effective value, so the default reads `browser`. APP-WIDE, the read side of `browser.links`; nil
+    /// flaggedOrder is the window's saved flagged order as session ids, the flat and plain rows' order and the
+    /// read side of `session.flag move`; omitted when nothing is flagged.
+    public let flaggedOrder: [String]?
+    /// Where a clicked web link from terminal output opens: `LinkOpenMode.rawValue` (`browser` | `overlay` |
+    /// `overlay95` | `overlay75` | `overlay50`), the effective value, so the default reads `browser`. APP-WIDE, the read side of `browser.links`; nil
     /// in a host-produced tree and from an older server.
     public let linkOpenMode: String?
     /// The projected window's sidebar divider position in points - the read side of `sidebar.width`, and the
@@ -680,8 +726,9 @@ public struct ControlTree: Codable, Sendable, Equatable {
     public let indexUnsaved: Bool?
 
     public init(workspaces: [ControlWorkspaceNode], idleMs: Int? = nil, autoFollowMs: Int? = nil,
+                attentionIncludesActive: Bool? = nil, attentionNavigationAcrossWindows: Bool? = nil,
                 sidebarVisible: Bool? = nil, sidebarMode: String? = nil, sidebarFlaggedLayout: String? = nil,
-                sidebarWidth: Double? = nil, workspaceFilter: Bool? = nil,
+                flaggedOrder: [String]? = nil, sidebarWidth: Double? = nil, workspaceFilter: Bool? = nil,
                 quickVisible: Bool? = nil,
                 zoomedSurface: String? = nil, dashboardMembers: [String]? = nil,
                 dashboardHighlighted: String? = nil, dashboardFontSize: Double? = nil,
@@ -694,9 +741,12 @@ public struct ControlTree: Codable, Sendable, Equatable {
         self.indexUnsaved = indexUnsaved
         self.idleMs = idleMs
         self.autoFollowMs = autoFollowMs
+        self.attentionIncludesActive = attentionIncludesActive
+        self.attentionNavigationAcrossWindows = attentionNavigationAcrossWindows
         self.sidebarVisible = sidebarVisible
         self.sidebarMode = sidebarMode
         self.sidebarFlaggedLayout = sidebarFlaggedLayout
+        self.flaggedOrder = flaggedOrder
         self.sidebarWidth = sidebarWidth
         self.workspaceFilter = workspaceFilter
         self.quickVisible = quickVisible

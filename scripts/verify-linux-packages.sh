@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERIFY_ARCH="$ROOT/scripts/verify-linux-architecture.sh"
 VERSION="${1#v}"
 # nFPM's semver schema maps prerelease separators to '~' so prereleases sort before stable versions.
-PACKAGE_VERSION="${VERSION/-/~}"
+PACKAGE_VERSION="${VERSION/-/\~}"
 OUT="${2:-dist-linux}"
 [[ "$OUT" = /* ]] || OUT="$ROOT/$OUT"
 
@@ -93,6 +93,8 @@ verify_payload "$WORK/tar/agterm-linux"
 [[ "$(dpkg-deb -f "$DEB" Architecture)" == "$PACKAGE_ARCH" ]]
 [[ "$(dpkg-deb -f "$DEB" Version)" == "$PACKAGE_VERSION-1" ]]
 dpkg-deb -f "$DEB" Depends | grep -Fq 'libwebkitgtk-6.0-4'
+dpkg-deb -f "$DEB" Depends | grep -Fq 'python3'
+dpkg-deb -f "$DEB" Depends | grep -Fq 'librsvg2-common'
 dpkg-deb -x "$DEB" "$WORK/deb"
 verify_payload "$WORK/deb/opt/agterm-linux"
 [[ "$(readlink "$WORK/deb/usr/bin/agterm-linux")" == '/opt/agterm-linux/bin/agterm-linux' ]]
@@ -102,6 +104,7 @@ verify_payload "$WORK/deb/opt/agterm-linux"
 [[ "$(rpm --dbpath "$WORK/rpmdb" -qp --queryformat '%{ARCH}' "$RPM")" == "$HOST_ARCH" ]]
 [[ "$(rpm --dbpath "$WORK/rpmdb" -qp --queryformat '%{VERSION}-%{RELEASE}' "$RPM")" == "$PACKAGE_VERSION-1" ]]
 rpm --dbpath "$WORK/rpmdb" -qp --requires "$RPM" | grep -Fq 'webkitgtk6.0'
+rpm --dbpath "$WORK/rpmdb" -qp --requires "$RPM" | grep -Fq 'python3'
 (
   cd "$WORK/rpm"
   # Ubuntu's rpm2cpio can return 1 after emitting a complete archive. Trust cpio's status here; the

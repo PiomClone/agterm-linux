@@ -22,12 +22,22 @@ public enum Command: String, Codable, Sendable {
     case workspaceCollapse = "workspace.collapse"
     case workspaceExpand = "workspace.expand"
     case workspaceFlag = "workspace.flag"
+    case workspaceTint = "workspace.tint"
     case sessionType = "session.type"
     case sessionStatus = "session.status"
     case sessionFlag = "session.flag"
     case sessionContext = "session.context"
+    case sessionTint = "session.tint"
     case sessionSeen = "session.seen"
     case sessionRestore = "session.restore"
+    case sessionCollapse = "session.collapse"
+    case sessionCompanionNew = "session.companion.new"
+    case sessionCompanionPage = "session.companion.page"
+    case sessionCompanionDuplicate = "session.companion.duplicate"
+    /// A viewer asking for one attachment of a page companion: a single-use token for `session.overlay.page.serve`
+    /// plus what the page shows.
+    case sessionCompanionPageAttach = "session.companion.page.attach"
+    case sessionExpand = "session.expand"
     case sessionRestart = "session.restart"
     case sessionBackground = "session.background"
     case sessionSplit = "session.split"
@@ -140,6 +150,8 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     /// Additional session targets for batch-capable commands (`session.close`, `session.move`). When set,
     /// the command uses this ordered list instead of the top-level single `target`.
     public var targets: [String]?
+    /// For `session.close`: ask for the undo grace and a `result.undoable` answer.
+    public var undoable: Bool?
     /// Target workspace for `session.new` (the workspace to add to) and `session.move` (the destination).
     /// Resolved by id / unique prefix / `active`, never by name — use `workspaceName` for name targeting.
     public var workspace: String?
@@ -153,6 +165,11 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     /// fill it with `session.new --no-select` without it opening. Omitted/`false` = expanded; read back as
     /// the `tree` workspace node's `collapsed`.
     public var collapsed: Bool?
+    /// The tint color for `session.tint`/`workspace.tint` mode `set`, and the creation tint on `session.new`
+    /// and `workspace.new`; one of `TintColor`.
+    public var tint: String?
+    /// The row parts the tint colors (`icon`, `name`); omitted on a set keeps the stored parts, else icon.
+    public var tintOn: [String]?
     /// For `window.new`: create the window already MINIMIZED to the Dock (the CLI's `--minimized`), so a
     /// script can build project windows without each flashing on screen and stealing focus; omitted/`false`
     /// presents it. Read back as the `window.list` node's `minimized`. The new window also hands frontmost
@@ -355,9 +372,11 @@ public struct ControlArgs: Codable, Sendable, Equatable {
     /// Target window whose tree a session/workspace/tree/font command operates on: id / prefix / `active`
     /// (= frontmost).
     public var window: String?
-    /// width is window.resize width in points, or ask.open width as an integer percent (10...100).
+    /// width is window.resize width in points, ask.open width as an integer percent (10...100), or a floating
+    /// overlay's content width in points for session.overlay.open/resize.
     public var width: Int?
-    /// New window frame height in points for `window.resize`.
+    /// height is window.resize height in points, or a floating overlay's content height in points for
+    /// session.overlay.open/resize.
     public var height: Int?
     /// The sidebar divider position in points for `sidebar.width`, clamped server-side to
     /// `AppStore.sidebarWidthMin...sidebarWidthMax`. `Double`, not `width`'s `Int`: the divider drag writes a
@@ -451,7 +470,8 @@ public struct ControlArgs: Codable, Sendable, Equatable {
                 javascript: Bool? = nil, value: String? = nil, page: String? = nil, chromeless: Bool? = nil,
                 persistent: Bool? = nil, browse: Bool? = nil, cancelButton: String? = nil, input: String? = nil,
                 placeholder: String? = nil, choices: [ControlAskChoice]? = nil, multiple: Bool? = nil,
-                checked: [String]? = nil, other: String? = nil) {
+                checked: [String]? = nil, other: String? = nil, undoable: Bool? = nil,
+                tint: String? = nil, tintOn: [String]? = nil) {
         self.name = name
         self.cwd = cwd
         self.targets = targets
@@ -459,6 +479,8 @@ public struct ControlArgs: Codable, Sendable, Equatable {
         self.workspaceName = workspaceName
         self.createWorkspace = createWorkspace
         self.collapsed = collapsed
+        self.tint = tint
+        self.tintOn = tintOn
         self.minimized = minimized
         self.force = force
         self.host = host
@@ -545,6 +567,7 @@ public struct ControlArgs: Codable, Sendable, Equatable {
         self.multiple = multiple
         self.checked = checked
         self.other = other
+        self.undoable = undoable
     }
 }
 
@@ -648,6 +671,14 @@ public struct ControlResult: Codable, Sendable, Equatable {
     public var recent: [ControlRecentItem]?
     /// What `recent.open` reopened and where.
     public var recentOpen: ControlRecentOpen?
+    /// Whether `session.close --undoable` left the close undoable; absent for a plain close.
+    public var undoable: Bool?
+    /// The new companion's parent id, the receipt a companion creation answers with.
+    public var parent: String?
+    /// Every session id `session.close` closed, a parent's companions included.
+    public var closed: [String]?
+    /// The page a `session.companion.page.attach` handed out, token included.
+    public var companionPage: PresentationPage?
 
     public init(id: String? = nil, tree: ControlTree? = nil, text: String? = nil,
                 windows: [ControlWindowNode]? = nil, exitCode: Int? = nil, count: Int? = nil,
@@ -663,7 +694,12 @@ public struct ControlResult: Codable, Sendable, Equatable {
                 width: Int? = nil, height: Int? = nil,
                 pageID: String? = nil, pageOutcome: ControlHtmlPageOutcome? = nil,
                 restart: ControlRestartReceipt? = nil, installed: AppIdentity? = nil,
-                recent: [ControlRecentItem]? = nil, recentOpen: ControlRecentOpen? = nil) {
+                recent: [ControlRecentItem]? = nil, recentOpen: ControlRecentOpen? = nil, undoable: Bool? = nil,
+                parent: String? = nil, closed: [String]? = nil, companionPage: PresentationPage? = nil) {
+        self.companionPage = companionPage
+        self.parent = parent
+        self.closed = closed
+        self.undoable = undoable
         self.recent = recent
         self.recentOpen = recentOpen
         self.restart = restart
@@ -812,6 +848,20 @@ public enum PaneOverlayError {
     public static let invalidPane = "session.overlay: --pane must be left or right"
     public static let sizePercentConflict = "session.overlay.open: --pane is mutually exclusive with --size-percent"
     public static let resizeUnsupported = "session.overlay.resize: --pane is not supported (pane overlays are always full)"
+    public static let pointsConflict = "session.overlay.open: --pane is mutually exclusive with --width/--height"
+}
+
+/// OverlayPointError holds the `--width`/`--height` error strings of `session.overlay.open` and `.resize`,
+/// split across the dispatcher and the store like `PaneOverlayError`.
+public enum OverlayPointError {
+    public static let needsPercent = "session.overlay.open: --width/--height need --size-percent"
+    public static let notPositive = "session.overlay: --width/--height must be positive"
+    public static let fullConflict = "session.overlay.resize: --full is mutually exclusive with --width/--height"
+    /// notFloating: points alone change the axes of a panel that is already floating; a full overlay has no
+    /// percent for the other axis to keep.
+    public static let notFloating = "session.overlay.resize: --width/--height need a floating overlay; pass --size-percent too"
+    public static let hud = "a hud measures its own height: --width/--height do not apply"
+    public static let remote = "--width/--height are not supported for an overlay shown on another Mac"
 }
 
 /// Advisory text `notify` returns in `result.text` when the banner toggle is off. The command still succeeds

@@ -428,7 +428,16 @@ extension AppController {
     /// case fails to compile until it's wired, the Linux analogue of the macOS menu keep-in-sync.
     private func dispatchBuiltin(_ action: BuiltinAction, sessionID: UUID) {
         switch action {
+        case .newCompanion: newCompanionFromGUI()
+        case .duplicateCompanion: newCompanionFromGUI(duplicate: true)
+        case .toggleOverlay: _ = setSessionOverlayVisibility(nil, window: nil, pane: nil, mode: .toggle)
+        case .attachRemote: showRemoteAttach()
+        case .editFlaggedSessions: showMembershipEditor(workspaces: false)
+        case .editFocusedWorkspaces: showMembershipEditor(workspaces: true)
+
         case .newWindow: openNewWindow()
+        case .previousWindow: _ = windowGo(direction: .previous)
+        case .nextWindow: _ = windowGo(direction: .next)
         case .renameWindow: renameWindowDialog(windowID)
         case .deleteWindow: confirmDeleteWindow(windowID)
         case .newWorkspace: newWorkspace()
@@ -442,8 +451,6 @@ extension AppController {
         case .reopenRecent: reopenRecentClosed()
         case .undoClose: undoPendingClose()
         case .clearStatus: clearActiveStatus()
-        case .previousWindow: navigateWindow(.previous)
-        case .nextWindow: navigateWindow(.next)
         case .increaseFontSize: dispatchFixedShortcut(.fontIncrease, origin: nil)
         case .decreaseFontSize: dispatchFixedShortcut(.fontDecrease, origin: nil)
         case .resetFontSize: dispatchFixedShortcut(.fontReset, origin: nil)
@@ -456,7 +463,6 @@ extension AppController {
         case .toggleSidebar: toggleSidebar()
         case .toggleFullscreen: toggleWindowFullscreen()
         case .selectTheme: showThemePicker()
-        case .attachRemote: attachRemote()
         case .toggleFlaggedView: toggleFlaggedView()
         case .toggleFlag: toggleFlagActive()
         case .focusWorkspace: focusActiveWorkspace()   // toggle focus on the active session's workspace
@@ -468,8 +474,8 @@ extension AppController {
         case .focusRightPane: focusPane(left: false)
         case .previousSession: navigate(.previous)
         case .nextSession: navigate(.next)
-        case .previousAttentionSession: navigate(.previousAttention)
-        case .nextAttentionSession: navigate(.nextAttention)
+        case .previousAttentionSession: navigateAttention(.previousAttention)
+        case .nextAttentionSession: navigateAttention(.nextAttention)
         case .firstSession: navigate(.first)
         case .lastSession: navigate(.last)
         case .quickTerminal: toggleQuick()
@@ -477,7 +483,6 @@ extension AppController {
         case .commandPalette: showPalette()
         case .customCommandPalette: showPalette()   // the palette already lists custom commands
         case .showAttention: showAttentionPalette()
-        case .toggleOverlay: toggleOverlays()
         }
     }
 

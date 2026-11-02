@@ -53,6 +53,7 @@ extension AppController {
         }
         if previous?.star != content.star { gtk_widget_set_visible(W(widgets.star), content.star ? 1 : 0) }
         if previous?.badge != content.badge { Self.applyRowBadge(content.badge, to: widgets.badge) }
+        applyCompanionRowWidgets(widgets, content: content)
         widgets.applied = applied
     }
 
@@ -89,6 +90,7 @@ extension AppController {
         if previous?.expanded != content.expanded, let disc = widgets.disc {
             gtk_button_set_icon_name(BUTTON(disc), Self.disclosureIconName(expanded: content.expanded))
         }
+        applySidebarTint(content.tint, icon: icon, name: named.widget)
         widgets.applied = applied
     }
 
@@ -155,6 +157,7 @@ extension AppController {
     func syncSidebar(force: Bool = false, preferMoving: Set<UUID> = []) {
         guard sidebarRuntime.syncGate.enter() else { return }
         defer { sidebarRuntime.syncGate.exit() }
+        for session in store.workspaces.flatMap(\.sessions) { applyOverlayVisibility(session) }
         runSidebarSyncPass(force: force, preferMoving: preferMoving)
         // Drain what re-entered, unforced — both forced callers are top-level.
         while sidebarRuntime.syncGate.takePending() {
@@ -163,6 +166,7 @@ extension AppController {
         // A status change in this store also changes the app-wide attention feed in other windows.
         let settings = linuxSettingsStore().load()
         for controller in gWindows.values where controller !== self {
+            controller.refreshPaletteContents()
             controller.updateAttentionButton(settings: settings, refocusOnDismiss: false)
             controller.updateSessionPickerStatusIcons(settings: settings)
         }
@@ -172,8 +176,14 @@ extension AppController {
     /// owns that derivation, so the host-free tests exercise the shipped one.
     private func prepareSidebarSnapshot(settings: AppSettings) -> (SidebarSnapshot, Set<UUID>) {
         let expanded = sidebarRuntime.reveal.syncedExpansion(store: store)
+        if sidebarRuntime.lastParentRevealedSelection != store.selectedSessionID {
+            sidebarRuntime.lastParentRevealedSelection = store.selectedSessionID
+            if store.sidebarMode == .tree, let parent = store.activeSession?.parentID {
+                sidebarRuntime.transientParentIDs.insert(parent)
+            }
+        }
         return (SidebarSnapshot.desired(from: store, settings: settings, renaming: renaming,
-                                        expandedWorkspaceIDs: expanded), expanded)
+                                        expandedWorkspaceIDs: expanded, expandedParentIDs: sidebarRuntime.transientParentIDs), expanded)
     }
 
     private func runSidebarSyncPass(force: Bool, preferMoving: Set<UUID>) {
@@ -404,6 +414,8 @@ extension AppController {
         updateWorkspaceFilterButton()
         updateDashboardStatusIndicators(settings: settings)
         updateSessionPickerStatusIcons(settings: settings)
+        refreshPaletteContents()
+        updateOverlayToggle()
         let hadSessionPicker = sessionPickerPopover != nil
         // `refocusOnDismiss: false` for the rebuild's reason: the grab would re-enter this sync.
         updateAttentionButton(settings: settings, refocusOnDismiss: false)
