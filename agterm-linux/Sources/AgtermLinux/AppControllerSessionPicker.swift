@@ -278,6 +278,7 @@ extension AppController {
         // Read the capture BEFORE the dismissal consumes it (see `popupPopover`).
         let heldSearchEntry = searchEntryCaptureSurvives(sessionPickerPopover)
         dismissSessionPicker(refocus: false)
+        dismissPrimaryMenu(refocus: false)
         guard let popover = op(gtk_popover_new()), let rows = op(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2)) else {
             return
         }
