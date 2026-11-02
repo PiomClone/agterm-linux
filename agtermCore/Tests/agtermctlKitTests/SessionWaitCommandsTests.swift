@@ -278,6 +278,7 @@ struct SessionWaitCommandsTests {
     }
 
     private static func processState(_ pid: pid_t) -> String {
+        #if canImport(Darwin)
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
@@ -286,6 +287,9 @@ struct SessionWaitCommandsTests {
         let names: [Int32: String] = [1: "SIDL", 2: "SRUN", 3: "SSLEEP", 4: "SSTOP", 5: "SZOMB"]
         let stat = Int32(info.kp_proc.p_stat)
         return "\(names[stat] ?? "\(stat)") flags=0x\(String(info.kp_proc.p_flag, radix: 16))"
+        #else
+        return "pid=\(pid)"
+        #endif
     }
 
     @Test func cancelledWatchdogDoesNotFire() {

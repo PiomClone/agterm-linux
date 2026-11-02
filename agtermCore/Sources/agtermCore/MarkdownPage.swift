@@ -40,6 +40,7 @@ public enum MarkdownPage {
     /// markdown file's own folder, after symlinks on both sides are resolved; in document order, each
     /// reference once. A remote, a `data:` or an escaping reference is left out and renders as its alt text.
     public static func imageReferences(in markdown: String, folder: String) -> [Image] {
+        #if canImport(Darwin)
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .full)
         guard let parsed = try? AttributedString(markdown: markdown, options: options) else { return [] }
         var found: [Image] = [], seen: Set<String> = []
@@ -50,7 +51,99 @@ public enum MarkdownPage {
             found.append(Image(reference: reference, path: path))
         }
         return found
+        #else
+        return linuxImageReferences(in: markdown, folder: folder)
+        #endif
     }
+
+    #if !canImport(Darwin)
+    static func linuxImageReferences(in markdown: String, folder: String) -> [Image] {
+        var defs: [String: String] = [:]
+        for line in markdown.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("["), let closeBracket = trimmed.firstIndex(of: "]") else { continue }
+            let after = trimmed[trimmed.index(after: closeBracket)...].trimmingCharacters(in: .whitespaces)
+            guard after.hasPrefix(":") else { continue }
+            let label = String(trimmed[trimmed.index(after: trimmed.startIndex)..<closeBracket]).lowercased()
+            var dest = String(after.dropFirst()).trimmingCharacters(in: .whitespaces)
+            if dest.hasPrefix("<"), let end = dest.firstIndex(of: ">") {
+                dest = String(dest[dest.index(after: dest.startIndex)..<end])
+            } else if let space = dest.firstIndex(where: { $0.isWhitespace }) {
+                dest = String(dest[..<space])
+            }
+            if !label.isEmpty && !dest.isEmpty {
+                defs[label] = dest
+            }
+        }
+
+        var found: [Image] = []
+        var seen: Set<String> = []
+        let chars = Array(markdown)
+        var i = 0
+        while i + 1 < chars.count {
+            if chars[i] == "!" && chars[i + 1] == "[" {
+                var depth = 1
+                var j = i + 2
+                while j < chars.count && depth > 0 {
+                    if chars[j] == "[" {
+                        depth += 1
+                    } else if chars[j] == "]" {
+                        depth -= 1
+                    }
+                    j += 1
+                }
+                guard depth == 0 && j < chars.count else {
+                    i += 1
+                    continue
+                }
+                let alt = String(chars[(i + 2)..<(j - 1)])
+                if chars[j] == "(" {
+                    var end = j + 1
+                    var parenDepth = 1
+                    while end < chars.count && parenDepth > 0 {
+                        if chars[end] == "(" {
+                            parenDepth += 1
+                        } else if chars[end] == ")" {
+                            parenDepth -= 1
+                        }
+                        end += 1
+                    }
+                    guard parenDepth == 0 else {
+                        i += 1
+                        continue
+                    }
+                    var dest = String(chars[(j + 1)..<(end - 1)]).trimmingCharacters(in: .whitespaces)
+                    if dest.hasPrefix("<"), dest.hasSuffix(">") {
+                        dest = String(dest.dropFirst().dropLast())
+                    }
+                    let ref = dest.removingPercentEncoding ?? dest
+                    if seen.insert(ref).inserted, let path = localPath(ref, folder: folder) {
+                        found.append(Image(reference: ref, path: path))
+                    }
+                    i = end
+                    continue
+                } else if chars[j] == "[" {
+                    guard let endBracket = chars[(j + 1)...].firstIndex(of: "]") else {
+                        i += 1
+                        continue
+                    }
+                    let refLabel = String(chars[(j + 1)..<endBracket]).trimmingCharacters(in: .whitespaces)
+                    let key = (refLabel.isEmpty ? alt : refLabel).lowercased()
+                    if let rawDest = defs[key] {
+                        let ref = rawDest.removingPercentEncoding ?? rawDest
+                        if seen.insert(ref).inserted, let path = localPath(ref, folder: folder) {
+                            found.append(Image(reference: ref, path: path))
+                        }
+                    }
+                    i = endBracket + 1
+                    continue
+                }
+            }
+            i += 1
+        }
+        return found
+    }
+    #endif
 
     /// localPath resolves one decoded reference against `folder`, nil unless it names a file inside it. The
     /// lexical check runs first, so a reference outside the folder is refused without touching the filesystem.

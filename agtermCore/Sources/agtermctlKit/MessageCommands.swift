@@ -1,6 +1,11 @@
 import ArgumentParser
 import Dispatch
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 import agtermCore
 
 /// Msg is `agtermctl msg`: messages addressed to a pane, read and acknowledged by that pane.
@@ -166,7 +171,11 @@ extension Msg {
             let watchdog = timeout.map { seconds in
                 SessionWaitWatchdog(seconds: seconds) {
                     Self.reportTimeout()
+                    #if canImport(Darwin)
                     Darwin.exit(Self.timeoutExitCode)
+                    #else
+                    Glibc.exit(Self.timeoutExitCode)
+                    #endif
                 }
             }
             defer { watchdog?.cancel() }
