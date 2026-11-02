@@ -49,7 +49,8 @@ final class AppController {
     var recentSessionsButton: OpaquePointer? // title-bar MRU session picker
     var attentionButton: OpaquePointer?   // optional title-bar attention indicator button
     var dashboardButton: OpaquePointer?   // title-bar MRU dashboard toggle
-    var quickToggleBtn: OpaquePointer?; var sidebarToggleBtn: OpaquePointer?; var titleWidget: OpaquePointer?; var titlebarDividerAfterA: OpaquePointer?; var titlebarDividerAfterB: OpaquePointer?
+    var quickToggleBtn: OpaquePointer?; var sidebarToggleBtn: OpaquePointer?; var primaryMenuBtn: OpaquePointer?; var primaryMenuPopover: OpaquePointer?
+    var titleWidget: OpaquePointer?; var titlebarDividerAfterA: OpaquePointer?; var titlebarDividerAfterB: OpaquePointer?
     var interfaceWidgets: [InterfaceElement: OpaquePointer] = [:]
     var footerNewWorkspaceButton: OpaquePointer?; var footerNewSessionButton: OpaquePointer?
     var footerFocusFilterButton: OpaquePointer?; var footerFlaggedButton: OpaquePointer?
@@ -277,9 +278,9 @@ final class AppController {
         // `pack_end` stacks leftward, so construction proceeds from the visual right edge.
         // Sidebar toggle on the LEFT (macOS sidebar.left), always visible so a hidden sidebar can return.
         sidebarToggleBtn = linuxHeaderToggle(contentHeader, "agterm-sidebar-symbolic",
-                                             LinuxChromeTooltip.text("Toggle Sidebar", .toggleSidebar),
-                                             onSidebarToggle, packStart: true)
+                                             LinuxChromeTooltip.text("Toggle Sidebar", .toggleSidebar), onSidebarToggle, packStart: true)
         installPreferencesShortcut()
+        installPrimaryMenu(in: contentHeader)
         // Left-to-right: Recent, Attention | Scratch, Split | Dashboard, Quick; split/scratch gain fill when active.
         quickToggleBtn = linuxHeaderToggle(contentHeader, "agterm-quick-symbolic", LinuxChromeTooltip.text("Quick Terminal", .quickTerminal), onQuickToggle)
         dashboardButton = linuxHeaderToggle(contentHeader, "agterm-grid-symbolic", LinuxChromeTooltip.text("Dashboard", .dashboard), onDashboardToggle)

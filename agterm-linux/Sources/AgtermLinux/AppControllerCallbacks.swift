@@ -459,6 +459,20 @@ let onMenuButton: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void 
     MainActor.assumeIsolated { controllerForWidget(button)?.showPalette() }
 }
 
+let onPrimaryMenuToggle: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void = { button, _ in
+    MainActor.assumeIsolated { controllerForWidget(button)?.togglePrimaryMenu(anchor: button) }
+}
+
+let onPrimaryMenuClosed: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void = { popover, _ in
+    MainActor.assumeIsolated { controllerForWidget(popover)?.primaryMenuDidClose(popover) }
+}
+
+let onPrimaryMenuItemClicked: @MainActor @convention(c) (OpaquePointer?, gpointer?) -> Void = { button, data in
+    guard let button,
+          let action = PrimaryMenuAction(rawValue: Int(bitPattern: data)) else { return }
+    MainActor.assumeIsolated { controllerForWidget(button)?.executePrimaryMenuAction(action) }
+}
+
 let onNameDoubleClick: @MainActor @convention(c) (OpaquePointer?, Int32, Double, Double, gpointer?) -> Void = { gesture, nPress, _, _, data in
     guard nPress == 2 else { return }
     MainActor.assumeIsolated { controllerForEventController(gesture)?.beginRenameFromLabel(data) }

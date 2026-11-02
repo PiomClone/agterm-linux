@@ -2,6 +2,23 @@ import CGtk
 import agtermCore
 
 @MainActor
+enum PrimaryMenuAction: Int, CaseIterable {
+    case newWindow = 1
+    case newWorkspace
+    case newSession
+    case openDirectory
+    case attachRemote
+    case commandPalette
+    case find
+    case zoomOut
+    case zoomReset
+    case zoomIn
+    case preferences
+    case keyboardShortcuts
+    case about
+}
+
+@MainActor
 private final class AuxiliaryDialogContext {
     let controller: AppController
     let dialog: OpaquePointer?
@@ -116,6 +133,219 @@ extension AppController {
     func auxiliaryDialogDidClose(_ dialog: OpaquePointer?) {
         guard let dialog else { return }
         auxiliaryDialogs.removeAll { $0 == dialog }
+    }
+
+    func installPrimaryMenu(in header: OpaquePointer?) {
+        let btn = linuxHeaderToggle(header, "open-menu-symbolic", "Main Menu", onPrimaryMenuToggle)
+        if let btn {
+            "primary-menu-button".withCString { gtk_widget_set_name(W(btn), $0) }
+        }
+        primaryMenuBtn = btn
+    }
+
+    var primaryMenuIsOpen: Bool {
+        guard let popover = primaryMenuPopover else { return false }
+        return gtk_widget_get_visible(W(popover)) != 0
+    }
+
+    func togglePrimaryMenu(anchor: OpaquePointer?) {
+        if primaryMenuIsOpen {
+            dismissPrimaryMenu()
+        } else {
+            showPrimaryMenu(anchor: anchor)
+        }
+    }
+
+    func showPrimaryMenu(anchor: OpaquePointer?) {
+        guard let anchor else { return }
+        let heldSearchEntry = searchEntryCaptureSurvives(primaryMenuPopover)
+        dismissPrimaryMenu(refocus: false)
+        dismissSessionPicker(refocus: false)
+        dismissContextMenu(refocus: false)
+
+        guard let popover = op(gtk_popover_new()),
+              let contentBox = op(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2)) else { return }
+
+        primaryMenuPopover = popover
+        "primary-menu-popover".withCString { gtk_widget_set_name(W(popover), $0) }
+        attachControllerContext(to: popover, windowID: windowID)
+        connectPrimaryMenuClosed(popover)
+        gtk_widget_set_parent(W(popover), W(anchor))
+        gtk_popover_set_position(POPOVER(popover), GTK_POS_BOTTOM)
+        gtk_widget_add_css_class(W(popover), "menu")
+        gtk_widget_add_css_class(W(contentBox), "agterm-interface-panel")
+
+        for margin in [gtk_widget_set_margin_top, gtk_widget_set_margin_bottom,
+                       gtk_widget_set_margin_start, gtk_widget_set_margin_end] {
+            margin(W(contentBox), 6)
+        }
+        gtk_widget_set_size_request(W(contentBox), interfacePanelWidth(260), -1)
+
+        let newWindowShortcut = resolvedChord(for: .newWindow).map(LinuxChromeTooltip.label)
+        let newWorkspaceShortcut = resolvedChord(for: .newWorkspace).map(LinuxChromeTooltip.label)
+        let newSessionShortcut = resolvedChord(for: .newSession).map(LinuxChromeTooltip.label)
+        let openDirShortcut = resolvedChord(for: .openDirectory).map(LinuxChromeTooltip.label)
+        let paletteShortcut = resolvedChord(for: .commandPalette).map(LinuxChromeTooltip.label)
+        let findShortcut = resolvedChord(for: .toggleSearch).map(LinuxChromeTooltip.label)
+
+        addPrimaryMenuItem(to: contentBox, title: "New Window", action: .newWindow, shortcut: newWindowShortcut)
+        addPrimaryMenuItem(to: contentBox, title: "New Workspace", action: .newWorkspace, shortcut: newWorkspaceShortcut)
+        addPrimaryMenuItem(to: contentBox, title: "New Session", action: .newSession, shortcut: newSessionShortcut)
+        addPrimaryMenuItem(to: contentBox, title: "Open Directory…", action: .openDirectory, shortcut: openDirShortcut)
+        addPrimaryMenuItem(to: contentBox, title: "Attach Remote…", action: .attachRemote)
+
+        addPrimaryMenuSeparator(to: contentBox)
+
+        addPrimaryMenuItem(to: contentBox, title: "Command Palette…", action: .commandPalette, shortcut: paletteShortcut)
+        addPrimaryMenuItem(to: contentBox, title: "Find in Terminal", action: .find, shortcut: findShortcut)
+        addPrimaryZoomRow(to: contentBox)
+
+        addPrimaryMenuSeparator(to: contentBox)
+
+        addPrimaryMenuItem(to: contentBox, title: "Preferences", action: .preferences, shortcut: "Ctrl+,")
+        addPrimaryMenuItem(to: contentBox, title: "Keyboard Shortcuts", action: .keyboardShortcuts)
+        addPrimaryMenuItem(to: contentBox, title: "About agterm", action: .about)
+
+        gtk_popover_set_child(POPOVER(popover), W(contentBox))
+        popupPopover(popover, keepingCapture: heldSearchEntry)
+    }
+
+    func dismissPrimaryMenu(refocus: Bool = true) {
+        guard let popover = primaryMenuPopover else { return }
+        primaryMenuPopover = nil
+        detachPopover(popover, popdown: true, refocus: refocus)
+    }
+
+    func primaryMenuDidClose(_ popover: OpaquePointer?) {
+        guard let popover, popover == primaryMenuPopover else { return }
+        primaryMenuPopover = nil
+        detachPopover(popover, popdown: false)
+    }
+
+    func executePrimaryMenuAction(_ action: PrimaryMenuAction) {
+        switch action {
+        case .zoomOut:
+            activeSurface()?.performBindingAction(FontBindingAction.decrease)
+        case .zoomReset:
+            activeSurface()?.performBindingAction(FontBindingAction.reset)
+        case .zoomIn:
+            activeSurface()?.performBindingAction(FontBindingAction.increase)
+        case .newWindow:
+            dismissPrimaryMenu()
+            openNewWindow()
+        case .newWorkspace:
+            dismissPrimaryMenu()
+            newWorkspace()
+        case .newSession:
+            dismissPrimaryMenu()
+            newSession()
+        case .openDirectory:
+            dismissPrimaryMenu()
+            openDirectory()
+        case .attachRemote:
+            dismissPrimaryMenu()
+            attachRemote()
+        case .commandPalette:
+            dismissPrimaryMenu()
+            showPalette()
+        case .find:
+            dismissPrimaryMenu()
+            toggleSearch()
+        case .preferences:
+            dismissPrimaryMenu()
+            showSettings()
+        case .keyboardShortcuts:
+            dismissPrimaryMenu()
+            showKeyboardShortcuts()
+        case .about:
+            dismissPrimaryMenu()
+            showAbout()
+        }
+    }
+
+    private func addPrimaryMenuItem(
+        to box: OpaquePointer?,
+        title: String,
+        action: PrimaryMenuAction,
+        shortcut: String? = nil
+    ) {
+        guard let button = op(gtk_button_new()),
+              let row = op(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12)) else { return }
+        gtk_button_set_has_frame(BUTTON(button), 0)
+        gtk_widget_set_halign(W(button), GTK_ALIGN_FILL)
+        gtk_widget_set_hexpand(W(button), 1)
+
+        let titleLabel = op(gtk_label_new(title))
+        gtk_label_set_xalign(titleLabel, 0)
+        gtk_widget_set_hexpand(W(titleLabel), 1)
+        gtk_box_append(cast(row), W(titleLabel))
+
+        if let shortcut, !shortcut.isEmpty {
+            let shortcutLabel = op(gtk_label_new(shortcut))
+            gtk_label_set_xalign(shortcutLabel, 1)
+            gtk_widget_add_css_class(W(shortcutLabel), "dim-label")
+            gtk_box_append(cast(row), W(shortcutLabel))
+        }
+
+        gtk_button_set_child(BUTTON(button), W(row))
+        connect(button, "clicked", unsafeBitCast(onPrimaryMenuItemClicked as @convention(c)
+            (OpaquePointer?, gpointer?) -> Void, to: GCallback.self),
+            gpointer(bitPattern: action.rawValue))
+        gtk_box_append(cast(box), W(button))
+    }
+
+    private func addPrimaryMenuSeparator(to box: OpaquePointer?) {
+        guard let sep = op(gtk_separator_new(GTK_ORIENTATION_HORIZONTAL)) else { return }
+        gtk_widget_set_margin_top(W(sep), 4)
+        gtk_widget_set_margin_bottom(W(sep), 4)
+        gtk_box_append(cast(box), W(sep))
+    }
+
+    private func addPrimaryZoomRow(to box: OpaquePointer?) {
+        guard let zoomRow = op(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8)),
+              let zoomControls = op(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)) else { return }
+        gtk_widget_set_margin_start(W(zoomRow), 8)
+        gtk_widget_set_margin_end(W(zoomRow), 8)
+        gtk_widget_set_margin_top(W(zoomRow), 2)
+        gtk_widget_set_margin_bottom(W(zoomRow), 2)
+
+        let label = op(gtk_label_new("Zoom"))
+        gtk_label_set_xalign(label, 0)
+        gtk_widget_set_hexpand(W(label), 1)
+        gtk_box_append(cast(zoomRow), W(label))
+
+        gtk_widget_add_css_class(W(zoomControls), "linked")
+
+        func addZoomButton(_ icon: String?, _ text: String?, _ tip: String, _ action: PrimaryMenuAction) {
+            let btn: OpaquePointer?
+            if let icon {
+                btn = op(gtk_button_new_from_icon_name(icon))
+            } else if let text {
+                btn = op(gtk_button_new_with_label(text))
+            } else {
+                return
+            }
+            guard let btn else { return }
+            gtk_widget_set_tooltip_text(W(btn), tip)
+            gtk_button_set_has_frame(BUTTON(btn), 1)
+            gtk_widget_set_focus_on_click(W(btn), 0)
+            connect(btn, "clicked", unsafeBitCast(onPrimaryMenuItemClicked as @convention(c)
+                (OpaquePointer?, gpointer?) -> Void, to: GCallback.self),
+                gpointer(bitPattern: action.rawValue))
+            gtk_box_append(cast(zoomControls), W(btn))
+        }
+
+        addZoomButton("zoom-out-symbolic", nil, "Zoom Out", .zoomOut)
+        addZoomButton(nil, "100%", "Normal Size", .zoomReset)
+        addZoomButton("zoom-in-symbolic", nil, "Zoom In", .zoomIn)
+
+        gtk_box_append(cast(zoomRow), W(zoomControls))
+        gtk_box_append(cast(box), W(zoomRow))
+    }
+
+    private func connectPrimaryMenuClosed(_ popover: OpaquePointer) {
+        connect(popover, "closed", unsafeBitCast(onPrimaryMenuClosed as @convention(c)
+            (OpaquePointer?, gpointer?) -> Void, to: GCallback.self))
     }
 }
 

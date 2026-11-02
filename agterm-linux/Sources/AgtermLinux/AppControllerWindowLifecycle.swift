@@ -79,6 +79,7 @@ extension AppController {
         // Not optional cleanup: a popover left parented at destroy hangs the close, and GTK emits no
         // `"closed"` then, so this call is the only notice.
         dismissContextMenu(refocus: false)
+        dismissPrimaryMenu(refocus: false)
         // EVERY dialog this window owns is dismissed here, or it outlives the widget tree and keeps the
         // controller alive with it — a bare toplevel (the theme picker, the palette) is not destroyed with
         // its transient parent under GTK4, and a hosted AdwDialog holds the same `passRetained` on "closed".

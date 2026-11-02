@@ -38,6 +38,7 @@ extension AppController {
         // dismissal consumes it (see `popupPopover`).
         let heldSearchEntry = searchEntryCaptureSurvives(contextMenuPopover)
         dismissContextMenu(refocus: false)
+        dismissPrimaryMenu(refocus: false)
         contextMenuSession = sid
         guard let popover = op(gtk_popover_new()) else { return }
         attachControllerContext(to: popover, windowID: windowID)
@@ -189,6 +190,7 @@ extension AppController {
         // See showRowContextMenu: dismiss the old popover before registering the new one, capture first.
         let heldSearchEntry = searchEntryCaptureSurvives(contextMenuPopover)
         dismissContextMenu(refocus: false)
+        dismissPrimaryMenu(refocus: false)
         contextMenuWorkspace = wsID
         guard let popover = op(gtk_popover_new()) else { return }
         attachControllerContext(to: popover, windowID: windowID)
