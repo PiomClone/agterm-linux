@@ -58,6 +58,29 @@ extension AppController {
         }
     }
 
+    func setSessionInfo(_ target: String?, window: String?, info: SessionInfo?) -> ControlResponse {
+        switch resolveSessionResponse(target) {
+        case .failure(let response): return response
+        case .success(let id):
+            guard let session = store.session(withID: id) else { return err("no such session") }
+            _ = store.setInfo(info, forSession: id)
+            session.onInfoDiscarded?()
+            session.onInfoDiscarded = nil
+            if let info, info.hideAfter > 0 {
+                let seconds = min(info.hideAfter, HudSpec.maxHideAfter)
+                let cancel = MainTimer.schedule(after: seconds) { [weak self, weak session] in
+                    guard let self, let session, session.id == id else { return }
+                    _ = self.store.setInfo(nil, forSession: id)
+                    session.onInfoDiscarded = nil
+                    self.syncSidebar()
+                }
+                session.onInfoDiscarded = cancel
+            }
+            syncSidebar()
+            return ControlResponse(ok: true, result: ControlResult(id: id.uuidString))
+        }
+    }
+
     func setSidebarWidth(_ points: Double, window: String?) -> ControlResponse {
         store.setSidebarWidth(points)
         if let splitView { applySidebarWidth(splitView) }

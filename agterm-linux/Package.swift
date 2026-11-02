@@ -56,7 +56,7 @@ let package = Package(
                 "LinuxIntegrations",
                 .product(name: "agtermCore", package: "agtermCore"),
             ],
-            resources: [.copy("Resources/hud")],
+            resources: [.copy("Resources/hud"), .copy("Resources/markdown")],
             swiftSettings: targetSwiftSettings,
             linkerSettings: [ .unsafeFlags(extraLinkerFlags) ]
         ),

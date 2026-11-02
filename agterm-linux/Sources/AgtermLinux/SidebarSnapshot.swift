@@ -19,6 +19,7 @@ struct SidebarSnapshot: Equatable {
         /// add-session tooltip; `setExpanded` only hides the list box.
         var expanded: Bool
         var tint: SidebarTint?
+        var iconVisible: Bool = true
     }
 
     struct RowContent: Equatable {
@@ -37,6 +38,8 @@ struct SidebarSnapshot: Equatable {
         var hasCompanions = false
         var expanded = true
         var foldedAttention: String?
+        var iconVisible: Bool = true
+        var infoSpans: [SessionInfoSpan]?
 
         var disconnected: Bool { remote && notice != nil }
 
@@ -114,7 +117,8 @@ extension SidebarSnapshot {
                 let header = HeaderContent(name: workspace.name,
                                            renaming: builder.renamingID == workspace.id,
                                            focusMember: store.focusedWorkspaceIDs.contains(workspace.id),
-                                           addVisible: false, expanded: expanded, tint: workspace.tint)
+                                           addVisible: false, expanded: expanded, tint: workspace.tint,
+                                           iconVisible: !settings.isInterfaceElementHidden(.workspaceIcons))
                 return builder.section(key: .workspace(workspace.id), header: header,
                                        sessions: flagged, expanded: expanded, showsHint: false)
             }
@@ -134,7 +138,8 @@ extension SidebarSnapshot {
                     renaming: builder.renamingID == workspace.id,
                     focusMember: store.focusedWorkspaceIDs.contains(workspace.id),
                     addVisible: !settings.isInterfaceElementHidden(.workspaceAddSession),
-                    expanded: expanded, tint: workspace.tint)
+                    expanded: expanded, tint: workspace.tint,
+                    iconVisible: !settings.isInterfaceElementHidden(.workspaceIcons))
                 return builder.section(key: .workspace(workspace.id), header: header,
                                        sessions: workspace.sessions, expanded: expanded,
                                        showsHint: false)
@@ -175,6 +180,12 @@ private struct SidebarSnapshotBuilder {
         let glyph = LinuxStatusGlyphPresentation(indicator: session.agentIndicator, settings: settings)
         let unseen = session.unseenCount
         let badged = unseen > 0 && (settings.notificationBadgeEnabled ?? true)
+        let showsInfo: Bool = switch settings.effectiveSessionInfoDisplay {
+        case .off: false
+        case .flagged: store.sidebarMode == .flagged
+        case .always: true
+        }
+        let infoSpans = showsInfo ? session.effectiveInfo?.spans : nil
         return SidebarSnapshot.RowContent(
             name: flaggedView && settings.effectiveFlaggedViewLayout == .flat && !renaming
                 ? LinuxSidebarPolicy.flaggedRowLabel(for: session, in: store)
@@ -192,7 +203,9 @@ private struct SidebarSnapshotBuilder {
             hasCompanions: !flattenCompanions && !store.companions(of: session.id).isEmpty,
             expanded: session.isExpanded || expandedParentIDs.contains(session.id),
             foldedAttention: !flattenCompanions && !session.isExpanded && !expandedParentIDs.contains(session.id)
-                ? store.companionsNeedingAttention(of: session.id).map(\.displayName).joined(separator: ", ").linuxTrimmedOrNil : nil)
+                ? store.companionsNeedingAttention(of: session.id).map(\.displayName).joined(separator: ", ").linuxTrimmedOrNil : nil,
+            iconVisible: !settings.isInterfaceElementHidden(.sessionIcons),
+            infoSpans: infoSpans)
     }
 }
 

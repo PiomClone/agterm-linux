@@ -211,6 +211,7 @@ extension AppController {
                 gtk_box_append(cast(row), W(button))
             }
             icon = op(gtk_image_new_from_icon_name("agterm-grid-symbolic"))
+            if let icon { gtk_widget_set_visible(W(icon), content.iconVisible ? 1 : 0) }
             applyWorkspaceFocusMembership(icon, member: content.focusMember)
             gtk_box_append(cast(row), W(icon))
             if let name = makeNameWidget(id: wsID, text: content.name, isWorkspace: true) {
@@ -368,6 +369,7 @@ extension AppController {
         gtk_widget_add_css_class(W(box), "agterm-session-row-content")
         gtk_widget_set_margin_start(W(lead), 6)
         if let notice = content.notice { notice.withCString { gtk_widget_set_tooltip_text(W(lead), $0) } }
+        gtk_widget_set_visible(W(lead), content.iconVisible ? 1 : 0)
         gtk_box_append(cast(box), W(lead))
         gtk_box_append(cast(box), W(name))
         Self.applyStatusGlyph(content.glyph, blink: content.blink,
@@ -377,16 +379,30 @@ extension AppController {
         gtk_box_append(cast(box), W(star))
         Self.applyRowBadge(content.badge, to: badge)
         gtk_box_append(cast(box), W(badge))
+
+        let container = op(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0))
+        gtk_box_append(cast(container), W(box))
+
+        let infoLabel = op(gtk_label_new(nil))
+        if let infoLabel {
+            gtk_widget_set_halign(W(infoLabel), GTK_ALIGN_START)
+            gtk_label_set_xalign(infoLabel, 0)
+            gtk_label_set_ellipsize(infoLabel, PANGO_ELLIPSIZE_END)
+            gtk_widget_set_margin_start(W(infoLabel), 26)
+            gtk_widget_set_margin_bottom(W(infoLabel), 2)
+            gtk_widget_add_css_class(W(infoLabel), "caption")
+            Self.applySessionInfoMarkup(content.infoSpans, to: infoLabel)
+            gtk_box_append(cast(container), W(infoLabel))
+        }
+
         let widgets = SessionRowWidgets(row: row, box: box, lead: lead, name: name,
                                         glyph: glyph, star: star, badge: badge)
+        widgets.infoLabel = infoLabel
         installCompanionRowWidgets(id, widgets: widgets, content: content)
         widgets.applied = content
         sidebarRuntime.rows[id] = widgets
         rowSession[row] = id
-        // Keep the trailing inset inside the content box as CSS `padding-right` (installAppCSS),
-        // rather than shrinking the row that paints the rounded selection background. This mirrors
-        // the leading icon's margin_start on the left.
-        gtk_list_box_row_set_child(GLBR(row), W(box))
+        gtk_list_box_row_set_child(GLBR(row), W(container))
         // Rows are PASSIVE: under GTK_SELECTION_NONE the list box's built-in click gesture would
         // still move keyboard focus to a selectable/activatable row on release — after showActive()
         // already gave the terminal focus on press — sending subsequent typing into the sidebar.

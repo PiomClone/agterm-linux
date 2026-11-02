@@ -18,6 +18,32 @@ extension AppController {
         gtk_widget_set_visible(W(badge), 1)
     }
 
+    static func applySessionInfoMarkup(_ spans: [SessionInfoSpan]?, to label: OpaquePointer?) {
+        guard let label else { return }
+        guard let spans, !spans.isEmpty else {
+            gtk_widget_set_visible(W(label), 0)
+            gtk_label_set_text(label, "")
+            return
+        }
+        var markup = ""
+        for span in spans {
+            guard let escaped = g_markup_escape_text(span.text, gssize(span.text.utf8.count)) else { continue }
+            defer { g_free(escaped) }
+            var piece = String(cString: escaped)
+            if span.bold { piece = "<b>\(piece)</b>" }
+            if span.italic { piece = "<i>\(piece)</i>" }
+            if span.code { piece = "<tt>\(piece)</tt>" }
+            if let color = span.color {
+                piece = "<span foreground=\"\(color.rawValue)\">\(piece)</span>"
+            } else if span.dim {
+                piece = "<span alpha=\"50%\">\(piece)</span>"
+            }
+            markup += piece
+        }
+        markup.withCString { gtk_label_set_markup(label, $0) }
+        gtk_widget_set_visible(W(label), 1)
+    }
+
     func updateSessionRow(_ id: UUID, content: SidebarSnapshot.RowContent) {
         guard let widgets = sidebarRuntime.rows[id] else { return }
         let previous = widgets.applied
@@ -53,6 +79,12 @@ extension AppController {
         }
         if previous?.star != content.star { gtk_widget_set_visible(W(widgets.star), content.star ? 1 : 0) }
         if previous?.badge != content.badge { Self.applyRowBadge(content.badge, to: widgets.badge) }
+        if previous?.iconVisible != content.iconVisible {
+            gtk_widget_set_visible(W(widgets.lead), content.iconVisible ? 1 : 0)
+        }
+        if previous?.infoSpans != content.infoSpans {
+            Self.applySessionInfoMarkup(content.infoSpans, to: widgets.infoLabel)
+        }
         applyCompanionRowWidgets(widgets, content: content)
         widgets.applied = applied
     }
@@ -78,6 +110,9 @@ extension AppController {
         applied.renaming = named.renaming
         if previous?.focusMember != content.focusMember {
             applyWorkspaceFocusMembership(icon, member: content.focusMember)
+        }
+        if previous?.iconVisible != content.iconVisible {
+            gtk_widget_set_visible(W(icon), content.iconVisible ? 1 : 0)
         }
         if let add = widgets.add {
             if previous?.addVisible != content.addVisible {

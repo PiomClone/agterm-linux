@@ -6,7 +6,10 @@ import agtermCore
 @MainActor
 extension LinuxHtmlOverlayPage {
     func installBridge() {
-        if case .url = overlay.source { return }
+        switch overlay.source {
+        case .url, .image, .markdown: return
+        case .file, .replica: break
+        }
         let data = Unmanaged.passUnretained(self).toOpaque()
         connect(manager, "script-message-with-reply-received::agterm", unsafeBitCast(onHtmlBridgeRequest, to: GCallback.self), data)
         for world in overlay.javascript ? ["agterm-bridge", ""] : ["agterm-bridge"] {

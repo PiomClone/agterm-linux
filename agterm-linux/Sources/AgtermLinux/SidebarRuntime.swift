@@ -18,6 +18,7 @@ final class SessionRowWidgets {
     var disclosure: OpaquePointer?
     var disclosureSlot: OpaquePointer?
     var foldedMarker: OpaquePointer?
+    var infoLabel: OpaquePointer?
     var applied: SidebarSnapshot.RowContent?
 
     init(row: OpaquePointer, box: OpaquePointer, lead: OpaquePointer, name: OpaquePointer,

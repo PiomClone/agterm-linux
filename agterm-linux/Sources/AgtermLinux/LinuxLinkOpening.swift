@@ -40,6 +40,16 @@ extension GhosttySurface {
             return controller.openSessionOverlay(id.uuidString, window: nil, options: ControlSessionOverlayOpenOptions(
                 command: "", cwd: nil, wait: false, sizePercent: sizePercent, backgroundColor: nil, follow: false,
                 pane: nil, page: .url(url), navigation: true, javascript: true, persistent: true, browse: true)).ok
+        case .image(let url, let id):
+            guard controller.terminalZoom.target == nil, controller.store.session(withID: id)?.hudActive != true else { return false }
+            return controller.openSessionOverlay(id.uuidString, window: nil, options: ControlSessionOverlayOpenOptions(
+                command: "", cwd: nil, wait: false, sizePercent: nil, backgroundColor: nil, follow: false,
+                pane: nil, page: .image(path: url.path))).ok
+        case .markdown(let url, let id, let sizePercent):
+            guard controller.terminalZoom.target == nil, controller.store.session(withID: id)?.hudActive != true else { return false }
+            return controller.openSessionOverlay(id.uuidString, window: nil, options: ControlSessionOverlayOpenOptions(
+                command: "", cwd: nil, wait: false, sizePercent: sizePercent, backgroundColor: nil, follow: false,
+                pane: nil, page: .markdown(path: url.path))).ok
         case .browser, .reveal, .ignore: return false
         }
     }

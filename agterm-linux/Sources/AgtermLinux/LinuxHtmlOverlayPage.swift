@@ -47,6 +47,7 @@ final class LinuxHtmlOverlayPage {
     private var theme: HtmlOverlayTheme
     private var appliedRevision: Int
     private var loadFailed = false
+    private var textLoad = 0
     private var pendingExternalURL: URL?
     private var pendingDialog: OpaquePointer?
     private var promptSilenced = false
@@ -95,6 +96,16 @@ final class LinuxHtmlOverlayPage {
             }
             webkit_user_content_manager_add_script(manager, script)
             webkit_user_script_unref(script)
+        }
+        if overlay.source.markdownPath != nil {
+            MarkdownAssets.shared.script.withCString { source in
+                let script = "agterm-markdown".withCString { world in
+                    webkit_user_script_new_for_world(source, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+                                                     WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, world, nil, nil)
+                }
+                webkit_user_content_manager_add_script(manager, script)
+                webkit_user_script_unref(script)
+            }
         }
         installBridge()
         buildUI()
@@ -150,7 +161,10 @@ final class LinuxHtmlOverlayPage {
         guard theme != newer || webkit_web_view_get_uri(cast(webView)) == nil else { return }
         theme = newer
         webkit_user_content_manager_remove_all_style_sheets(manager)
-        let themed: Bool = if case .url = overlay.source { false } else { true }
+        let themed: Bool = switch overlay.source {
+        case .url, .image: false
+        case .file, .replica, .markdown: true
+        }
         let look = themed ? "color-scheme: \(newer.dark ? "dark" : "light"); color: \(newer.foreground); " : ""
         let palette = newer.palette.enumerated().compactMap { index, color in
             color.isEmpty ? nil : "--agterm-color-\(index): \(color); "
@@ -182,6 +196,7 @@ final class LinuxHtmlOverlayPage {
             webkit_web_view_go_forward(cast(webView))
         case .browser:
             if case .replica = overlay.source { return OverlayHtmlError.remotePage }
+            if case .markdown = overlay.source { return OverlayHtmlError.markdownInOverlay }
             guard launchDefaultHandler(forURI: browserURL.absoluteString) else { return OverlayHtmlError.noBrowser }
         case .finder:
             guard case .file = overlay.source else { return OverlayHtmlError.finderRequiresFile }
@@ -235,7 +250,12 @@ final class LinuxHtmlOverlayPage {
     }
 
     private var browserURL: URL {
-        if case .file(let path, _) = overlay.source, overlay.current == nil { return URL(fileURLWithPath: path) }
+        switch overlay.source {
+        case .file(let path, _), .image(let path), .markdown(let path):
+            if overlay.current == nil { return URL(fileURLWithPath: path) }
+        case .replica, .url:
+            break
+        }
         return pageURL
     }
 
@@ -264,8 +284,45 @@ final class LinuxHtmlOverlayPage {
                 return
             }
             html.withCString { webkit_web_view_load_html(cast(webView), $0, nil) }
-        case .replica:
-            fail(OverlayHtmlError.remoteFile)
+        case .image(let path):
+            textLoad += 1
+            let load = textLoad
+            let pageID = id
+            DispatchQueue.global(qos: .userInitiated).async {
+                let page = ImageProbe.load(path: path).map { probe, data in
+                    ImagePage.html(data: data, mimeType: probe.mimeType)
+                }
+                runOnMain {
+                    MainActor.assumeIsolated {
+                        guard let self = LinuxHtmlOverlayRegistry.shared.existing(pageID), self.textLoad == load else { return }
+                        switch page {
+                        case .failure(let failure): self.fail(failure.description)
+                        case .success(let html):
+                            html.withCString { webkit_web_view_load_html(cast(self.webView), $0, nil) }
+                        }
+                    }
+                }
+            }
+        case .markdown(let path):
+            textLoad += 1
+            let load = textLoad
+            let pageID = id
+            let style = MarkdownAssets.shared.style
+            DispatchQueue.global(qos: .userInitiated).async {
+                let page = MarkdownProbe.load(path: path).map {
+                    MarkdownPage.html(markdown: $0.markdown, images: $0.images, style: style)
+                }
+                runOnMain {
+                    MainActor.assumeIsolated {
+                        guard let self = LinuxHtmlOverlayRegistry.shared.existing(pageID), self.textLoad == load else { return }
+                        switch page {
+                        case .failure(let failure): self.fail(failure.description)
+                        case .success(let html):
+                            html.withCString { webkit_web_view_load_html(cast(self.webView), $0, nil) }
+                        }
+                    }
+                }
+            }
         }
     }
 

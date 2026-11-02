@@ -427,7 +427,7 @@ final class ControlServer: @unchecked Sendable {
              .sessionOverlayHide, .sessionOverlayShow, .sessionOverlayToggle,
              .sessionRestart, .sessionOverlaySubmit, .keymapRun, .sessionClose, .sessionDuplicate, .sessionSelect, .sessionGo, .sessionRename, .sessionReveal,
              .sessionMove, .sessionType,
-             .sessionStatus, .sessionRestore, .sessionFlag, .sessionContext, .sessionSeen,
+             .sessionStatus, .sessionRestore, .sessionFlag, .sessionContext, .sessionInfo, .sessionSeen,
              .sessionSplit, .sessionSplitClose, .sessionSwap, .sessionLead, .sessionScratch, .sessionFocus,
              .sessionCopy, .sessionPaste, .sessionSelectAll, .sessionSearch,
              .sessionOverlayOpen, .sessionOverlayClose, .sessionOverlayResize, .sessionOverlayResult,
@@ -459,7 +459,8 @@ final class ControlServer: @unchecked Sendable {
              .pickOpen, .pickResult, .pickCancel, .askResult, .askCancel, .sidebarWidth,
              .restoreClear, .restoreCapture, .restoreMode, .recentClear, .version,
              .browserLinks, .recentList, .recentOpen, .sessionOverlayPageServe,
-             .browserClear, .zmxScreen, .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxPresent,
+             .browserClear, .zmxScreen, .zmxList, .zmxPrune, .zmxKill, .zmxReset, .zmxTree, .zmxAttach, .zmxAttachGroup, .zmxPresent,
+             .msgSend, .msgRead, .msgAck,
              .sessionOverlayJobRun, .debugAppearance:
             return .controller(gController)
         }
